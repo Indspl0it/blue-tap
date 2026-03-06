@@ -33,6 +33,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
   .vuln-medium {{ color: #ffaa00; }}
   .vuln-low {{ color: #88cc00; }}
   .vuln-info {{ color: #4488ff; }}
+  h4 {{ color: #ccc; margin-top: 15px; }}
   pre {{ background: #16213e; padding: 10px; border-radius: 4px; overflow-x: auto; }}
   .section {{ margin: 20px 0; padding: 15px; border: 1px solid #333; border-radius: 8px; }}
   .summary {{ background: #16213e; padding: 15px; border-radius: 8px; margin: 20px 0; }}
@@ -159,7 +160,20 @@ class ReportGenerator:
         sections.append('<div class="summary">')
         sections.append("<h2>Executive Summary</h2>")
         sections.append(f"<p>Devices scanned: {len(self.scan_results)}</p>")
-        sections.append(f"<p>Vulnerabilities found: {len(self.vuln_findings)}</p>")
+
+        # Break down vuln findings by evidence quality
+        confirmed = sum(1 for f in self.vuln_findings if f.get("status") == "confirmed")
+        potential = sum(1 for f in self.vuln_findings if f.get("status") == "potential")
+        unverified = sum(1 for f in self.vuln_findings if f.get("status") == "unverified")
+        high_sev = sum(1 for f in self.vuln_findings
+                       if f.get("severity", "").lower() in ("high", "critical"))
+        sections.append(f"<p>Findings: {len(self.vuln_findings)} total "
+                        f"(<span class='vuln-high'>{confirmed} confirmed</span>, "
+                        f"<span class='vuln-medium'>{potential} potential</span>, "
+                        f"<span class='vuln-info'>{unverified} unverified</span>)</p>")
+        if high_sev:
+            sections.append(f"<p class='vuln-high'>Critical/High severity: {high_sev}</p>")
+
         sections.append(f"<p>PBAP data sets: {len(self.pbap_results)}</p>")
         sections.append(f"<p>MAP data sets: {len(self.map_results)}</p>")
         if self.fuzz_results:
@@ -192,20 +206,41 @@ class ReportGenerator:
         # Vulnerability Findings
         if self.vuln_findings:
             sections.append('<div class="section">')
-            sections.append("<h2>Vulnerability Findings</h2>")
-            sections.append("<table><tr><th>Name</th><th>Severity</th>"
-                            "<th>Description</th><th>CVE</th></tr>")
-            for v in self.vuln_findings:
+            sections.append("<h2>Vulnerability &amp; Attack-Surface Findings</h2>")
+            sections.append("<table><tr><th>#</th><th>Severity</th><th>Status</th>"
+                            "<th>Name</th><th>CVE</th><th>Description</th></tr>")
+            for i, v in enumerate(self.vuln_findings, 1):
                 sev = v.get("severity", "info").lower()
                 css = {"high": "vuln-high", "critical": "vuln-high",
                        "medium": "vuln-medium", "low": "vuln-low"}.get(sev, "vuln-info")
+                status = v.get("status", "potential")
+                confidence = v.get("confidence", "")
+                status_display = f"{status} ({confidence})" if confidence else status
                 sections.append(
-                    f'<tr><td>{_esc(v.get("name", ""))}</td>'
-                    f'<td class="{css}">{_esc(sev)}</td>'
-                    f'<td>{_esc(v.get("description", ""))}</td>'
-                    f'<td>{_esc(v.get("cve", ""))}</td></tr>'
+                    f'<tr><td>{i}</td>'
+                    f'<td class="{css}">{_esc(sev.upper())}</td>'
+                    f'<td>{_esc(status_display)}</td>'
+                    f'<td>{_esc(v.get("name", ""))}</td>'
+                    f'<td>{_esc(v.get("cve", "N/A"))}</td>'
+                    f'<td>{_esc(v.get("description", ""))}</td></tr>'
                 )
             sections.append("</table>")
+
+            # Detailed findings with impact/remediation/evidence
+            sections.append("<h3>Finding Details</h3>")
+            for i, v in enumerate(self.vuln_findings, 1):
+                impact = v.get("impact", "")
+                remediation = v.get("remediation", "")
+                evidence = v.get("evidence", "")
+                if impact or remediation or evidence:
+                    sections.append(f"<h4>#{i}: {_esc(v.get('name', ''))}</h4>")
+                    if impact:
+                        sections.append(f"<p><strong>Impact:</strong> {_esc(impact)}</p>")
+                    if evidence:
+                        sections.append(f"<p><strong>Evidence:</strong> {_esc(evidence)}</p>")
+                    if remediation:
+                        sections.append(f"<p><strong>Remediation:</strong> {_esc(remediation)}</p>")
+
             sections.append("</div>")
 
         # Scan Results
@@ -244,7 +279,25 @@ class ReportGenerator:
             sections.append(f"<p>Message data sets collected: {len(self.map_results)}</p>")
             for path, data in self.map_results.items():
                 sections.append(f"<h3>{_esc(path)}</h3>")
-                sections.append(f"<pre>{_esc(json.dumps(data, indent=2)[:2000])}</pre>")
+                if isinstance(data, dict):
+                    listing = data.get("listing_file", "")
+                    messages = data.get("messages", [])
+                    if listing:
+                        sections.append(f"<p>Listing file: {_esc(listing)}</p>")
+                    if messages:
+                        sections.append(f"<p>Messages fetched: {len(messages)}</p>")
+                        sections.append("<table><tr><th>Handle</th><th>File</th></tr>")
+                        for msg in messages[:50]:  # Cap at 50 in report
+                            sections.append(
+                                f'<tr><td>{_esc(msg.get("handle", ""))}</td>'
+                                f'<td>{_esc(msg.get("file", ""))}</td></tr>')
+                        sections.append("</table>")
+                        if len(messages) > 50:
+                            sections.append(f"<p>... and {len(messages) - 50} more</p>")
+                    elif not listing:
+                        sections.append(f"<pre>{_esc(json.dumps(data, indent=2, default=str)[:2000])}</pre>")
+                else:
+                    sections.append(f"<pre>{_esc(json.dumps(data, indent=2, default=str)[:2000])}</pre>")
             sections.append("</div>")
 
         # Recon Results (RFCOMM/L2CAP scans)
@@ -307,7 +360,16 @@ class ReportGenerator:
         """Generate a machine-readable JSON report."""
         report = {
             "generated": datetime.now().isoformat(),
-            "tool": "BT-Tap v0.1.0",
+            "tool": "BT-Tap",
+            "summary": {
+                "devices_scanned": len(self.scan_results),
+                "total_findings": len(self.vuln_findings),
+                "confirmed": sum(1 for f in self.vuln_findings if f.get("status") == "confirmed"),
+                "potential": sum(1 for f in self.vuln_findings if f.get("status") == "potential"),
+                "unverified": sum(1 for f in self.vuln_findings if f.get("status") == "unverified"),
+                "high_severity": sum(1 for f in self.vuln_findings
+                                     if f.get("severity", "").lower() in ("high", "critical")),
+            },
             "scan_results": self.scan_results,
             "vulnerabilities": self.vuln_findings,
             "pbap_data": self.pbap_results,
