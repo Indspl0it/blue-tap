@@ -9,7 +9,7 @@ from rich.panel import Panel
 
 from bt_tap.utils.output import (
     banner, info, success, error, warning, verbose, debug,
-    device_table, service_table, vuln_table, channel_table,
+    device_table, service_table, channel_table,
     console, target, summary_panel,
     phase, step, result_box,
 )
@@ -1170,18 +1170,20 @@ def at_snarf(address, memory, entry_range):
 @click.option("-i", "--hci", default="hci0")
 @click.option("-o", "--output", default=None, help="Output file (JSON)")
 def vulnscan(address, hci, output):
-    """Scan target for known Bluetooth vulnerabilities.
+    """Scan target for vulnerabilities and attack-surface indicators.
 
     \b
-    Checks for: BlueBorne, KNOB, BIAS, BLURtooth, BLUFFS,
-    legacy pairing, open services, and more.
+    Evidence-based checks: SSP/legacy pairing, service exposure (active
+    RFCOMM probe), KNOB, BLURtooth, BIAS, BlueBorne, pairing method,
+    writable GATT characteristics. Findings are classified as confirmed,
+    potential, or unverified with confidence ratings.
     """
     address = resolve_address(address)
     if not address:
         return
     from bt_tap.attack.vuln_scanner import scan_vulnerabilities
     findings = scan_vulnerabilities(address, hci)
-    console.print(vuln_table(findings))
+    # scan_vulnerabilities already prints the table via _print_findings
     if output:
         _save_json(findings, output)
 

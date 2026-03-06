@@ -363,18 +363,31 @@ def vuln_table(findings: list[dict], title: str = "Vulnerability Findings") -> T
         header_style=Style(bold=True, color=RED),
         title_style=Style(bold=True, color=RED),
     )
+    status_styles = {
+        "confirmed": f"bold {GREEN}",
+        "potential": YELLOW,
+        "unverified": DIM,
+    }
     table.add_column("#", style=DIM, width=4, justify="right")
     table.add_column("Severity", width=10)
+    table.add_column("Status", width=12)
     table.add_column("Name", style="bold white")
     table.add_column("CVE", style=YELLOW)
-    table.add_column("Description", max_width=50)
+    table.add_column("Description", max_width=45)
     for i, v in enumerate(findings, 1):
         sev = v.get("severity", "info").lower()
         style = sev_styles.get(sev, "bt.blue")
         sev_display = f"[{style}]■ {sev.upper()}[/{style}]"
+        status = v.get("status", "potential")
+        st_style = status_styles.get(status, DIM)
+        status_display = f"[{st_style}]{status}[/{st_style}]"
+        conf = v.get("confidence", "")
+        if conf:
+            status_display += f" [dim]({conf})[/dim]"
         table.add_row(
             str(i),
             sev_display,
+            status_display,
             v.get("name", ""),
             v.get("cve", "N/A"),
             v.get("description", ""),

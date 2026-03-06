@@ -1,254 +1,423 @@
-"""Bluetooth vulnerability scanner for known CVEs.
+"""Bluetooth vulnerability and attack-surface scanner.
 
-Checks targets for susceptibility to known Bluetooth attacks:
-  - BlueBorne (CVE-2017-0781/1000251) - RCE, no pairing needed
-  - KNOB (CVE-2019-9506) - Encryption key negotiation downgrade
-  - BIAS (CVE-2020-10135) - Impersonation of paired devices
-  - BLURtooth (CVE-2020-15802) - Cross-transport key overwrite
-  - BLUFFS (2023) - Session key forcing
-  - PerfektBlue (2025) - Automotive AVRCP/RFCOMM RCE
+This scanner emphasizes evidence-based classification:
+- confirmed: directly observed behavior
+- potential: heuristic/version-based susceptibility
+- unverified: requires active exploit testing
 
-Also checks for:
-  - Legacy pairing (no SSP)
-  - JustWorks pairing (no MITM protection)
-  - Open/unauthenticated services
-  - Writable GATT characteristics
+It avoids declaring definitive CVE exploitation unless direct evidence exists.
 """
 
 import re
 
-from bt_tap.utils.bt_helpers import run_cmd, check_tool
 from bt_tap.recon.sdp import browse_services, check_ssp, get_raw_sdp
-from bt_tap.utils.output import info, success, error, warning, verbose, console, section, step, target, vuln_table, summary_panel
+from bt_tap.recon.rfcomm_scan import RFCOMMScanner
+from bt_tap.utils.bt_helpers import run_cmd, check_tool
+from bt_tap.utils.output import (
+    console,
+    info,
+    section,
+    success,
+    summary_panel,
+    verbose,
+    vuln_table,
+    warning,
+)
+
+
+def _finding(
+    severity: str,
+    name: str,
+    description: str,
+    *,
+    cve: str = "N/A",
+    impact: str = "",
+    remediation: str = "",
+    status: str = "potential",
+    confidence: str = "medium",
+    evidence: str = "",
+) -> dict:
+    return {
+        "severity": severity,
+        "name": name,
+        "description": description,
+        "impact": impact,
+        "cve": cve,
+        "remediation": remediation,
+        "status": status,
+        "confidence": confidence,
+        "evidence": evidence,
+    }
+
+
+def _parse_bt_version(raw_version: str | None) -> float | None:
+    if not raw_version:
+        return None
+    m = re.search(r"(\d+(?:\.\d+)?)", raw_version)
+    if not m:
+        return None
+    try:
+        return float(m.group(1))
+    except ValueError:
+        return None
+
+
+def _extract_lmp_version(address: str, hci: str) -> tuple[str | None, str]:
+    """Return (raw_lmp_version, evidence)."""
+    if not check_tool("hcitool"):
+        return None, "hcitool not available"
+
+    result = run_cmd(["hcitool", "-i", hci, "info", address], timeout=12)
+    if result.returncode != 0:
+        return None, f"hcitool info failed: {result.stderr.strip()}"
+
+    m = re.search(r"LMP Version:\s*(.+)", result.stdout)
+    if not m:
+        return None, "LMP Version not present in hcitool info output"
+
+    raw = m.group(1).strip()
+    return raw, f"LMP Version reported: {raw}"
+
+
+def _check_service_exposure(address: str, services: list[dict]) -> list[dict]:
+    """Actively probe sensitive RFCOMM services to determine reachability."""
+    findings: list[dict] = []
+
+    keywords = (
+        "pbap",
+        "phonebook",
+        "map",
+        "message",
+        "object push",
+        "file transfer",
+    )
+
+    targets = []
+    for svc in services:
+        name = svc.get("name", "")
+        lname = name.lower()
+        if not any(k in lname for k in keywords):
+            continue
+        if svc.get("protocol") != "RFCOMM":
+            continue
+        ch = svc.get("channel")
+        if isinstance(ch, int):
+            targets.append((name, ch))
+
+    if not targets:
+        return findings
+
+    scanner = RFCOMMScanner(address)
+    confirmed = []
+    blocked = []
+
+    for svc_name, ch in targets:
+        probe = scanner.probe_channel(ch, timeout=2.0)
+        if probe.get("status") == "open":
+            confirmed.append((svc_name, ch, probe.get("response_type", "unknown")))
+        else:
+            blocked.append((svc_name, ch, probe.get("status", "closed")))
+
+    if confirmed:
+        desc = ", ".join(f"{n} (ch {c})" for n, c, _ in confirmed)
+        evidence = "; ".join(
+            f"{n}/ch{c}=open({r})" for n, c, r in confirmed
+        )
+        findings.append(
+            _finding(
+                "MEDIUM",
+                "Sensitive RFCOMM Services Reachable",
+                f"Sensitive services are actively reachable over RFCOMM: {desc}",
+                impact="Data-access profiles may be reachable depending on target-side auth policy.",
+                remediation="Require authentication/authorization before allowing profile operations.",
+                status="confirmed",
+                confidence="high",
+                evidence=evidence,
+            )
+        )
+
+    if blocked and not confirmed:
+        evidence = "; ".join(f"{n}/ch{c}={s}" for n, c, s in blocked)
+        findings.append(
+            _finding(
+                "INFO",
+                "Sensitive Services Not Directly Reachable",
+                "Sensitive services were advertised but RFCOMM probe did not confirm direct access.",
+                status="confirmed",
+                confidence="medium",
+                evidence=evidence,
+            )
+        )
+
+    return findings
+
+
+def _check_knob(bt_version: float | None, raw_version: str | None) -> list[dict]:
+    findings: list[dict] = []
+    if bt_version is None:
+        return findings
+
+    if bt_version < 5.1:
+        findings.append(
+            _finding(
+                "MEDIUM",
+                "KNOB Susceptibility (CVE-2019-9506)",
+                "Bluetooth version is in the potentially affected range (<5.1).",
+                cve="CVE-2019-9506",
+                impact="Potential key-length downgrade if target/host stack lacks patch-level mitigations.",
+                remediation="Validate vendor patch level and enforce minimum encryption key length.",
+                status="potential",
+                confidence="low",
+                evidence=f"Version heuristic from LMP Version: {raw_version}",
+            )
+        )
+    return findings
+
+
+def _check_blurtooth(bt_version: float | None, raw_version: str | None) -> list[dict]:
+    findings: list[dict] = []
+    if bt_version is None:
+        return findings
+
+    if 4.2 <= bt_version <= 5.0:
+        findings.append(
+            _finding(
+                "MEDIUM",
+                "BLURtooth Susceptibility (CVE-2020-15802)",
+                "Bluetooth version is in the commonly affected CTKD range (4.2 to 5.0).",
+                cve="CVE-2020-15802",
+                impact="Potential cross-transport key overwrite depending on stack behavior and patch level.",
+                remediation="Confirm CTKD hardening in vendor stack updates.",
+                status="potential",
+                confidence="low",
+                evidence=f"Version heuristic from LMP Version: {raw_version}",
+            )
+        )
+    return findings
+
+
+def _check_bias(ssp: bool | None) -> list[dict]:
+    findings: list[dict] = []
+    if ssp is False:
+        return findings
+
+    findings.append(
+        _finding(
+            "INFO",
+            "BIAS Requires Active Validation (CVE-2020-10135)",
+            "BIAS cannot be confirmed from passive metadata. Active role-switch/auth testing is required.",
+            cve="CVE-2020-10135",
+            remediation="Run active BIAS test tooling and verify vendor patch level.",
+            status="unverified",
+            confidence="low",
+            evidence=f"SSP probe result: {ssp}",
+        )
+    )
+    return findings
+
+
+def _check_blueborne(address: str) -> list[dict]:
+    findings: list[dict] = []
+    raw_sdp = get_raw_sdp(address)
+    if "BlueZ" not in raw_sdp:
+        return findings
+
+    m = re.search(r"BlueZ\s+(\d+\.\d+)", raw_sdp)
+    if not m:
+        return findings
+
+    try:
+        bluez_ver = float(m.group(1))
+    except ValueError:
+        return findings
+
+    if bluez_ver < 5.47:
+        findings.append(
+            _finding(
+                "HIGH",
+                "BlueBorne Susceptibility Indicator (CVE-2017-1000251)",
+                "Observed BlueZ version string appears older than 5.47.",
+                cve="CVE-2017-1000251",
+                impact="Potential legacy BlueBorne exposure if this BlueZ version is authoritative for the target stack.",
+                remediation="Verify actual stack version and backported patches; update vendor firmware.",
+                status="potential",
+                confidence="medium",
+                evidence=f"SDP contains BlueZ {m.group(1)}",
+            )
+        )
+    return findings
+
+
+def _check_pairing_method(address: str, hci: str) -> list[dict]:
+    findings: list[dict] = []
+    try:
+        from bt_tap.recon.hci_capture import detect_pairing_mode
+
+        mode = detect_pairing_mode(address, hci)
+        method = mode.get("pairing_method", "Unknown")
+        if method == "Just Works":
+            findings.append(
+                _finding(
+                    "MEDIUM",
+                    "Just Works Pairing Observed",
+                    "Pairing method resolved to Just Works (no MITM confirmation).",
+                    impact="Susceptible to machine-in-the-middle during pairing under appropriate conditions.",
+                    remediation="Prefer Numeric Comparison / Passkey with user confirmation.",
+                    status="confirmed",
+                    confidence="medium",
+                    evidence=f"Pairing probe result: {method}",
+                )
+            )
+        elif method != "Unknown":
+            findings.append(
+                _finding(
+                    "INFO",
+                    "Pairing Method Identified",
+                    f"Pairing method observed: {method}",
+                    status="confirmed",
+                    confidence="medium",
+                    evidence=f"Pairing probe result: {method}",
+                )
+            )
+    except Exception as exc:
+        verbose(f"Pairing mode probe unavailable: {exc}")
+
+    return findings
+
+
+def _check_writable_gatt(address: str) -> list[dict]:
+    findings: list[dict] = []
+    try:
+        from bt_tap.recon.gatt import enumerate_services_sync
+
+        services = enumerate_services_sync(address)
+    except Exception as exc:
+        verbose(f"GATT enumeration unavailable: {exc}")
+        return findings
+
+    writable = []
+    for svc in services:
+        for char in svc.get("characteristics", []):
+            props = {p.lower() for p in char.get("properties", [])}
+            if "write" in props or "write-without-response" in props:
+                writable.append(
+                    {
+                        "service": svc.get("description", "Unknown"),
+                        "char": char.get("description", "Unknown"),
+                        "uuid": char.get("uuid", ""),
+                        "props": sorted(props),
+                    }
+                )
+
+    if writable:
+        sample = ", ".join(f"{w['char']} ({w['uuid']})" for w in writable[:5])
+        findings.append(
+            _finding(
+                "INFO",
+                "Writable GATT Characteristics Present",
+                f"Found {len(writable)} writable characteristic(s). Sample: {sample}",
+                impact="Writable characteristics increase attack surface; exploitability depends on authz and value validation.",
+                remediation="Require authentication and strict value validation for sensitive writes.",
+                status="confirmed",
+                confidence="medium",
+                evidence=f"Enumerated writable GATT chars: {len(writable)}",
+            )
+        )
+
+    return findings
 
 
 def scan_vulnerabilities(address: str, hci: str = "hci0") -> list[dict]:
-    """Run all vulnerability checks against a target."""
-    info(f"Scanning {address} for known vulnerabilities...")
-    findings = []
+    """Run vulnerability and attack-surface checks against a target.
 
-    # Check 1: SSP support
+    Output is evidence-based and intentionally avoids definitive CVE claims
+    without active exploit verification.
+    """
+    info(f"Scanning {address} for vulnerabilities and attack-surface indicators...")
+    findings: list[dict] = []
+
     section("Check 1: Secure Simple Pairing", style="bt.cyan")
     ssp = check_ssp(address)
     if ssp is False:
-        findings.append({
-            "severity": "HIGH",
-            "name": "No SSP Support",
-            "description": "Device does not advertise SSP. May use legacy PIN pairing.",
-            "impact": "Legacy pairing uses E21/E22 which is vulnerable to offline brute-force.",
-            "cve": "N/A",
-            "remediation": "Ensure SSP is enabled on the device.",
-        })
-        warning("NO SSP detected - legacy pairing may be vulnerable")
+        findings.append(
+            _finding(
+                "MEDIUM",
+                "Legacy Pairing Indicator (No SSP Advertised)",
+                "Target did not advertise Secure Simple Pairing in SDP output.",
+                impact="May rely on legacy pairing workflows, depending on target implementation.",
+                remediation="Verify pairing policy and require SSP-capable pairing modes.",
+                status="potential",
+                confidence="medium",
+                evidence="SDP browse output did not include SSP markers",
+            )
+        )
+        warning("SSP not advertised; possible legacy pairing behavior")
     elif ssp is True:
-        info("SSP supported")
+        success("SSP support advertised")
     else:
         warning("Could not determine SSP support")
-    verbose(f"SSP probe result: {ssp}")
 
-    # Check 2: Open services (no authentication)
-    section("Check 2: Service Enumeration", style="bt.cyan")
+    section("Check 2: Service Exposure", style="bt.cyan")
     services = browse_services(address)
-    open_services = []
-    for svc in services:
-        # Services accessible without authentication
-        name = svc.get("name", "").lower()
-        if any(kw in name for kw in ["pbap", "phonebook", "map", "message",
-                                       "object push", "file transfer"]):
-            open_services.append(svc)
+    findings.extend(_check_service_exposure(address, services))
 
-    if open_services:
-        findings.append({
-            "severity": "MEDIUM",
-            "name": "Sensitive Services Exposed",
-            "description": f"{len(open_services)} data-access services found: " +
-                          ", ".join(s.get("name", "?") for s in open_services),
-            "impact": "PBAP/MAP/OPP services allow phonebook, SMS, and file access if connected.",
-            "cve": "N/A",
-            "remediation": "Ensure services require authentication before data access.",
-        })
-        for svc in open_services:
-            warning(f"  Exposed: {svc.get('name')} (ch={svc.get('channel')})")
-    verbose(f"Services found: {len(services)}, sensitive: {len(open_services)}")
-
-    # Check 3: L2CAP ping (device reachable)
-    section("Check 3: L2CAP Reachability", style="bt.cyan")
-    l2ping_result = run_cmd(["l2ping", "-c", "3", "-t", "5", address], timeout=20)
-    if l2ping_result.returncode == 0:
-        lines = l2ping_result.stdout.strip().splitlines()
-        info(f"Device is L2CAP reachable: {lines[-1] if lines else '(no output)'}")
+    section("Check 3: Reachability", style="bt.cyan")
+    if check_tool("l2ping"):
+        l2ping = run_cmd(["l2ping", "-c", "3", "-t", "5", address], timeout=20)
+        if l2ping.returncode == 0:
+            lines = l2ping.stdout.strip().splitlines()
+            info(f"Device is L2CAP reachable: {lines[-1] if lines else '(no output)'}")
+        else:
+            warning("L2CAP ping failed - out of range, blocked, or unavailable")
     else:
-        warning("L2CAP ping failed - device may be out of range or filtering")
-    verbose(f"l2ping exit code: {l2ping_result.returncode}")
+        warning("l2ping not available; skipping reachability probe")
 
-    # Check 4: Bluetooth version and features
-    section("Check 4: Device Features & Version", style="bt.cyan")
-    info_result = run_cmd(["hcitool", "-i", hci, "info", address], timeout=10)
-    bt_version = None
-    if info_result.returncode == 0:
-        output = info_result.stdout
-        # Extract LMP version
-        ver_match = re.search(r"LMP Version:\s*(\S+)", output)
-        if ver_match:
-            bt_version = ver_match.group(1)
-            info(f"LMP Version: {bt_version}")
+    section("Check 4: Version-Derived CVE Heuristics", style="bt.cyan")
+    raw_version, ver_evidence = _extract_lmp_version(address, hci)
+    bt_version = _parse_bt_version(raw_version)
+    if raw_version:
+        info(f"LMP Version: {raw_version}")
+    else:
+        warning(f"Bluetooth version unavailable ({ver_evidence})")
 
-        # Check for feature bits that indicate vulnerability
-        if "Encryption" not in output:
-            findings.append({
-                "severity": "HIGH",
-                "name": "Encryption Not Supported",
-                "description": "Device does not advertise encryption support.",
-                "impact": "All traffic is in cleartext.",
-                "cve": "N/A",
-            })
-    verbose(f"BT version detected: {bt_version}, encryption in features: {'Encryption' in (info_result.stdout if info_result.returncode == 0 else '')}")
+    findings.extend(_check_knob(bt_version, raw_version))
+    findings.extend(_check_blurtooth(bt_version, raw_version))
+    findings.extend(_check_bias(ssp))
+    findings.extend(_check_blueborne(address))
 
-    # Check 5: KNOB vulnerability assessment
-    section("Check 5: KNOB Attack Susceptibility", style="bt.cyan")
-    _check_knob(address, bt_version, findings)
+    section("Check 5: Pairing Method Probe", style="bt.cyan")
+    findings.extend(_check_pairing_method(address, hci))
 
-    # Check 6: BIAS vulnerability assessment
-    section("Check 6: BIAS Attack Susceptibility", style="bt.cyan")
-    _check_bias(address, ssp, findings)
+    section("Check 6: BLE Writable Surface", style="bt.cyan")
+    findings.extend(_check_writable_gatt(address))
 
-    # Check 7: BLURtooth assessment
-    section("Check 7: BLURtooth Susceptibility", style="bt.cyan")
-    _check_blurtooth(address, bt_version, findings)
-
-    # Check 8: BlueBorne assessment
-    section("Check 8: BlueBorne Susceptibility", style="bt.cyan")
-    _check_blueborne(address, bt_version, findings)
-
-    # Summary
     _print_findings(address, findings)
     return findings
 
 
-def _check_knob(address: str, bt_version: str | None, findings: list):
-    """Check KNOB (Key Negotiation of Bluetooth) susceptibility.
-
-    CVE-2019-9506: Spec-level flaw allowing encryption key length downgrade.
-    Patched in BT 5.1+ with minimum key size enforcement.
-    """
-    # KNOB is a spec-level flaw - all BT 1.0-5.0 devices are potentially affected
-    if bt_version:
-        try:
-            major = float(bt_version.split()[0]) if bt_version else 0
-        except (ValueError, IndexError):
-            major = 0
-        if major < 5.1:
-            findings.append({
-                "severity": "HIGH",
-                "name": "KNOB Attack (CVE-2019-9506)",
-                "description": f"BT version {bt_version} may be vulnerable to KNOB. "
-                               "Attacker can force 1-byte encryption key during negotiation.",
-                "impact": "Encryption can be brute-forced in real-time, enabling traffic decryption.",
-                "cve": "CVE-2019-9506",
-                "remediation": "Update firmware to enforce minimum 7-byte key length.",
-                "tool": "BlueToolkit: ./bluetoolkit.py -t <addr> -e knob",
-            })
-            warning("Potentially vulnerable to KNOB (key negotiation downgrade)")
-        else:
-            info("BT 5.1+ - KNOB should be mitigated")
-        verbose(f"KNOB check: BT version={bt_version}, parsed major={major}")
-    else:
-        info("Could not determine BT version for KNOB check")
-        verbose("KNOB check skipped: bt_version is None")
-
-
-def _check_bias(address: str, ssp_supported: bool | None, findings: list):
-    """Check BIAS (Bluetooth Impersonation Attacks) susceptibility.
-
-    CVE-2020-10135: Exploits legacy authentication + role-switching.
-    """
-    # BIAS requires SSP but exploits the legacy auth fallback
-    findings.append({
-        "severity": "MEDIUM",
-        "name": "BIAS Attack (CVE-2020-10135)",
-        "description": "BIAS exploits legacy authentication procedures during role-switch. "
-                       "Cannot fully determine without active testing.",
-        "impact": "Attacker can impersonate a previously paired device.",
-        "cve": "CVE-2020-10135",
-        "remediation": "Apply vendor patches. Disable legacy auth. Require mutual authentication.",
-        "tool": "BlueToolkit: ./bluetoolkit.py -t <addr> -e bias",
-    })
-    info("BIAS susceptibility requires active testing (use BlueToolkit)")
-    verbose(f"BIAS check: SSP supported={ssp_supported}, added as MEDIUM finding")
-
-
-def _check_blurtooth(address: str, bt_version: str | None, findings: list):
-    """Check BLURtooth (CTKD key overwrite) susceptibility.
-
-    CVE-2020-15802: Affects BT 4.2-5.0 dual-mode devices.
-    """
-    if bt_version:
-        try:
-            ver_str = bt_version.split()[0] if bt_version else "0"
-            major = float(ver_str)
-        except (ValueError, IndexError):
-            major = 0
-        if 4.2 <= major <= 5.0:
-            findings.append({
-                "severity": "MEDIUM",
-                "name": "BLURtooth (CVE-2020-15802)",
-                "description": f"BT {bt_version} is in the affected range (4.2-5.0) for CTKD attacks.",
-                "impact": "Attacker can overwrite authenticated keys with unauthenticated ones via CTKD.",
-                "cve": "CVE-2020-15802",
-                "remediation": "Update to BT 5.1+ or apply vendor CTKD restrictions.",
-            })
-            warning("In BLURtooth-affected BT version range")
-        else:
-            info(f"BT {bt_version} - outside BLURtooth range")
-        verbose(f"BLURtooth check: BT version={bt_version}, parsed major={major}, in range={4.2 <= major <= 5.0}")
-
-
-def _check_blueborne(address: str, bt_version: str | None, findings: list):
-    """Check BlueBorne susceptibility.
-
-    CVE-2017-0781/1000251: RCE via L2CAP/SDP/BNEP, no pairing needed.
-    Largely patched post-2017, but many automotive IVIs run old firmware.
-    """
-    # SDP raw dump can sometimes reveal old BlueZ version strings
-    raw_sdp = get_raw_sdp(address)
-    if "BlueZ" in raw_sdp:
-        match = re.search(r"BlueZ\s+(\d+\.\d+)", raw_sdp)
-        if match:
-            bluez_ver = float(match.group(1))
-            if bluez_ver < 5.47:
-                findings.append({
-                    "severity": "CRITICAL",
-                    "name": "BlueBorne (CVE-2017-1000251)",
-                    "description": f"BlueZ {match.group(1)} detected. Versions < 5.47 are vulnerable.",
-                    "impact": "Remote code execution without pairing or user interaction.",
-                    "cve": "CVE-2017-1000251",
-                    "remediation": "Update BlueZ to 5.47+.",
-                    "tool": "git clone https://github.com/mailinneberg/BlueBorne",
-                })
-                error(f"CRITICAL: BlueBorne vulnerable BlueZ {match.group(1)}")
-                return
-    info("Could not detect BlueZ version in SDP. Manual testing recommended.")
-    verbose(f"BlueBorne check: BlueZ string found={'BlueZ' in raw_sdp}, raw SDP length={len(raw_sdp)}")
-
-
-def _print_findings(address: str, findings: list):
-    """Print vulnerability findings summary."""
+def _print_findings(address: str, findings: list[dict]):
+    """Print vulnerability findings summary with evidence quality context."""
     console.print()
     if not findings:
-        success(f"No known vulnerabilities detected on {address}")
+        success(f"No indicators found on {address} from available checks")
         return
 
     console.print(vuln_table(findings))
 
-    # Summary
+    confirmed = sum(1 for f in findings if f.get("status") == "confirmed")
+    potential = sum(1 for f in findings if f.get("status") == "potential")
+    unverified = sum(1 for f in findings if f.get("status") == "unverified")
     high = sum(1 for f in findings if f.get("severity", "").lower() in ("high", "critical"))
-    medium = sum(1 for f in findings if f.get("severity", "").lower() == "medium")
-    low = sum(1 for f in findings if f.get("severity", "").lower() == "low")
 
-    summary_panel("Vulnerability Scan Summary", {
-        "Target": address,
-        "Total Findings": str(len(findings)),
-        "Critical/High": str(high),
-        "Medium": str(medium),
-        "Low/Info": str(low),
-    }, style="red" if high > 0 else "yellow" if medium > 0 else "green")
+    summary_panel(
+        "Vulnerability Scan Summary",
+        {
+            "Target": address,
+            "Total Findings": str(len(findings)),
+            "Confirmed": str(confirmed),
+            "Potential": str(potential),
+            "Unverified": str(unverified),
+            "Critical/High Severity": str(high),
+        },
+        style="red" if high > 0 else "yellow" if potential > 0 else "green",
+    )
