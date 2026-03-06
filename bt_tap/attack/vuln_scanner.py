@@ -19,9 +19,7 @@ import re
 
 from bt_tap.utils.bt_helpers import run_cmd, check_tool
 from bt_tap.recon.sdp import browse_services, check_ssp, get_raw_sdp
-from bt_tap.utils.output import info, success, error, warning, console
-
-from rich.table import Table
+from bt_tap.utils.output import info, success, error, warning, verbose, console, section, step, target, vuln_table, summary_panel
 
 
 def scan_vulnerabilities(address: str, hci: str = "hci0") -> list[dict]:
@@ -30,7 +28,7 @@ def scan_vulnerabilities(address: str, hci: str = "hci0") -> list[dict]:
     findings = []
 
     # Check 1: SSP support
-    console.print("\n[bold]Check 1: Secure Simple Pairing[/bold]")
+    section("Check 1: Secure Simple Pairing", style="bt.cyan")
     ssp = check_ssp(address)
     if ssp is False:
         findings.append({
@@ -46,9 +44,10 @@ def scan_vulnerabilities(address: str, hci: str = "hci0") -> list[dict]:
         info("SSP supported")
     else:
         warning("Could not determine SSP support")
+    verbose(f"SSP probe result: {ssp}")
 
     # Check 2: Open services (no authentication)
-    console.print("\n[bold]Check 2: Service Enumeration[/bold]")
+    section("Check 2: Service Enumeration", style="bt.cyan")
     services = browse_services(address)
     open_services = []
     for svc in services:
@@ -70,17 +69,19 @@ def scan_vulnerabilities(address: str, hci: str = "hci0") -> list[dict]:
         })
         for svc in open_services:
             warning(f"  Exposed: {svc.get('name')} (ch={svc.get('channel')})")
+    verbose(f"Services found: {len(services)}, sensitive: {len(open_services)}")
 
     # Check 3: L2CAP ping (device reachable)
-    console.print("\n[bold]Check 3: L2CAP Reachability[/bold]")
+    section("Check 3: L2CAP Reachability", style="bt.cyan")
     l2ping_result = run_cmd(["l2ping", "-c", "3", "-t", "5", address], timeout=20)
     if l2ping_result.returncode == 0:
         info(f"Device is L2CAP reachable: {l2ping_result.stdout.strip().splitlines()[-1]}")
     else:
         warning("L2CAP ping failed - device may be out of range or filtering")
+    verbose(f"l2ping exit code: {l2ping_result.returncode}")
 
     # Check 4: Bluetooth version and features
-    console.print("\n[bold]Check 4: Device Features & Version[/bold]")
+    section("Check 4: Device Features & Version", style="bt.cyan")
     info_result = run_cmd(["hcitool", "-i", hci, "info", address], timeout=10)
     bt_version = None
     if info_result.returncode == 0:
@@ -100,21 +101,22 @@ def scan_vulnerabilities(address: str, hci: str = "hci0") -> list[dict]:
                 "impact": "All traffic is in cleartext.",
                 "cve": "N/A",
             })
+    verbose(f"BT version detected: {bt_version}, encryption in features: {'Encryption' in (info_result.stdout if info_result.returncode == 0 else '')}")
 
     # Check 5: KNOB vulnerability assessment
-    console.print("\n[bold]Check 5: KNOB Attack Susceptibility[/bold]")
+    section("Check 5: KNOB Attack Susceptibility", style="bt.cyan")
     _check_knob(address, bt_version, findings)
 
     # Check 6: BIAS vulnerability assessment
-    console.print("\n[bold]Check 6: BIAS Attack Susceptibility[/bold]")
+    section("Check 6: BIAS Attack Susceptibility", style="bt.cyan")
     _check_bias(address, ssp, findings)
 
     # Check 7: BLURtooth assessment
-    console.print("\n[bold]Check 7: BLURtooth Susceptibility[/bold]")
+    section("Check 7: BLURtooth Susceptibility", style="bt.cyan")
     _check_blurtooth(address, bt_version, findings)
 
     # Check 8: BlueBorne assessment
-    console.print("\n[bold]Check 8: BlueBorne Susceptibility[/bold]")
+    section("Check 8: BlueBorne Susceptibility", style="bt.cyan")
     _check_blueborne(address, bt_version, findings)
 
     # Summary
@@ -148,8 +150,10 @@ def _check_knob(address: str, bt_version: str | None, findings: list):
             warning("Potentially vulnerable to KNOB (key negotiation downgrade)")
         else:
             info("BT 5.1+ - KNOB should be mitigated")
+        verbose(f"KNOB check: BT version={bt_version}, parsed major={major}")
     else:
         info("Could not determine BT version for KNOB check")
+        verbose("KNOB check skipped: bt_version is None")
 
 
 def _check_bias(address: str, ssp_supported: bool | None, findings: list):
@@ -169,6 +173,7 @@ def _check_bias(address: str, ssp_supported: bool | None, findings: list):
         "tool": "BlueToolkit: ./bluetoolkit.py -t <addr> -e bias",
     })
     info("BIAS susceptibility requires active testing (use BlueToolkit)")
+    verbose(f"BIAS check: SSP supported={ssp_supported}, added as MEDIUM finding")
 
 
 def _check_blurtooth(address: str, bt_version: str | None, findings: list):
@@ -194,6 +199,7 @@ def _check_blurtooth(address: str, bt_version: str | None, findings: list):
             warning("In BLURtooth-affected BT version range")
         else:
             info(f"BT {bt_version} - outside BLURtooth range")
+        verbose(f"BLURtooth check: BT version={bt_version}, parsed major={major}, in range={4.2 <= major <= 5.0}")
 
 
 def _check_blueborne(address: str, bt_version: str | None, findings: list):
@@ -221,6 +227,7 @@ def _check_blueborne(address: str, bt_version: str | None, findings: list):
                 error(f"CRITICAL: BlueBorne vulnerable BlueZ {match.group(1)}")
                 return
     info("Could not detect BlueZ version in SDP. Manual testing recommended.")
+    verbose(f"BlueBorne check: BlueZ string found={'BlueZ' in raw_sdp}, raw SDP length={len(raw_sdp)}")
 
 
 def _print_findings(address: str, findings: list):
@@ -230,28 +237,17 @@ def _print_findings(address: str, findings: list):
         success(f"No known vulnerabilities detected on {address}")
         return
 
-    table = Table(title=f"Vulnerability Findings: {address}", show_lines=True)
-    table.add_column("Severity", style="bold")
-    table.add_column("Vulnerability")
-    table.add_column("CVE")
-    table.add_column("Impact")
+    console.print(vuln_table(findings))
 
-    severity_styles = {
-        "CRITICAL": "bold red",
-        "HIGH": "red",
-        "MEDIUM": "yellow",
-        "LOW": "dim",
-    }
+    # Summary
+    high = sum(1 for f in findings if f.get("severity", "").lower() in ("high", "critical"))
+    medium = sum(1 for f in findings if f.get("severity", "").lower() == "medium")
+    low = sum(1 for f in findings if f.get("severity", "").lower() == "low")
 
-    for f in sorted(findings, key=lambda x: ["CRITICAL", "HIGH", "MEDIUM", "LOW"].index(x.get("severity", "LOW"))):
-        sev = f.get("severity", "LOW")
-        style = severity_styles.get(sev, "white")
-        table.add_row(
-            f"[{style}]{sev}[/{style}]",
-            f["name"],
-            f.get("cve", "N/A"),
-            f.get("impact", ""),
-        )
-
-    console.print(table)
-    console.print(f"\n[bold]{len(findings)} finding(s)[/bold] total")
+    summary_panel("Vulnerability Scan Summary", {
+        "Target": address,
+        "Total Findings": str(len(findings)),
+        "Critical/High": str(high),
+        "Medium": str(medium),
+        "Low/Info": str(low),
+    }, style="red" if high > 0 else "yellow" if medium > 0 else "green")
