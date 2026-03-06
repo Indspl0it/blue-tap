@@ -179,11 +179,20 @@ def resolve_address(
 ) -> str | None:
     """Return address if provided, otherwise launch interactive picker.
 
+    Validates MAC format when provided. Returns None on invalid input.
+
     Usage in CLI commands:
         address = resolve_address(address)
         if not address:
             return
     """
     if address:
-        return address
+        from bt_tap.utils.bt_helpers import validate_mac
+        # Normalize common separators before validation
+        cleaned = address.replace("-", ":").upper()
+        if not validate_mac(cleaned):
+            from bt_tap.utils.output import error
+            error(f"Invalid MAC address: {address}")
+            return None
+        return cleaned
     return pick_device(prompt=prompt, scan_duration=scan_duration, hci=hci)

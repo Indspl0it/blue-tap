@@ -155,7 +155,7 @@ def detect_pairing_mode(address: str, hci: str = "hci0") -> dict:
         Dict with keys: ssp_supported, io_capability, pairing_method, raw_excerpt.
     """
     result = {
-        "ssp_supported": False,
+        "ssp_supported": None,  # None = unknown (probe failed), True/False = determined
         "io_capability": "Unknown",
         "pairing_method": "Unknown",
         "raw_excerpt": "",
@@ -169,6 +169,7 @@ def detect_pairing_mode(address: str, hci: str = "hci0") -> dict:
 
     cap = HCICapture()
     if not cap.start(tmp_path):
+        warning("HCI capture failed to start — SSP result is inconclusive")
         return result
 
     try:
@@ -227,6 +228,10 @@ def detect_pairing_mode(address: str, hci: str = "hci0") -> dict:
                     result["pairing_method"] = "Passkey Entry"
 
         result["raw_excerpt"] = "\n".join(relevant[:20])
+
+        # If we got HCI data but no SSP indicators, SSP is likely unsupported
+        if result["ssp_supported"] is None and lines:
+            result["ssp_supported"] = False
 
         # Cancel / remove the pairing so we don't leave state behind
         run_cmd(["bluetoothctl", "cancel-pairing", address], timeout=5)

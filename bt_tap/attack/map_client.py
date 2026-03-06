@@ -189,6 +189,8 @@ class MAPClient:
 
     def dump_all_messages(self, output_dir: str = "map_dump") -> dict:
         """Dump all messages from all folders."""
+        import re as _re
+
         os.makedirs(output_dir, exist_ok=True)
         results = {}
 
@@ -199,11 +201,34 @@ class MAPClient:
                 listing_file = os.path.join(output_dir, f"{folder_name}_listing.xml")
                 with open(listing_file, "w") as f:
                     f.write(listing)
-                results[folder] = {"listing_file": listing_file}
+                results[folder] = {"listing_file": listing_file, "messages": []}
                 success(f"Saved listing: {listing_file}")
 
-                # TODO: Parse XML listing for handles and fetch each message
-                # This requires XML parsing of the MAP listing format
+                # Parse message handles from XML listing
+                # MAP listing XML uses <msg handle="XXXX" .../>
+                handles = _re.findall(r'handle\s*=\s*"([^"]+)"', listing)
+                if handles:
+                    info(f"Found {len(handles)} message handle(s) in {folder_name}")
+                    msg_dir = os.path.join(output_dir, folder_name)
+                    os.makedirs(msg_dir, exist_ok=True)
+
+                    for handle in handles:
+                        try:
+                            content = self.get_message(handle)
+                            if content:
+                                msg_file = os.path.join(msg_dir, f"{handle}.bmsg")
+                                with open(msg_file, "w") as f:
+                                    f.write(content)
+                                results[folder]["messages"].append({
+                                    "handle": handle,
+                                    "file": msg_file,
+                                })
+                        except OSError as e:
+                            warning(f"Failed to fetch message {handle}: {e}")
+
+                    fetched = len(results[folder]["messages"])
+                    if fetched:
+                        success(f"Fetched {fetched}/{len(handles)} messages from {folder_name}")
 
         return results
 

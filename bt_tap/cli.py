@@ -379,7 +379,7 @@ def recon_pairing_mode(address, hci):
 
     result = detect_pairing_mode(address, hci)
     panel_text = (
-        f"[cyan]SSP Supported:[/cyan] {result.get('ssp_supported', 'Unknown')}\n"
+        f"[cyan]SSP Supported:[/cyan] {result.get('ssp_supported') if result.get('ssp_supported') is not None else 'Inconclusive (probe failed)'}\n"
         f"[cyan]IO Capability:[/cyan] {result.get('io_capability', 'Unknown')}\n"
         f"[cyan]Pairing Method:[/cyan] {result.get('pairing_method', 'Unknown')}"
     )

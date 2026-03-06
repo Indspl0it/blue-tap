@@ -23,9 +23,18 @@ def browse_services(address: str) -> list[dict]:
 
 
 def parse_sdp_output(output: str) -> list[dict]:
-    """Parse sdptool browse output into structured service records."""
+    """Parse sdptool browse output into structured service records.
+
+    sdptool outputs protocol info across multiple lines, e.g.:
+        Protocol Descriptor List:
+          "L2CAP" (0x0100)
+          "RFCOMM" (0x0003)
+            Channel: 3
+    We track which protocol was last seen to associate Channel/PSM lines.
+    """
     services = []
     current = None
+    last_protocol = None  # Track last seen protocol for multi-line parsing
 
     for line in output.splitlines():
         line = line.strip()
@@ -34,14 +43,16 @@ def parse_sdp_output(output: str) -> list[dict]:
             if current:
                 services.append(current)
             current = {"name": line.split(":", 1)[1].strip()}
+            last_protocol = None
 
         elif line.startswith("Service RecHandle:"):
             if current is None:
                 current = {"name": "Unknown"}
             current["handle"] = line.split(":", 1)[1].strip()
+            last_protocol = None
 
         elif line.startswith("Service Class ID List:"):
-            pass  # Next line has the UUID
+            last_protocol = None
 
         elif line.startswith('"') and current:
             # UUID line like: "Headset Audio Gateway" (0x1112)
@@ -52,16 +63,40 @@ def parse_sdp_output(output: str) -> list[dict]:
                 current.setdefault("class_ids", []).append(uuid_name)
                 current["profile"] = PROFILE_UUIDS.get(uuid_hex, uuid_name)
 
+                # Track protocol context for channel/PSM on following lines
+                if "RFCOMM" in uuid_name:
+                    last_protocol = "RFCOMM"
+                elif "L2CAP" in uuid_name:
+                    last_protocol = "L2CAP"
+
         elif "Protocol Descriptor List:" in line:
-            pass
+            last_protocol = None
 
         elif "RFCOMM" in line and current:
+            last_protocol = "RFCOMM"
+            # Channel may be on the same line (some sdptool versions)
             m = re.search(r"Channel:\s*(\d+)", line)
             if m:
                 current["protocol"] = "RFCOMM"
                 current["channel"] = int(m.group(1))
 
         elif "L2CAP" in line and current:
+            last_protocol = "L2CAP"
+            # PSM may be on the same line
+            m = re.search(r"PSM:\s*(\S+)", line)
+            if m:
+                current["protocol"] = "L2CAP"
+                current["channel"] = m.group(1)
+
+        elif line.startswith("Channel:") and current and last_protocol == "RFCOMM":
+            # Channel on its own line after "RFCOMM" line
+            m = re.search(r"Channel:\s*(\d+)", line)
+            if m:
+                current["protocol"] = "RFCOMM"
+                current["channel"] = int(m.group(1))
+
+        elif line.startswith("PSM:") and current and last_protocol == "L2CAP":
+            # PSM on its own line after "L2CAP" line
             m = re.search(r"PSM:\s*(\S+)", line)
             if m:
                 current["protocol"] = "L2CAP"
@@ -74,7 +109,7 @@ def parse_sdp_output(output: str) -> list[dict]:
             current.setdefault("protocols", []).append("GOEP")
 
         elif "Profile Descriptor List:" in line:
-            pass
+            last_protocol = None
 
         elif current and re.match(r'".*?"\s*\(0x[0-9A-Fa-f]+\)', line):
             m = re.match(r'"(.+?)"\s*\((0x[0-9A-Fa-f]+)\)', line)
