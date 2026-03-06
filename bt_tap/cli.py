@@ -27,7 +27,7 @@ def main(verbose):
     Modules:
       adapter    - HCI adapter management
       scan       - Discover BT Classic and BLE devices
-      recon      - Enumerate services, fingerprint, channel scanning, Ubertooth capture
+      recon      - Enumerate services, fingerprint, channel scanning, nRF52840/USRP B210 capture
       spoof      - MAC address spoofing and device impersonation
       pbap       - Phone Book Access Profile (phonebook, call logs)
       map        - Message Access Profile (SMS/MMS)
@@ -387,44 +387,64 @@ def recon_pairing_mode(address, hci):
     console.print(Panel(panel_text, title="Pairing Mode Detection", border_style="cyan"))
 
 
-@recon.command("ubertooth-scan")
+@recon.command("nrf-scan")
 @click.option("-d", "--duration", default=30, help="Scan duration (seconds)")
-def recon_ubertooth_scan(duration):
-    """Scan for active BR/EDR piconets using Ubertooth One."""
-    from bt_tap.recon.ubertooth import UbertoothCapture
+def recon_nrf_scan(duration):
+    """Scan BLE advertisers using nRF52840 dongle."""
+    from bt_tap.recon.sniffer import NRFBLESniffer
 
-    cap = UbertoothCapture()
-    if not cap.is_available():
-        error("Ubertooth tools not found. Install: apt install ubertooth")
-        return
+    sniffer = NRFBLESniffer()
+    sniffer.scan_advertisers(duration)
+
+
+@recon.command("usrp-scan")
+@click.option("-d", "--duration", default=30, help="Scan duration (seconds)")
+def recon_usrp_scan(duration):
+    """Scan for BR/EDR piconets using USRP B210."""
+    from bt_tap.recon.sniffer import USRPCapture
+
+    cap = USRPCapture()
     cap.scan_piconets(duration)
 
 
-@recon.command("ubertooth-follow")
-@click.argument("address", required=False, default=None)
-@click.option("-o", "--output", default="bt_capture.pcap", help="Output pcap file")
-@click.option("-d", "--duration", default=120, help="Capture duration (seconds)")
-def recon_ubertooth_follow(address, output, duration):
-    """Follow a device's piconet and capture traffic to pcap."""
-    address = resolve_address(address)
-    if not address:
-        return
-    from bt_tap.recon.ubertooth import UbertoothCapture
-
-    cap = UbertoothCapture()
-    cap.follow_piconet(address, output, duration)
-
-
-@recon.command("ubertooth-ble")
+@recon.command("nrf-sniff")
 @click.option("-t", "--target", default=None, help="BLE address to follow")
 @click.option("-o", "--output", default="ble_pairing.pcap", help="Output pcap file")
 @click.option("-d", "--duration", default=120, help="Capture duration (seconds)")
-def recon_ubertooth_ble(target, output, duration):
-    """Sniff BLE pairing exchanges using Ubertooth One."""
-    from bt_tap.recon.ubertooth import UbertoothCapture
+def recon_nrf_sniff(target, output, duration):
+    """Sniff BLE pairing exchanges using nRF52840 dongle."""
+    from bt_tap.recon.sniffer import NRFBLESniffer
 
-    cap = UbertoothCapture()
-    cap.sniff_ble_pairing(output, duration, follow_addr=target)
+    sniffer = NRFBLESniffer()
+    sniffer.sniff_pairing(output, duration, target=target)
+
+
+@recon.command("usrp-follow")
+@click.argument("address", required=False, default=None)
+@click.option("-o", "--output", default="bt_capture.pcap", help="Output pcap file")
+@click.option("-d", "--duration", default=120, help="Capture duration (seconds)")
+def recon_usrp_follow(address, output, duration):
+    """Follow a BR/EDR piconet and capture traffic using USRP B210."""
+    address = resolve_address(address)
+    if not address:
+        return
+    from bt_tap.recon.sniffer import USRPCapture
+
+    cap = USRPCapture()
+    cap.follow_piconet(address, output, duration)
+
+
+@recon.command("usrp-capture")
+@click.option("-o", "--output", default="raw_capture.iq", help="Output IQ file")
+@click.option("-d", "--duration", default=60, help="Capture duration (seconds)")
+@click.option("--freq", default=2441000000, help="Center frequency (Hz)")
+@click.option("--rate", default=4000000, help="Sample rate (Hz)")
+def recon_usrp_capture(output, duration, freq, rate):
+    """Raw IQ capture with USRP B210."""
+    from bt_tap.recon.sniffer import USRPCapture
+
+    cap = USRPCapture()
+    cap.capture_raw_iq(output, duration, freq, rate)
 
 
 @recon.command("crack-key")
@@ -432,7 +452,7 @@ def recon_ubertooth_ble(target, output, duration):
 @click.option("-o", "--output", default=None, help="Output decrypted pcap")
 def recon_crack_key(pcap_file, output):
     """Crack BLE pairing key from captured pcap using Crackle."""
-    from bt_tap.recon.ubertooth import CrackleRunner
+    from bt_tap.recon.sniffer import CrackleRunner
 
     runner = CrackleRunner()
     result = runner.crack_ble(pcap_file, output)
@@ -447,7 +467,7 @@ def recon_crack_key(pcap_file, output):
 @click.argument("pcap_file")
 def recon_extract_link_key(pcap_file):
     """Extract BR/EDR link key from captured pairing pcap (via tshark)."""
-    from bt_tap.recon.ubertooth import LinkKeyExtractor
+    from bt_tap.recon.sniffer import LinkKeyExtractor
 
     extractor = LinkKeyExtractor()
     result = extractor.extract_from_pcap(pcap_file)
@@ -465,10 +485,10 @@ def recon_inject_link_key(remote_mac, link_key, hci, key_type):
     """Inject a recovered link key into BlueZ for impersonation.
 
     \b
-    After recovering a link key (via Ubertooth capture + crack, or other means),
+    After recovering a link key (via nRF/USRP capture + crack, or other means),
     inject it so bluetoothctl can connect using the stolen key.
     """
-    from bt_tap.recon.ubertooth import LinkKeyExtractor
+    from bt_tap.recon.sniffer import LinkKeyExtractor
 
     extractor = LinkKeyExtractor()
     adapter_mac = extractor.get_adapter_mac(hci)

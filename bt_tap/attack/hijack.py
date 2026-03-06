@@ -11,7 +11,7 @@ Attack Flow:
 
 Note on link keys:
 - If the IVI uses SSP with stored link keys, this attack requires either:
-  a) Sniffing the original pairing exchange (Ubertooth + crackle)
+  a) Sniffing the original pairing exchange (nRF52840/USRP B210 + crackle)
   b) Forcing re-pairing by deleting pairing on IVI side
   c) Exploiting BIAS vulnerability (CVE-2020-10135)
   d) Some IVIs accept connections without mutual authentication

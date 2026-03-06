@@ -20,7 +20,7 @@ Affected versions:
   - Patches: Bluetooth SIG advisory June 2020, vendor-specific firmware updates
 
 Prerequisites:
-  - Ubertooth One or modified BlueZ stack for LMP manipulation
+  - USRP B210 + gr-bluetooth or modified BlueZ stack for LMP manipulation
   - InternalBlue framework (for Broadcom/Cypress chipset firmware patching)
   - Target must have an existing pairing (we impersonate one side)
 

