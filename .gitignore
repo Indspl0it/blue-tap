@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+*.wav
+*.log
+*.pid
+.claude/cache/
+.claude/tsc-cache/
