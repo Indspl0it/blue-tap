@@ -9,6 +9,7 @@ This targets devices using legacy pairing (Bluetooth 2.0 and older IVIs)
 where a fixed 4-digit PIN is expected.
 """
 
+import os
 import select
 import subprocess
 import time
@@ -136,10 +137,10 @@ class PINBruteForce:
                     break
                 ready, _, _ = select.select([proc.stdout], [], [], min(remaining, 0.2))
                 if ready:
-                    chunk = proc.stdout.read(1024)
+                    chunk = os.read(proc.stdout.fileno(), 4096)
                     if not chunk:
                         break
-                    output_buf += chunk
+                    output_buf += chunk.decode("utf-8", errors="replace")
 
                 if not pin_sent and ("Enter PIN" in output_buf or "Passkey" in output_buf):
                     proc.stdin.write(pin + "\n")

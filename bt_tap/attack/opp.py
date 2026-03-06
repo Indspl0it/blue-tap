@@ -123,6 +123,9 @@ class OPPClient:
                     error("PUT failed mid-transfer")
                     return False
 
+            success(f"Pushed: {filename}")
+            return True
+
         response = self._recv()
         if response and response[0] == OBEX_RESPONSE_SUCCESS:
             success(f"Pushed: {filename}")

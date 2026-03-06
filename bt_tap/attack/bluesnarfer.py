@@ -198,6 +198,8 @@ class ATClient:
 
     def send_sms(self, number: str, message: str) -> str:
         """Send an SMS (if supported)."""
+        if not self.sock:
+            return ""
         self.send_at("AT+CMGF=1")  # Text mode
         self.sock.send(f'AT+CMGS="{number}"\r'.encode())
         time.sleep(0.5)

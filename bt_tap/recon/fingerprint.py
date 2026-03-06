@@ -81,7 +81,7 @@ def fingerprint_device(address: str) -> dict:
 
     # Check profiles for IVI-typical combination
     profile_names = [p["profile"] for p in fp["profiles"]]
-    has_hfp_ag = any("HFP" in p or "Hands-Free" in p and "AG" in p for p in profile_names)
+    has_hfp_ag = any(("HFP" in p or "Hands-Free" in p) and "AG" in p for p in profile_names)
     has_a2dp_sink = any("A2DP" in p and "Sink" in p for p in profile_names)
     has_pbap = any("PBAP" in p or "Phonebook" in p for p in profile_names)
 

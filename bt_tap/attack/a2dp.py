@@ -96,7 +96,7 @@ def get_active_profile(mac: str) -> str:
             in_card = True
         elif in_card and "Active Profile:" in line:
             return line.split(":", 1)[1].strip()
-        elif in_card and line.strip() == "" and "Name:" in line:
+        elif in_card and line.strip() == "":
             in_card = False
     return "unknown"
 
@@ -271,6 +271,7 @@ def record_car_mic(mac: str, output_file: str = "car_mic.wav",
         output_file,
     ]
 
+    proc = None
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         info(f"Recording started (PID: {proc.pid})")
@@ -282,10 +283,12 @@ def record_car_mic(mac: str, output_file: str = "car_mic.wav",
             # Record until interrupted
             proc.wait()
     except KeyboardInterrupt:
-        proc.terminate()
-        proc.wait(timeout=5)
+        if proc:
+            proc.terminate()
+            proc.wait(timeout=5)
     except subprocess.TimeoutExpired:
-        proc.kill()
+        if proc:
+            proc.kill()
     except Exception as e:
         error(f"Recording failed: {e}")
         if auto_setup:
@@ -326,6 +329,8 @@ def live_eavesdrop(mac: str, auto_setup: bool = True):
     info(f"Live eavesdrop from {source} -> laptop speakers")
     info("Press Ctrl+C to stop")
 
+    record = None
+    play = None
     try:
         record = subprocess.Popen(
             ["parecord", f"--device={source}", f"--rate={rate}",
@@ -340,11 +345,16 @@ def live_eavesdrop(mac: str, auto_setup: bool = True):
     except KeyboardInterrupt:
         pass
     finally:
-        try:
-            record.terminate()
-            play.terminate()
-        except Exception:
-            pass
+        if record:
+            try:
+                record.terminate()
+            except Exception:
+                pass
+        if play:
+            try:
+                play.terminate()
+            except Exception:
+                pass
         if auto_setup:
             unmute_laptop_mic()
         info("Live eavesdrop stopped")
