@@ -161,6 +161,33 @@ class AutoDiscovery:
             warning(f"Report generation failed: {e}")
             results["phases"]["report"] = {"status": "failed", "error": str(e)}
 
-        results["status"] = "complete"
-        console.rule("[bold green]Auto Attack Complete")
+        # Determine overall status from phase results
+        failed = []
+        succeeded = []
+        for name, phase_data in results["phases"].items():
+            if not isinstance(phase_data, dict):
+                continue
+            s = phase_data.get("status", "")
+            if s in ("success", "complete", "ready"):
+                succeeded.append(name)
+            elif s == "failed":
+                failed.append(name)
+            elif name == "hijack" and "phases" in phase_data:
+                # Nested hijack result — check sub-phases
+                sub_failed = any(
+                    v.get("status") == "failed"
+                    for v in phase_data["phases"].values()
+                    if isinstance(v, dict)
+                )
+                (failed if sub_failed else succeeded).append(name)
+
+        if not failed:
+            results["status"] = "complete"
+        elif succeeded:
+            results["status"] = "partial"
+        else:
+            results["status"] = "failed"
+
+        color = {"complete": "green", "partial": "yellow", "failed": "red"}[results["status"]]
+        console.rule(f"[bold {color}]Auto Attack {results['status'].title()}")
         return results

@@ -106,7 +106,7 @@ class HFPClient:
         """Establish Service Level Connection (SLC) with AT command handshake."""
         info("Setting up HFP Service Level Connection...")
 
-        # Step 1: Exchange supported features
+        # Step 1: Exchange supported features (mandatory for SLC)
         response = self._send_at(f"AT+BRSF={HFP_HF_FEATURES}")
         if "+BRSF:" in response:
             try:
@@ -114,12 +114,18 @@ class HFPClient:
                 info(f"AG features: 0x{self.ag_features:04x}")
             except (ValueError, IndexError):
                 pass
+        elif not response or "ERROR" in response:
+            error("SLC failed: feature exchange (AT+BRSF) rejected or no response")
+            return False
 
-        # Step 2: Get indicator mapping
+        # Step 2: Get indicator mapping (mandatory for SLC)
         response = self._send_at("AT+CIND=?")
         if "+CIND:" in response:
             self._parse_indicator_mapping(response)
             info(f"Indicators: {list(self.indicators.keys())}")
+        elif not response or "ERROR" in response:
+            error("SLC failed: indicator query (AT+CIND=?) rejected or no response")
+            return False
 
         # Step 3: Get current indicator values
         response = self._send_at("AT+CIND?")
@@ -131,8 +137,8 @@ class HFPClient:
         if "OK" not in response:
             warning("Indicator reporting may not be enabled")
 
-        # Step 5: Query call hold features
-        response = self._send_at("AT+CHLD=?")
+        # Step 5: Query call hold features (optional)
+        self._send_at("AT+CHLD=?")
 
         self.slc_established = True
         success("HFP SLC established")

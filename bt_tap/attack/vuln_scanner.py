@@ -75,7 +75,8 @@ def scan_vulnerabilities(address: str, hci: str = "hci0") -> list[dict]:
     section("Check 3: L2CAP Reachability", style="bt.cyan")
     l2ping_result = run_cmd(["l2ping", "-c", "3", "-t", "5", address], timeout=20)
     if l2ping_result.returncode == 0:
-        info(f"Device is L2CAP reachable: {l2ping_result.stdout.strip().splitlines()[-1]}")
+        lines = l2ping_result.stdout.strip().splitlines()
+        info(f"Device is L2CAP reachable: {lines[-1] if lines else '(no output)'}")
     else:
         warning("L2CAP ping failed - device may be out of range or filtering")
     verbose(f"l2ping exit code: {l2ping_result.returncode}")

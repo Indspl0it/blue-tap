@@ -35,8 +35,17 @@ def mac_to_pa_id(mac: str) -> str:
 
 
 def bt_source_name(mac: str) -> str:
-    """Get the bluez input (microphone/source) device name for a MAC."""
+    """Get the bluez HFP/HSP microphone input device name for a MAC."""
     return f"bluez_input.{mac_to_pa_id(mac)}.0"
+
+
+def bt_a2dp_source_name(mac: str) -> str:
+    """Get the bluez A2DP media source device name for a MAC.
+
+    A2DP audio from a remote device (e.g., IVI playing music to us)
+    appears as bluez_source, not bluez_input (which is HFP mic).
+    """
+    return f"bluez_source.{mac_to_pa_id(mac)}.a2dp_sink"
 
 
 def bt_sink_name(mac: str) -> str:
@@ -435,12 +444,38 @@ def stream_mic_to_car(mac: str, mic_source: str | None = None) -> bool:
 
 
 def stop_loopback() -> bool:
-    """Stop all module-loopback instances."""
+    """Stop all module-loopback instances.
+
+    Lists loaded modules to find loopback indices, then unloads each by
+    index. This works on both PulseAudio and PipeWire (unload-by-name
+    only works on PulseAudio).
+    """
+    # First try by name (works on PulseAudio)
     result = run_cmd(["pactl", "unload-module", "module-loopback"])
     if result.returncode == 0:
         success("All loopback modules unloaded")
         return True
-    warning(f"Unload result: {result.stderr.strip()}")
+
+    # Fallback: find loopback module indices and unload each
+    list_result = run_cmd(["pactl", "list", "modules", "short"])
+    if list_result.returncode != 0:
+        warning(f"Cannot list modules: {list_result.stderr.strip()}")
+        return False
+
+    unloaded = 0
+    for line in list_result.stdout.splitlines():
+        if "module-loopback" in line:
+            parts = line.split("\t")
+            if parts:
+                idx = parts[0].strip()
+                r = run_cmd(["pactl", "unload-module", idx])
+                if r.returncode == 0:
+                    unloaded += 1
+
+    if unloaded > 0:
+        success(f"Unloaded {unloaded} loopback module(s)")
+        return True
+    warning("No loopback modules found to unload")
     return False
 
 
@@ -456,7 +491,7 @@ def capture_a2dp(mac: str | None = None, output_file: str = "a2dp_capture.wav",
     Otherwise falls back to auto-detection.
     """
     if source is None and mac:
-        source = bt_source_name(mac)
+        source = bt_a2dp_source_name(mac)
     elif source is None:
         sources = list_bt_audio_sources()
         if sources:
