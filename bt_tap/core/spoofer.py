@@ -69,11 +69,11 @@ def restore_original_mac(hci: str, method: str = "auto") -> bool:
 def spoof_bdaddr(hci: str, target_mac: str) -> bool:
     """Spoof adapter MAC address using bdaddr (CSR chipset tool).
 
-    Requirements: bdaddr tool (from bluez-utils or build from source)
+    Requirements: bdaddr tool (typically build from source, or use distro package if available)
     Works with: CSR-based USB Bluetooth adapters
     """
     if not check_tool("bdaddr"):
-        error("bdaddr not found. Install: apt install bluez-utils or build from BlueZ source")
+        error("bdaddr not found. Install from your distro package if available, or build from BlueZ source")
         return False
 
     target_mac = normalize_mac(target_mac)

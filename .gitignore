@@ -6,6 +6,7 @@ dist/
 build/
 .eggs/
 *.wav
+*.pdf
 *.log
 *.pid
 .claude/cache/

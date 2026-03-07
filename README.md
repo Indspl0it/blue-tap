@@ -176,16 +176,26 @@ BT-Tap is designed for automotive IVI systems but works against any Bluetooth Cl
 ### System Packages
 
 ```bash
-# Debian/Ubuntu/Kali
+# Debian/Ubuntu
 sudo apt update
 sudo apt install -y \
     bluetooth bluez bluez-tools \
+    bluez-hcidump \
+    libbluetooth-dev \
+    libdbus-1-dev libglib2.0-dev \
+    pulseaudio-module-bluetooth \
+    python3-dev python3-pip
+
+# Kali Linux
+sudo apt update
+sudo apt install -y \
+    bluetooth bluez bluez-tools \
+    bluez-hcidump \
     libbluetooth-dev \
     libdbus-1-dev libglib2.0-dev \
     pulseaudio-module-bluetooth \
     python3-dev python3-pip \
-    hcitool sdptool btmon \
-    bdaddr
+    spooftooph bluesnarfer
 
 # Arch Linux
 sudo pacman -S bluez bluez-utils pulseaudio-bluetooth python-dbus python-gobject
@@ -197,11 +207,9 @@ bluetoothctl show
 ### Optional Tools
 
 ```bash
-# For MAC spoofing (if bdaddr isn't available)
-sudo apt install spooftooph
-
-# For AT command extraction via bluesnarfer
-sudo apt install bluesnarfer
+# Ubuntu 24.04 users: spooftooph and bluesnarfer are not in default apt repos.
+# Use btmgmt spoofing method instead:
+# sudo bt-tap spoof mac 11:22:33:44:55:66 -m btmgmt
 
 # For external fuzzing (Bluetooth Stack Smasher)
 # Build from: https://github.com/pwarren/BSS
