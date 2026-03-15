@@ -74,8 +74,14 @@ _LOGO = r"""
   [#00aacc]██████[/#00aacc]     [#0088bb]██[/#0088bb]              [#8833cc]██[/#8833cc]    [#aa33dd]██[/#aa33dd]   [#aa33dd]██[/#aa33dd] [#ff5588]██[/#ff5588]
 """
 
+_BANNER_SHOWN = False
+
 def banner():
-    """Print the BT-Tap ASCII art banner."""
+    """Print the BT-Tap ASCII art banner (once per process)."""
+    global _BANNER_SHOWN
+    if _BANNER_SHOWN:
+        return
+    _BANNER_SHOWN = True
     console.print(_LOGO, highlight=False)
     tagline = (
         "[bt.dim]───────── [/bt.dim]"
@@ -297,6 +303,8 @@ def device_table(devices: list[dict], title: str = "Discovered Devices") -> Tabl
     table.add_column("Name", style="bold white")
     table.add_column("RSSI", style=YELLOW, justify="right")
     table.add_column("Type", style=BLUE)
+    table.add_column("Class", style=DIM)
+    table.add_column("Dist", style=DIM, justify="right")
     for i, dev in enumerate(devices, 1):
         rssi = str(dev.get("rssi", "N/A"))
         rssi_style = ""
@@ -312,12 +320,22 @@ def device_table(devices: list[dict], title: str = "Discovered Devices") -> Tabl
                 rssi = f"[{rssi_style}]{rssi} dBm[/{rssi_style}]"
             except ValueError:
                 pass
+        # Device class info
+        class_info = dev.get("class_info", {})
+        class_str = class_info.get("major", "") if class_info else ""
+        if class_info.get("minor") and class_info["minor"] != "Unknown":
+            class_str = class_info["minor"]
+        # Distance
+        dist = dev.get("distance_m")
+        dist_str = f"~{dist}m" if dist else ""
         table.add_row(
             str(i),
             dev.get("address", "N/A"),
             dev.get("name", "Unknown"),
             rssi,
             dev.get("type", "Classic"),
+            class_str,
+            dist_str,
         )
     return table
 
@@ -336,6 +354,7 @@ def service_table(services: list[dict], title: str = "Services") -> Table:
     table.add_column("Protocol", style=CYAN)
     table.add_column("Channel/PSM", style=YELLOW, justify="right")
     table.add_column("Profile", style=PURPLE)
+    table.add_column("Ver", style=DIM, width=5)
     for i, svc in enumerate(services, 1):
         table.add_row(
             str(i),
@@ -343,6 +362,7 @@ def service_table(services: list[dict], title: str = "Services") -> Table:
             svc.get("protocol", "N/A"),
             str(svc.get("channel", "N/A")),
             svc.get("profile", ""),
+            svc.get("profile_version", ""),
         )
     return table
 

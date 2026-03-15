@@ -2,7 +2,6 @@
 
 import json
 import os
-import subprocess
 
 from bt_tap.utils.bt_helpers import (
     run_cmd, validate_mac, normalize_mac, check_tool,
@@ -81,30 +80,40 @@ def spoof_bdaddr(hci: str, target_mac: str) -> bool:
     info(f"Original address: {original}")
     info(f"Spoofing {hci} -> {target_mac}")
 
-    try:
-        # Write new address
-        result = run_cmd(["sudo", "bdaddr", "-i", hci, target_mac])
-        if result.returncode != 0:
-            error(f"bdaddr failed: {result.stderr.strip()}")
+    # Write new address
+    result = run_cmd(["sudo", "bdaddr", "-i", hci, target_mac])
+    combined_output = (result.stdout + result.stderr).lower()
+
+    # Check for hardware rejection even on exit code 0
+    rejection_patterns = [
+        "hardware does not allow",
+        "not supported",
+        "operation not permitted",
+        "input/output error",
+        "command disallowed",
+    ]
+    for pattern in rejection_patterns:
+        if pattern in combined_output:
+            error(f"bdaddr: hardware rejected change ({pattern})")
             return False
 
-        # Reset adapter to apply
-        run_cmd(["sudo", "hciconfig", hci, "reset"])
-        run_cmd(["sudo", "hciconfig", hci, "down"])
-        run_cmd(["sudo", "hciconfig", hci, "up"])
+    if result.returncode != 0:
+        error(f"bdaddr failed: {result.stderr.strip()}")
+        return False
 
-        # Verify
-        new_addr = get_adapter_address(hci)
-        if new_addr and new_addr.upper() == target_mac.upper():
-            success(f"Spoofed successfully: {hci} = {new_addr}")
-            return True
-        else:
-            warning(f"Address after reset: {new_addr} (expected {target_mac})")
-            warning("Some adapters need physical replug to apply. Try spooftooph as alternative.")
-            return False
+    # Reset adapter to apply
+    run_cmd(["sudo", "hciconfig", hci, "reset"])
+    run_cmd(["sudo", "hciconfig", hci, "down"])
+    run_cmd(["sudo", "hciconfig", hci, "up"])
 
-    except subprocess.CalledProcessError as e:
-        error(f"Spoof failed: {e}")
+    # Verify
+    new_addr = get_adapter_address(hci)
+    if new_addr and new_addr.upper() == target_mac.upper():
+        success(f"Spoofed successfully: {hci} = {new_addr}")
+        return True
+    else:
+        warning(f"Address after reset: {new_addr} (expected {target_mac})")
+        warning("Some adapters need physical replug to apply. Try spooftooph as alternative.")
         return False
 
 
@@ -121,11 +130,35 @@ def spoof_spooftooph(hci: str, target_mac: str) -> bool:
     info(f"Spoofing {hci} -> {target_mac} via spooftooph")
 
     result = run_cmd(["sudo", "spooftooph", "-i", hci, "-a", target_mac])
-    if result.returncode == 0:
-        success(f"Spoofed {hci} to {target_mac}")
+    combined_output = (result.stdout + result.stderr).lower()
+
+    # Check for hardware rejection messages even if return code is 0
+    rejection_patterns = [
+        "hardware does not allow",
+        "not supported",
+        "can't set bdaddr",
+        "operation not permitted",
+        "input/output error",
+        "not possible",
+        "command disallowed",
+    ]
+    for pattern in rejection_patterns:
+        if pattern in combined_output:
+            error(f"spooftooph: hardware rejected change ({pattern})")
+            return False
+
+    if result.returncode != 0:
+        error(f"spooftooph failed: {result.stderr.strip()}")
+        return False
+
+    # Verify the address actually changed (return code alone is unreliable)
+    new_addr = get_adapter_address(hci)
+    if new_addr and new_addr.upper() == target_mac.upper():
+        success(f"Spoofed {hci} to {target_mac} (verified)")
         return True
     else:
-        error(f"spooftooph failed: {result.stderr.strip()}")
+        warning(f"spooftooph returned success but address is still {new_addr} (expected {target_mac})")
+        warning("Hardware likely does not support MAC spoofing via this method.")
         return False
 
 
@@ -138,25 +171,45 @@ def spoof_btmgmt(hci: str, target_mac: str) -> bool:
     idx = hci.replace("hci", "")
     info(f"Spoofing via btmgmt index {idx} -> {target_mac}")
 
+    rejection_patterns = [
+        "not supported",
+        "invalid params",
+        "rejected",
+        "not powered",
+        "command disallowed",
+        "hardware does not allow",
+    ]
+
     # Power down first
     run_cmd(["sudo", "btmgmt", "--index", idx, "power", "off"])
 
-    # Set public address
+    # Try public-addr first (changes BD_ADDR for BR/EDR + BLE public)
     result = run_cmd(["sudo", "btmgmt", "--index", idx, "public-addr", target_mac])
-    if result.returncode != 0:
-        warning(f"btmgmt public-addr failed: {result.stderr.strip()}")
-        # Try static-addr for BLE
-        result = run_cmd(["sudo", "btmgmt", "--index", idx, "static-addr", target_mac])
+    combined = (result.stdout + result.stderr).lower()
+    public_failed = result.returncode != 0 or any(p in combined for p in rejection_patterns)
+
+    if public_failed:
+        warning(f"btmgmt public-addr not supported: {result.stderr.strip() or result.stdout.strip()}")
+        # static-addr only sets BLE random address, not the BD_ADDR visible in
+        # hciconfig. It won't help for BR/EDR spoofing so skip it to avoid
+        # false hope.
+        info("static-addr only affects BLE random address, skipping for BR/EDR spoof")
 
     # Power back on
     run_cmd(["sudo", "btmgmt", "--index", idx, "power", "on"])
 
+    if public_failed:
+        warning(f"btmgmt method not supported on this adapter")
+        return False
+
+    # Verify address actually changed
     new_addr = get_adapter_address(hci)
     if new_addr and new_addr.upper() == target_mac.upper():
         success(f"Spoofed via btmgmt: {hci} = {new_addr}")
         return True
     else:
-        warning(f"btmgmt method may not be supported on this adapter (got: {new_addr})")
+        warning(f"btmgmt returned success but address is still {new_addr} (expected {target_mac})")
+        warning("Hardware accepted command but did not change address.")
         return False
 
 
@@ -165,6 +218,10 @@ def spoof_address(hci: str, target_mac: str, method: str = "auto") -> bool:
 
     Methods: auto, bdaddr, spooftooph, btmgmt
     """
+    from bt_tap.utils.bt_helpers import ensure_adapter_ready
+    if not ensure_adapter_ready(hci):
+        return False
+
     target_mac = normalize_mac(target_mac)
 
     # Save original MAC before any spoofing attempt
@@ -205,10 +262,19 @@ def clone_device_identity(hci: str, target_mac: str, target_name: str,
         return False
 
     try:
-        set_device_name(hci, target_name)
-        set_device_class(hci, device_class)
-        success(f"Full identity clone complete on {hci}")
-        return True
+        name_ok = set_device_name(hci, target_name)
+        class_ok = set_device_class(hci, device_class)
+        if name_ok and class_ok:
+            success(f"Full identity clone complete on {hci}")
+            return True
+        else:
+            failed = []
+            if not name_ok:
+                failed.append("name")
+            if not class_ok:
+                failed.append("class")
+            warning(f"Identity clone partial: MAC spoofed but {', '.join(failed)} set failed")
+            return True  # MAC is spoofed, which is the critical part
     except Exception as e:
         error(f"Identity clone partial failure: {e}")
         return False

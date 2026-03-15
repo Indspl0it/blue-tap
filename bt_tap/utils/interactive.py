@@ -12,16 +12,22 @@ from bt_tap.utils.output import (
 _cached_devices: list[dict] = []
 
 
-def _scan_devices(scan_duration: int = 8, hci: str = "hci0") -> list[dict]:
-    """Run a Classic BT scan and return device list."""
+def _scan_devices(scan_duration: int = 8, hci: str = "hci0",
+                    include_ble: bool = False) -> list[dict]:
+    """Run a BT scan and return device list."""
     global _cached_devices
 
-    from bt_tap.core.scanner import scan_classic
-
     section("Device Discovery", style="bt.cyan")
-    info(f"Scanning for nearby Bluetooth devices ({scan_duration}s)...")
 
-    devices = scan_classic(scan_duration, hci)
+    if include_ble:
+        from bt_tap.core.scanner import scan_all
+        info(f"Scanning Classic + BLE ({scan_duration}s)...")
+        devices = scan_all(scan_duration, hci)
+    else:
+        from bt_tap.core.scanner import scan_classic
+        info(f"Scanning Classic BT ({scan_duration}s)...")
+        devices = scan_classic(scan_duration, hci)
+
     if devices:
         _cached_devices = devices
         success(f"Found {len(devices)} device(s)")
@@ -127,7 +133,12 @@ def pick_two_devices(
         ).strip()
         if manual.lower() == "q" or not manual:
             return None
-        return (ivi_addr, manual)
+        from bt_tap.utils.bt_helpers import validate_mac
+        cleaned = manual.replace("-", ":").upper()
+        if not validate_mac(cleaned):
+            error(f"Invalid MAC address: {manual}")
+            return None
+        return (ivi_addr, cleaned)
 
     console.print()
     info("Remaining devices:")
