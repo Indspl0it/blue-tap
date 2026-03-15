@@ -18,7 +18,7 @@ from bt_tap.utils.interactive import resolve_address, pick_two_devices
 
 
 @click.group()
-@click.version_option(version="1.0.0")
+@click.version_option(version="1.5.0")
 @click.option("-v", "--verbose", count=True, help="Verbosity: -v verbose, -vv debug")
 @click.option("-s", "--session", "session_name", default=None,
               help="Session name (default: auto-generated from date/time). "

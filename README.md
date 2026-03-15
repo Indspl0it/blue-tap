@@ -1325,5 +1325,5 @@ MIT License — see [LICENSE](LICENSE) for details.
 ---
 
 <p align="center">
-  <b>BT-Tap v1.0.0</b> — Built for automotive security researchers
+  <b>BT-Tap v1.5.0</b> — Built for automotive security researchers
 </p>

@@ -4,7 +4,7 @@ build-backend = "setuptools.backends._legacy:_Backend"
 
 [project]
 name = "bt-tap"
-version = "0.1.0"
+version = "1.5.0"
 description = "Bluetooth/BLE Penetration Testing Toolkit for Automotive IVI Systems"
 requires-python = ">=3.10"
 dependencies = [

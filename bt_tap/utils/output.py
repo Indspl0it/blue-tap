@@ -92,7 +92,7 @@ def banner():
     )
     console.print(Align.center(tagline), highlight=False)
     console.print(
-        Align.center("[bt.dim]v1.0.0 │ github.com/bt-tap[/bt.dim]"),
+        Align.center("[bt.dim]v1.5.0 │ github.com/bt-tap[/bt.dim]"),
         highlight=False,
     )
     console.print()

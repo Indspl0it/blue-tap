@@ -41,7 +41,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 </head>
 <body>
 <h1>BT-Tap Pentest Report</h1>
-<p class="meta">Generated: {generated} | Tool: BT-Tap v1.0.0</p>
+<p class="meta">Generated: {generated} | Tool: BT-Tap v1.5.0</p>
 
 {content}
 
