@@ -100,8 +100,9 @@ Built in Python with a Rich-powered CLI, BT-Tap wraps the Linux Bluetooth stack 
 - **EATT detection** — L2CAP PSM 0x0027 probe for BT 5.2+ Enhanced ATT
 
 ### Session & Reporting
-- **Session tracking** — `--session` flag accumulates all command outputs for unified reporting
-- **Auto-report generation** — `bt-tap report` auto-collects all session data
+- **Automatic sessions** — every run creates a session (named by timestamp or `-s name`), all output saved to `sessions/<name>/`
+- **Resume sessions** — use `-s <name>` to continue a previous assessment
+- **Auto-report generation** — `bt-tap report` collects all session data into HTML/JSON
 - **Workflow execution** — `bt-tap run` chains multiple commands in sequence
 - **Playbook support** — define reusable command sequences in text files
 
@@ -321,13 +322,21 @@ sudo bt-tap vulnscan AA:BB:CC:DD:EE:FF
 sudo bt-tap hijack AA:BB:CC:DD:EE:FF 11:22:33:44:55:66 -n "Galaxy S24"
 ```
 
-**Session mode** — tracks everything for a unified report:
+Every command automatically creates a session (named by date/time) that saves all output. Use `-s` to name or resume a session:
 
 ```bash
-sudo bt-tap -s assessment scan classic -d 15
-sudo bt-tap -s assessment vulnscan AA:BB:CC:DD:EE:FF
-sudo bt-tap -s assessment hijack AA:BB:CC:DD:EE:FF 11:22:33:44:55:66
-sudo bt-tap -s assessment report              # auto-collects all session data
+# Auto-session (name generated from timestamp)
+sudo bt-tap scan classic                       # session: bt-tap_20260315_143022
+sudo bt-tap vulnscan AA:BB:CC:DD:EE:FF         # same session continues
+sudo bt-tap report                             # report from current session
+
+# Named session (resume across multiple runs)
+sudo bt-tap -s toyota_test scan classic
+sudo bt-tap -s toyota_test vulnscan AA:BB:CC:DD:EE:FF
+sudo bt-tap -s toyota_test report
+
+# List all sessions
+sudo bt-tap session list
 ```
 
 ---
@@ -963,11 +972,11 @@ The report includes:
 Fully automated attack chain: scan → identify phone → vuln scan → hijack → dump → report.
 
 ```bash
-# With session (recommended) — all output tracked for unified report
-sudo bt-tap -s pentest auto AA:BB:CC:DD:EE:FF
-
-# Without session — saves to auto_output/ directory
+# Auto-session (output saved to sessions/bt-tap_<timestamp>/auto/)
 sudo bt-tap auto AA:BB:CC:DD:EE:FF
+
+# Named session (resume later with same name)
+sudo bt-tap -s pentest auto AA:BB:CC:DD:EE:FF
 
 # Custom scan duration and adapter
 sudo bt-tap -s pentest auto AA:BB:CC:DD:EE:FF -d 60 -i hci0

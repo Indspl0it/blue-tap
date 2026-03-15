@@ -21,7 +21,8 @@ from bt_tap.utils.interactive import resolve_address, pick_two_devices
 @click.version_option(version="1.0.0")
 @click.option("-v", "--verbose", count=True, help="Verbosity: -v verbose, -vv debug")
 @click.option("-s", "--session", "session_name", default=None,
-              help="Session name — accumulates all output for unified reporting")
+              help="Session name (default: auto-generated from date/time). "
+                   "Use to resume a previous session.")
 def main(verbose, session_name):
     """BT-Tap: Bluetooth/BLE Penetration Testing Toolkit for Automotive IVI.
 
@@ -33,21 +34,25 @@ def main(verbose, session_name):
       bt-tap hijack IVI_MAC PHONE_MAC            # full attack chain
 
     \b
-    Session tracking (recommended for assessments):
-      bt-tap -s mytest scan classic              # auto-logs output
-      bt-tap -s mytest vulnscan TARGET           # auto-logs findings
-      bt-tap -s mytest report                    # collects everything
+    Sessions (automatic — all output is always saved):
+      bt-tap scan classic                        # auto-session created
+      bt-tap -s mytest scan classic              # named session
+      bt-tap -s mytest vulnscan TARGET           # resume named session
+      bt-tap session list                        # see all sessions
+      bt-tap report                              # report from latest session
     """
     from bt_tap.utils.output import set_verbosity
     set_verbosity(verbose)
     banner()
 
-    # Initialize session if requested
-    if session_name:
-        from bt_tap.utils.session import Session, set_session
-        session = Session(session_name)
-        set_session(session)
-        info(f"Session: [bold]{session_name}[/bold] -> {session.dir}")
+    # Always create a session — auto-generate name if not provided
+    from bt_tap.utils.session import Session, set_session
+    from datetime import datetime
+    if not session_name:
+        session_name = datetime.now().strftime("bt-tap_%Y%m%d_%H%M%S")
+    session = Session(session_name)
+    set_session(session)
+    info(f"Session: [bold]{session_name}[/bold] -> {session.dir}")
 
 
 # ============================================================================
@@ -1892,15 +1897,16 @@ def fuzz_bss(address):
               type=click.Choice(["html", "json"]))
 @click.option("-o", "--output", default=None, help="Output file")
 def report_cmd(dump_dir, fmt, output):
-    """Generate pentest report.
+    """Generate pentest report from the current session.
 
     \b
-    With --session: auto-collects all session data (no dump_dir needed).
-    Without --session: reads from dump_dir (legacy mode).
+    Auto-collects all data from the active session. Pass a directory
+    to report from a specific location instead.
 
     Examples:
-      bt-tap -s mytest report                    # auto-collect from session
-      bt-tap report ./hijack_output              # legacy directory mode
+      bt-tap report                              # current session
+      bt-tap -s mytest report                    # named session
+      bt-tap report ./hijack_output              # specific directory
     """
     from bt_tap.report.generator import ReportGenerator
     from bt_tap.utils.session import get_session
@@ -2012,19 +2018,15 @@ def auto_cmd(ivi_mac, duration, output, hci):
     from bt_tap.attack.auto import AutoDiscovery
     from bt_tap.utils.session import get_session, log_command
 
-    # Use session directory if active, otherwise the -o flag
+    # Use session directory for output
     session = get_session()
-    if session:
-        output = session.get_output_dir("auto")
-        info(f"Using session directory: {output}")
+    output = session.get_output_dir("auto") if session else output
 
     auto = AutoDiscovery(ivi_mac, hci=hci)
     try:
         results = auto.run_auto(output_dir=output, scan_duration=duration)
-        # Save results
         os.makedirs(output, exist_ok=True)
         _save_json(results, os.path.join(output, "auto_results.json"))
-        # Log to session
         log_command("auto", results, category="attack", target=ivi_mac)
     except KeyboardInterrupt:
         warning("\nInterrupted by user")
