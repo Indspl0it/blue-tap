@@ -963,11 +963,14 @@ The report includes:
 Fully automated attack chain: scan → identify phone → vuln scan → hijack → dump → report.
 
 ```bash
-# Auto-discover paired phone and run full attack
+# With session (recommended) — all output tracked for unified report
+sudo bt-tap -s pentest auto AA:BB:CC:DD:EE:FF
+
+# Without session — saves to auto_output/ directory
 sudo bt-tap auto AA:BB:CC:DD:EE:FF
 
-# Custom scan duration and output
-sudo bt-tap auto AA:BB:CC:DD:EE:FF -d 60 -o ./pentest_output/ -i hci0
+# Custom scan duration and adapter
+sudo bt-tap -s pentest auto AA:BB:CC:DD:EE:FF -d 60 -i hci0
 ```
 
 **Auto mode phases:**

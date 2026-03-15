@@ -2002,11 +2002,21 @@ def auto_cmd(ivi_mac, duration, output, hci):
     \b
     Scans for phones near the target IVI, identifies the paired phone,
     then runs the full hijack chain automatically.
+
+    With --session: uses session directory for output and logs all phases.
+    Without --session: uses -o directory (default: auto_output/).
     """
     ivi_mac = resolve_address(ivi_mac, prompt="Select TARGET IVI")
     if not ivi_mac:
         return
     from bt_tap.attack.auto import AutoDiscovery
+    from bt_tap.utils.session import get_session, log_command
+
+    # Use session directory if active, otherwise the -o flag
+    session = get_session()
+    if session:
+        output = session.get_output_dir("auto")
+        info(f"Using session directory: {output}")
 
     auto = AutoDiscovery(ivi_mac, hci=hci)
     try:
@@ -2014,6 +2024,8 @@ def auto_cmd(ivi_mac, duration, output, hci):
         # Save results
         os.makedirs(output, exist_ok=True)
         _save_json(results, os.path.join(output, "auto_results.json"))
+        # Log to session
+        log_command("auto", results, category="attack", target=ivi_mac)
     except KeyboardInterrupt:
         warning("\nInterrupted by user")
 
