@@ -20,14 +20,22 @@ from bt_tap.utils.interactive import resolve_address, pick_two_devices
 @click.group()
 @click.version_option(version="1.0.0")
 @click.option("-v", "--verbose", count=True, help="Verbosity: -v verbose, -vv debug")
-def main(verbose):
+@click.option("-s", "--session", "session_name", default=None,
+              help="Session name — accumulates all output for unified reporting")
+def main(verbose, session_name):
     """BT-Tap: Bluetooth/BLE Penetration Testing Toolkit for Automotive IVI.
+
+    \b
+    Use -s/--session to track an assessment:
+      bt-tap -s mytest scan classic              # scan and log
+      bt-tap -s mytest vulnscan AA:BB:CC:...     # vuln scan and log
+      bt-tap -s mytest report                    # auto-collect everything
 
     \b
     Modules:
       adapter    - HCI adapter management
       scan       - Discover BT Classic and BLE devices
-      recon      - Enumerate services, fingerprint, channel scanning, nRF52840/USRP B210 capture
+      recon      - Enumerate services, fingerprint, channel scanning
       spoof      - MAC address spoofing and device impersonation
       pbap       - Phone Book Access Profile (phonebook, call logs)
       map        - Message Access Profile (SMS/MMS)
@@ -35,7 +43,6 @@ def main(verbose):
       audio      - Audio capture, injection, and review
       avrcp      - AVRCP media control and attacks
       opp        - Object Push Profile (file transfer to IVI)
-      tpms       - TPMS sensor attacks (BLE + 315/433 MHz SDR)
       vulnscan   - Vulnerability scanning
       hijack     - Full attack chain orchestration
       bias       - BIAS auth bypass attack (CVE-2020-10135)
@@ -43,10 +50,18 @@ def main(verbose):
       fuzz       - Protocol fuzzing (L2CAP, RFCOMM, AT)
       report     - Pentest report generation
       auto       - Automated discovery and attack
+      run        - Execute multiple commands in sequence
     """
     from bt_tap.utils.output import set_verbosity
     set_verbosity(verbose)
     banner()
+
+    # Initialize session if requested
+    if session_name:
+        from bt_tap.utils.session import Session, set_session
+        session = Session(session_name)
+        set_session(session)
+        info(f"Session: [bold]{session_name}[/bold] -> {session.dir}")
 
 
 # ============================================================================
@@ -59,8 +74,8 @@ def adapter():
 
 @adapter.command("list")
 def adapter_list():
-    """List available Bluetooth adapters."""
-    from bt_tap.core.adapter import list_adapters
+    """List available Bluetooth adapters with chipset and capability info."""
+    from bt_tap.core.adapter import list_adapters, recommend_adapter_roles
 
     adapters = list_adapters()
     if not adapters:
@@ -70,16 +85,53 @@ def adapter_list():
     table = Table(title="[bold #00d4ff]HCI Adapters[/bold #00d4ff]", show_lines=True, border_style="#666666", header_style=_S(bold=True, color="#00d4ff"))
     table.add_column("Name", style="#00d4ff")
     table.add_column("Address", style="#bf5af2")
-    table.add_column("Type", style="#ffaa00")
-    table.add_column("Bus", style="#4488ff")
+    table.add_column("Chipset", style="#ffaa00")
+    table.add_column("BT Ver", style="#4488ff")
+    table.add_column("Features", style="dim")
+    table.add_column("Spoof?", style="bold")
     table.add_column("Status", style="bold")
 
     for a in adapters:
         status_style = "green" if a["status"] == "UP" else "red"
-        table.add_row(a["name"], a["address"], a["type"], a["bus"],
+        chipset = a.get("chipset", a.get("type", ""))
+        bt_ver = a.get("bt_version", "")
+        features = ", ".join(a.get("features", [])[:5])
+        can_spoof = a.get("capabilities", {}).get("address_change")
+        spoof_str = {True: "[green]Yes[/green]", False: "[red]No[/red]", None: "[yellow]?[/yellow]"}[can_spoof]
+        table.add_row(a["name"], a["address"], chipset, bt_ver, features, spoof_str,
                        f"[{status_style}]{a['status']}[/{status_style}]")
 
     console.print(table)
+
+    # Show adapter role recommendations if multiple adapters
+    if len(adapters) >= 1:
+        rec = recommend_adapter_roles(adapters)
+        for note in rec.get("notes", []):
+            info(note)
+
+
+@adapter.command("info")
+@click.argument("hci", default="hci0")
+def adapter_info(hci):
+    """Show detailed adapter info: chipset, features, capabilities."""
+    from bt_tap.core.adapter import get_adapter_info, _adapter_exists
+    if not _adapter_exists(hci):
+        return
+    ext = get_adapter_info(hci)
+
+    panel_data = {
+        "Chipset": ext.get("chipset", "Unknown"),
+        "Manufacturer": ext.get("manufacturer", "Unknown"),
+        "BT Version": ext.get("bt_version", "Unknown"),
+        "Features": ", ".join(ext.get("features", [])) or "None detected",
+        "BR/EDR": str(ext["capabilities"]["bredr"]),
+        "LE": str(ext["capabilities"]["le"]),
+        "Dual-Mode": str(ext["capabilities"]["dual_mode"]),
+        "SSP": str(ext["capabilities"]["ssp"]),
+        "Secure Connections": str(ext["capabilities"]["sc"]),
+        "MAC Spoofing": {True: "Supported", False: "NOT supported", None: "Unknown"}[ext["capabilities"]["address_change"]],
+    }
+    summary_panel(f"Adapter {hci} Details", panel_data)
 
 
 @adapter.command()
@@ -139,25 +191,30 @@ def scan():
 def scan_classic(duration, hci, output):
     """Scan for Bluetooth Classic devices."""
     from bt_tap.core.scanner import scan_classic as _scan
+    from bt_tap.utils.session import log_command
 
     devices = _scan(duration, hci)
     verbose(f"hcitool scan completed, parsing {len(devices)} results")
     if devices:
         console.print(device_table(devices, "Classic BT Devices"))
+        log_command("scan_classic", devices, category="scan")
     if output:
         _save_json(devices, output)
 
 
 @scan.command("ble")
 @click.option("-d", "--duration", default=10, help="Scan duration in seconds")
+@click.option("-p", "--passive", is_flag=True, help="Passive scan (no SCAN_REQ, stealthier)")
 @click.option("-o", "--output", default=None, help="Output file (JSON)")
-def scan_ble(duration, output):
-    """Scan for BLE devices."""
+def scan_ble(duration, passive, output):
+    """Scan for BLE devices. Use --passive for stealth mode."""
     from bt_tap.core.scanner import scan_ble_sync
+    from bt_tap.utils.session import log_command
 
-    devices = scan_ble_sync(duration)
+    devices = scan_ble_sync(duration, passive=passive)
     if devices:
         console.print(device_table(devices, "BLE Devices"))
+        log_command("scan_ble", devices, category="scan")
     if output:
         _save_json(devices, output)
 
@@ -206,6 +263,9 @@ def recon_sdp(address, output):
                 success(f"  INTERESTING: {svc.get('name')} -> {profile} "
                         f"(ch={svc.get('channel')})")
 
+    from bt_tap.utils.session import log_command
+    log_command("sdp_browse", services, category="recon", target=address)
+
     if output:
         _save_json(services, output)
 
@@ -247,10 +307,19 @@ def recon_fingerprint(address, output):
 
     fp = fingerprint_device(address)
 
+    class_info = fp.get("device_class_info", {})
+    class_str = ""
+    if class_info:
+        class_str = f"{class_info.get('major', '?')}/{class_info.get('minor', '?')}"
+        if class_info.get("services"):
+            class_str += f" [{', '.join(class_info['services'])}]"
+
     panel_text = f"""[cyan]Address:[/cyan] {fp['address']}
 [cyan]Name:[/cyan] {fp['name']}
 [cyan]Manufacturer:[/cyan] {fp['manufacturer']}
 [cyan]Is IVI:[/cyan] {'[green]YES[/green]' if fp['is_ivi'] else '[red]NO[/red]'}
+[cyan]Device Class:[/cyan] {fp.get('device_class', 'N/A')} {class_str}
+[cyan]BT Version:[/cyan] {fp.get('lmp_version') or fp.get('bt_version') or 'N/A'}
 [cyan]Profiles:[/cyan] {len(fp['profiles'])}"""
 
     console.print(Panel(panel_text, title="Device Fingerprint", border_style="cyan"))
@@ -259,6 +328,14 @@ def recon_fingerprint(address, output):
         console.print("\n[bold red]Attack Surface:[/bold red]")
         for surface in fp["attack_surface"]:
             console.print(f"  [red]>[/red] {surface}")
+
+    if fp.get("vuln_hints"):
+        console.print("\n[bold yellow]Vulnerability Indicators:[/bold yellow]")
+        for hint in fp["vuln_hints"]:
+            console.print(f"  [yellow]![/yellow] {hint}")
+
+    from bt_tap.utils.session import log_command
+    log_command("fingerprint", fp, category="recon", target=address)
 
     if output:
         _save_json(fp, output)
@@ -344,12 +421,18 @@ def recon_l2cap_scan(address, dynamic, timeout, output):
 
 @recon.command("capture-start")
 @click.option("-o", "--output", default="bt_capture.log", help="Output file")
-def recon_capture_start(output):
+@click.option("-i", "--hci", default=None, help="HCI adapter (default: all)")
+@click.option("--pcap", is_flag=True, help="Write btsnoop/pcap format for Wireshark")
+def recon_capture_start(output, hci, pcap):
     """Start HCI traffic capture via btmon."""
     from bt_tap.recon.hci_capture import HCICapture
 
+    # Auto-adjust extension for pcap mode
+    if pcap and not output.endswith((".pcap", ".btsnoop")):
+        output = output.rsplit(".", 1)[0] + ".btsnoop"
+
     cap = HCICapture()
-    if cap.start(output):
+    if cap.start(output, hci=hci, pcap=pcap):
         success(f"btmon capture started -> {output}")
     else:
         error("Failed to start capture")
@@ -1296,6 +1379,10 @@ def vulnscan(address, hci, output):
     from bt_tap.attack.vuln_scanner import scan_vulnerabilities
     findings = scan_vulnerabilities(address, hci)
     # scan_vulnerabilities already prints the table via _print_findings
+
+    from bt_tap.utils.session import log_command
+    log_command("vulnscan", findings, category="vuln", target=address)
+
     if output:
         _save_json(findings, output)
 
@@ -1682,256 +1769,21 @@ def dos_pin_brute(address, start, end, delay):
         warning("PIN not found in range")
 
 
-# ============================================================================
-# TPMS - Tire Pressure Monitoring System BLE Attacks
-# ============================================================================
-@main.group()
-def tpms():
-    """TPMS sensor attacks (scan, sniff, spoof, flood, SDR capture).
-
-    \b
-    Target BLE-based TPMS sensors that broadcast tire pressure,
-    temperature, and battery data. TPMS sensors are BLE peripherals
-    that advertise — the vehicle ECU listens passively.
-
-    Also supports 315/433 MHz traditional TPMS via rtl_433 + SDR.
-    """
-
-
-@tpms.command("scan")
-@click.option("-d", "--duration", default=15, help="Scan duration (seconds)")
-@click.option("-i", "--hci", default="hci0", help="HCI adapter")
-def tpms_scan(duration, hci):
-    """Scan for BLE TPMS sensors nearby.
-
-    \b
-    Identifies TPMS sensors by name patterns, service UUIDs,
-    and manufacturer data analysis.
-    """
-    from bt_tap.attack.tpms import TPMSScanner
-    scanner = TPMSScanner(hci)
-    sensors = scanner.scan(duration)
-    if sensors:
-        summary_panel("TPMS Scan Results", {
-            "Sensors Found": str(len(sensors)),
-            "Positions": ", ".join(s.position for s in sensors),
-        })
-
-
-@tpms.command("sniff")
-@click.option("-d", "--duration", default=60, help="Sniff duration (seconds)")
-@click.option("-i", "--hci", default="hci0", help="HCI adapter")
-@click.option("-o", "--output", default="tpms_capture", help="Output directory")
-@click.option("--nrf", is_flag=True, help="Use nRF52840 Sniffer for enhanced capture")
-def tpms_sniff(duration, hci, output, nrf):
-    """Sniff BLE TPMS advertisements in real-time.
-
-    \b
-    Monitors TPMS sensor advertisements and logs pressure, temperature,
-    battery readings. Supports nRF52840 dongle for enhanced capture.
-
-    Examples:
-      bt-tap tpms sniff                     # 60s standard BLE sniff
-      bt-tap tpms sniff -d 300 --nrf        # 5min with nRF52840
-      bt-tap tpms sniff -o ./captures       # Custom output directory
-    """
-    from bt_tap.attack.tpms import TPMSSniffer
-    sniffer = TPMSSniffer(hci, output)
-    sniffer.sniff(duration, use_nrf=nrf)
-
-
-@tpms.command("decode")
-@click.argument("data")
-@click.option("-a", "--address", default="00:00:00:00:00:00", help="Source sensor address")
-@click.option("-f", "--file", "log_file", default=None, help="HCI log file to parse")
-def tpms_decode(data, address, log_file):
-    """Decode TPMS data from raw hex or HCI log file.
-
-    \b
-    DATA is a hex string of the TPMS advertisement payload,
-    or use --file to parse an entire btmon/HCI capture log.
-
-    Examples:
-      bt-tap tpms decode "01c80a4150"             # Decode raw hex
-      bt-tap tpms decode - --file capture.log      # Parse HCI log
-    """
-    from bt_tap.attack.tpms import TPMSDecoder
-    decoder = TPMSDecoder()
-
-    if log_file:
-        readings = decoder.decode_hci_log(log_file)
-        if readings:
-            decoder.analyze(readings)
-    else:
-        reading = decoder.decode_raw(data, address)
-        if reading:
-            result_box("Decoded TPMS Reading", (
-                f"Pressure: {reading.pressure_psi:.1f} PSI ({reading.pressure_kpa:.1f} kPa)\n"
-                f"Temperature: {reading.temperature_c:.1f}C ({reading.temperature_f:.1f}F)\n"
-                f"Battery: {reading.battery_pct}%"
-            ))
-
-
-@tpms.command("spoof")
-@click.option("-p", "--pressure", default=32.0, type=float, help="Pressure in PSI")
-@click.option("-t", "--temp", default=25.0, type=float, help="Temperature in Celsius")
-@click.option("-b", "--battery", default=80, type=int, help="Battery percentage")
-@click.option("--position", default=1, type=click.IntRange(1, 5),
-              help="Tire position: 1=FL, 2=FR, 3=RL, 4=RR, 5=Spare")
-@click.option("-c", "--count", default=100, help="Number of advertisements")
-@click.option("--interval", default=100, type=int, help="Interval in ms")
-@click.option("-i", "--hci", default="hci0")
-def tpms_spoof(pressure, temp, battery, position, count, interval, hci):
-    """Impersonate a TPMS sensor with fake readings.
-
-    \b
-    Broadcasts crafted BLE advertisements mimicking a TPMS sensor
-    to inject fake pressure/temperature data into the vehicle ECU.
-    Aftermarket BLE TPMS has zero authentication — any transmitter
-    can broadcast matching advertisements.
-
-    Examples:
-      bt-tap tpms spoof --pressure 0 --position 1       # Flat tire FL
-      bt-tap tpms spoof --pressure 65 --temp 90          # Over-pressure + hot
-      bt-tap tpms spoof -p 28 -c 500 --interval 50      # Sustained low pressure
-    """
-    from bt_tap.attack.tpms import TPMSSpoofer
-    spoofer = TPMSSpoofer(hci)
-    spoofer.spoof_reading(
-        pressure_psi=pressure,
-        temperature_c=temp,
-        battery_pct=battery,
-        position=position,
-        count=count,
-        interval_ms=interval,
-    )
-
-
-@tpms.command("flat-tire")
-@click.option("--position", default=1, type=click.IntRange(1, 5),
-              help="Tire position: 1=FL, 2=FR, 3=RL, 4=RR, 5=Spare")
-@click.option("-c", "--count", default=200, help="Number of advertisements")
-@click.option("-i", "--hci", default="hci0")
-def tpms_flat_tire(position, count, hci):
-    """Spoof flat tire (0 PSI) to trigger IVI low-pressure alert.
-
-    \b
-    Quick shortcut to send 0 PSI readings for a specific tire position.
-    """
-    from bt_tap.attack.tpms import TPMSSpoofer
-    spoofer = TPMSSpoofer(hci)
-    spoofer.spoof_flat_tire(position=position, count=count)
-
-
-@tpms.command("over-pressure")
-@click.option("--position", default=1, type=click.IntRange(1, 5),
-              help="Tire position: 1=FL, 2=FR, 3=RL, 4=RR, 5=Spare")
-@click.option("-c", "--count", default=200, help="Number of advertisements")
-@click.option("-i", "--hci", default="hci0")
-def tpms_over_pressure(position, count, hci):
-    """Spoof dangerous over-pressure (65 PSI) to trigger IVI alert."""
-    from bt_tap.attack.tpms import TPMSSpoofer
-    spoofer = TPMSSpoofer(hci)
-    spoofer.spoof_over_pressure(position=position, count=count)
-
-
-@tpms.command("flood")
-@click.option("-d", "--duration", default=30, help="Flood duration (seconds)")
-@click.option("--interval", default=20, type=int, help="Interval in ms")
-@click.option("--mode", default="random",
-              type=click.Choice(["random", "sweep"]),
-              help="Flood mode: random values or pressure sweep")
-@click.option("--position", default=1, type=click.IntRange(1, 5),
-              help="Tire position for sweep mode")
-@click.option("-i", "--hci", default="hci0")
-def tpms_flood(duration, interval, mode, position, hci):
-    """Flood BLE TPMS advertisements to overwhelm IVI receiver.
-
-    \b
-    Modes:
-      random  - Rapid random pressure/temp values across all positions
-      sweep   - Sawtooth pressure sweep on a single tire position
-
-    Examples:
-      bt-tap tpms flood -d 60 --mode random         # 60s random flood
-      bt-tap tpms flood --mode sweep --position 2    # Sweep FR tire
-    """
-    from bt_tap.attack.tpms import TPMSFlood
-    flood = TPMSFlood(hci)
-    if mode == "sweep":
-        flood.flood_pressure_sweep(duration, position)
-    else:
-        flood.flood_random(duration, interval)
-
-
-@tpms.command("sdr")
-@click.option("-d", "--duration", default=60, help="Capture duration (seconds)")
-@click.option("-f", "--freq", default="auto",
-              help="Frequency: 315M, 433.92M, or auto (hop both)")
-@click.option("--device", default="", help="SDR device string (e.g., driver=uhd for B210)")
-@click.option("-o", "--output", default="tpms_capture", help="Output directory")
-def tpms_sdr(duration, freq, device, output):
-    """Capture traditional 315/433 MHz TPMS via SDR + rtl_433.
-
-    \b
-    Traditional TPMS sensors use 315 MHz (NA/Japan) or 433.92 MHz (EU)
-    RF, NOT Bluetooth. This uses rtl_433 to decode them.
-
-    Zero encryption, zero authentication. Sensor IDs are immutable
-    32-bit values that also enable vehicle tracking.
-
-    Requires: rtl_433 + RTL-SDR dongle, HackRF, or USRP B210.
-
-    Examples:
-      bt-tap tpms sdr                           # Auto-hop 315M + 433.92M
-      bt-tap tpms sdr -f 433.92M -d 120         # EU frequency, 2 minutes
-      bt-tap tpms sdr --device "driver=uhd"      # Use USRP B210
-    """
-    from bt_tap.attack.tpms import TPMSSDRCapture
-    sdr = TPMSSDRCapture(output)
-    sdr.capture(duration, freq, device=device)
-
-
-@tpms.command("sdr-protocols")
-def tpms_sdr_protocols():
-    """List rtl_433 TPMS-related decoder protocols."""
-    from bt_tap.attack.tpms import TPMSSDRCapture
-    sdr = TPMSSDRCapture()
-    sdr.list_protocols()
-
-
-@tpms.command("capture-start")
-@click.option("-o", "--output", default="tpms_capture", help="Output directory")
-@click.option("-f", "--file", "filename", default="tpms_hci.log", help="Capture filename")
-def tpms_capture_start(output, filename):
-    """Start HCI-level BLE capture for deep TPMS analysis.
-
-    \b
-    Launches btmon in background to capture all BLE advertisement PDUs.
-    Use 'tpms capture-stop' to end capture, then 'tpms decode --file'
-    to analyze.
-    """
-    from bt_tap.attack.tpms import TPMSHCICapture
-    capture = TPMSHCICapture(output)
-    path = capture.start(filename)
-    if path:
-        info("Use 'bt-tap tpms capture-stop' to end capture")
-        info(f"Then 'bt-tap tpms decode - --file {path}' to analyze")
-
-
-@tpms.command("capture-stop")
-def tpms_capture_stop():
-    """Stop running HCI capture."""
-    # Find and kill btmon process
-    result = run_cmd(["pgrep", "-f", "btmon.*tpms"], timeout=5)
-    if result.returncode == 0 and result.stdout.strip():
-        for pid in result.stdout.strip().split("\n"):
-            pid = pid.strip()
-            if pid:
-                run_cmd(["kill", pid], timeout=5)
-                success(f"Stopped btmon (PID: {pid})")
-    else:
-        warning("No TPMS btmon capture running")
+@dos.command("l2ping-flood")
+@click.argument("address", required=False, default=None)
+@click.option("-c", "--count", default=1000, help="Number of pings")
+@click.option("-s", "--size", default=600, help="Payload size in bytes")
+@click.option("--no-flood", is_flag=True, help="Disable flood mode (slower, shows RTT)")
+def dos_l2ping_flood(address, count, size, no_flood):
+    """L2CAP echo request flood via l2ping (requires root)."""
+    address = resolve_address(address)
+    if not address:
+        return
+    from bt_tap.attack.dos import PairingFlood
+    flood = PairingFlood(address)
+    result = flood.l2ping_flood(count=count, size=size, flood=not no_flood)
+    for k, v in result.items():
+        info(f"  {k}: {v}")
 
 
 # ============================================================================
@@ -2018,6 +1870,21 @@ def fuzz_at(address, channel, patterns):
     console.print(f"[bold]AT fuzz results:[/bold] {result}")
 
 
+@fuzz.command("sdp")
+@click.argument("address", required=False, default=None)
+def fuzz_sdp(address):
+    """SDP continuation state probe (BlueBorne CVE-2017-0785 vector)."""
+    address = resolve_address(address)
+    if not address:
+        return
+    from bt_tap.attack.fuzz import SDPFuzzer
+    fuzzer = SDPFuzzer(address)
+    result = fuzzer.probe_continuation_state()
+    if result.get("leak_suspected"):
+        warning("Possible SDP info leak detected!")
+    console.print(f"[bold]SDP probe results:[/bold] {result}")
+
+
 @fuzz.command("bss")
 @click.argument("address", required=False, default=None)
 def fuzz_bss(address):
@@ -2034,23 +1901,105 @@ def fuzz_bss(address):
 # REPORT - Pentest Report Generation
 # ============================================================================
 @main.command("report")
-@click.argument("dump_dir")
+@click.argument("dump_dir", required=False, default=None)
 @click.option("-f", "--format", "fmt", default="html",
               type=click.Choice(["html", "json"]))
 @click.option("-o", "--output", default=None, help="Output file")
 def report_cmd(dump_dir, fmt, output):
-    """Generate pentest report from attack output directory."""
+    """Generate pentest report.
+
+    \b
+    With --session: auto-collects all session data (no dump_dir needed).
+    Without --session: reads from dump_dir (legacy mode).
+
+    Examples:
+      bt-tap -s mytest report                    # auto-collect from session
+      bt-tap report ./hijack_output              # legacy directory mode
+    """
     from bt_tap.report.generator import ReportGenerator
+    from bt_tap.utils.session import get_session
 
     report = ReportGenerator()
-    report.load_from_directory(dump_dir)
+    session = get_session()
+
+    if session:
+        # Auto-collect from session
+        session_data = session.get_all_data()
+        info(f"Collecting data from session '{session.name}'...")
+
+        # Feed session data into report
+        for entry in session_data.get("scan", []):
+            data = entry.get("data", [])
+            if isinstance(data, list):
+                report.add_scan_results(data)
+
+        for entry in session_data.get("recon", []):
+            data = entry.get("data", {})
+            if isinstance(data, dict) and data.get("address"):
+                report.add_fingerprint(data)
+            elif isinstance(data, list):
+                report.add_recon_results(data)
+
+        for entry in session_data.get("vuln", []):
+            data = entry.get("data", [])
+            if isinstance(data, list):
+                report.add_vuln_findings(data)
+
+        for entry in session_data.get("attack", []):
+            data = entry.get("data", {})
+            if isinstance(data, dict):
+                report.attack_results.update(data)
+
+        for entry in session_data.get("data", []):
+            data = entry.get("data", {})
+            cmd = entry.get("command", "")
+            if "pbap" in cmd:
+                report.add_pbap_results(data)
+            elif "map" in cmd:
+                report.add_map_results(data)
+
+        for entry in session_data.get("fuzz", []):
+            report.add_fuzz_results(entry.get("data", {}))
+
+        for entry in session_data.get("dos", []):
+            report.add_dos_results(entry.get("data", {}))
+
+        for entry in session_data.get("audio", []):
+            data = entry.get("data", {})
+            report.add_audio_capture(
+                data.get("file", ""),
+                data.get("duration", 0),
+                data.get("description", ""),
+            )
+
+        # Add session metadata as a note
+        meta = session.metadata
+        report.add_note(
+            f"Session: {meta.get('name')} | "
+            f"Commands: {len(meta.get('commands', []))} | "
+            f"Targets: {', '.join(meta.get('targets', []))}"
+        )
+
+        out_dir = session.dir
+    elif dump_dir:
+        report.load_from_directory(dump_dir)
+        out_dir = dump_dir
+    else:
+        error("No session active and no dump directory specified.")
+        error("Use: bt-tap -s <session> report  OR  bt-tap report <dir>")
+        return
 
     if fmt == "html":
-        out = output or os.path.join(dump_dir, "report.html")
+        out = output or os.path.join(out_dir, "report.html")
         report.generate_html(out)
     else:
-        out = output or os.path.join(dump_dir, "report.json")
+        out = output or os.path.join(out_dir, "report.json")
         report.generate_json(out)
+
+    summary = session.summary() if session else {}
+    if summary:
+        info(f"Session included {summary.get('total_commands', 0)} commands across "
+             f"{len(summary.get('categories', []))} categories")
 
 
 # ============================================================================
@@ -2081,6 +2030,162 @@ def auto_cmd(ivi_mac, duration, output, hci):
         _save_json(results, os.path.join(output, "auto_results.json"))
     except KeyboardInterrupt:
         warning("\nInterrupted by user")
+
+
+# ============================================================================
+# RUN - Execute Multiple Commands
+# ============================================================================
+@main.command("run")
+@click.argument("commands", nargs=-1)
+@click.option("--playbook", default=None, help="YAML playbook file with command list")
+def run_cmd_seq(commands, playbook):
+    """Execute multiple bt-tap commands in sequence.
+
+    \b
+    Each argument is a command string (quote if it has spaces):
+      bt-tap -s mytest run "scan classic" "recon fingerprint TARGET" "vulnscan TARGET" "report"
+
+    Use TARGET as a placeholder — you'll be prompted to select a device.
+
+    Or use a playbook file:
+      bt-tap -s mytest run --playbook quick-recon.yml
+    """
+    import shlex
+    import sys
+
+    if playbook:
+        if not os.path.exists(playbook):
+            error(f"Playbook not found: {playbook}")
+            return
+        with open(playbook) as f:
+            # Simple format: one command per line (not full YAML)
+            commands = [line.strip() for line in f if line.strip() and not line.startswith("#")]
+
+    if not commands:
+        error("No commands specified. Usage: bt-tap run \"scan classic\" \"vulnscan TARGET\"")
+        return
+
+    # Resolve TARGET placeholder
+    target_addr = None
+    needs_target = any("TARGET" in cmd.upper() for cmd in commands)
+    if needs_target:
+        target_addr = resolve_address(None, prompt="Select target for workflow")
+        if not target_addr:
+            error("Target selection cancelled")
+            return
+
+    console.rule("[bold cyan]BT-Tap Workflow", style="cyan")
+    info(f"Executing {len(commands)} command(s)")
+    for i, cmd in enumerate(commands, 1):
+        info(f"  {i}. {cmd}")
+    console.print()
+
+    results = []
+    for i, cmd_str in enumerate(commands, 1):
+        # Replace TARGET placeholder
+        if target_addr:
+            cmd_str = cmd_str.replace("TARGET", target_addr).replace("target", target_addr)
+
+        console.rule(f"[bold]Step {i}/{len(commands)}: {cmd_str}", style="dim")
+
+        try:
+            # Parse the command string and invoke via Click
+            args = shlex.split(cmd_str)
+            ctx = main.make_context("bt-tap", list(args), parent=click.get_current_context())
+            with ctx:
+                main.invoke(ctx)
+            results.append({"step": i, "command": cmd_str, "status": "success"})
+        except SystemExit:
+            results.append({"step": i, "command": cmd_str, "status": "success"})
+        except click.exceptions.UsageError as e:
+            error(f"Invalid command: {e}")
+            results.append({"step": i, "command": cmd_str, "status": "error", "error": str(e)})
+        except Exception as e:
+            error(f"Command failed: {e}")
+            results.append({"step": i, "command": cmd_str, "status": "error", "error": str(e)})
+
+    console.rule("[bold]Workflow Complete", style="cyan")
+    succeeded = sum(1 for r in results if r["status"] == "success")
+    failed = sum(1 for r in results if r["status"] == "error")
+    info(f"Results: {succeeded} succeeded, {failed} failed out of {len(results)}")
+
+
+# ============================================================================
+# SESSION - Session Management
+# ============================================================================
+@main.group()
+def session():
+    """Manage assessment sessions."""
+
+
+@session.command("list")
+def session_list():
+    """List all sessions."""
+    sessions_dir = os.path.join(".", "sessions")
+    if not os.path.isdir(sessions_dir):
+        info("No sessions found")
+        return
+
+    from rich.style import Style as _S
+    table = Table(title="[bold cyan]Assessment Sessions[/bold cyan]",
+                  show_lines=True, border_style="#666666",
+                  header_style=_S(bold=True, color="#00d4ff"))
+    table.add_column("Name", style="#00d4ff")
+    table.add_column("Created", style="#666666")
+    table.add_column("Commands", justify="right")
+    table.add_column("Targets")
+    table.add_column("Last Updated", style="#666666")
+
+    for name in sorted(os.listdir(sessions_dir)):
+        meta_file = os.path.join(sessions_dir, name, "session.json")
+        if os.path.exists(meta_file):
+            try:
+                with open(meta_file) as f:
+                    meta = json.load(f)
+                table.add_row(
+                    name,
+                    meta.get("created", "")[:19],
+                    str(len(meta.get("commands", []))),
+                    ", ".join(meta.get("targets", []))[:40],
+                    meta.get("last_updated", "")[:19],
+                )
+            except (json.JSONDecodeError, OSError):
+                table.add_row(name, "?", "?", "", "?")
+
+    console.print(table)
+
+
+@session.command("show")
+@click.argument("name")
+def session_show(name):
+    """Show details of a session."""
+    from bt_tap.utils.session import Session
+    try:
+        s = Session(name)
+        summary = s.summary()
+        summary_panel("Session Details", {
+            "Name": summary["name"],
+            "Created": summary["created"],
+            "Last Updated": summary["last_updated"],
+            "Commands Run": str(summary["total_commands"]),
+            "Targets": ", ".join(summary["targets"]) or "None",
+            "Categories": ", ".join(summary["categories"]) or "None",
+            "Files Saved": str(summary["files"]),
+            "Directory": summary["directory"],
+        })
+
+        # Show command log
+        if s.metadata.get("commands"):
+            console.print("\n[bold]Command Log:[/bold]")
+            for cmd in s.metadata["commands"]:
+                console.print(
+                    f"  [dim]{cmd.get('timestamp', '')[:19]}[/dim]  "
+                    f"[cyan]{cmd.get('command', '')}[/cyan]  "
+                    f"[dim]({cmd.get('category', '')})[/dim]  "
+                    f"{cmd.get('target', '')}"
+                )
+    except Exception as e:
+        error(f"Cannot load session: {e}")
 
 
 # ============================================================================

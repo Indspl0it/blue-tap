@@ -8,9 +8,9 @@
 
 # BT-Tap — Bluetooth/BLE Automotive IVI Pentest Toolkit
 
-**BT-Tap** is a comprehensive Bluetooth Classic and BLE penetration testing framework built for automotive In-Vehicle Infotainment (IVI) security assessments. It automates the full attack chain — from device discovery and service enumeration through identity spoofing, data extraction, call interception, media control, TPMS sensor attacks, vulnerability scanning, protocol fuzzing, and report generation.
+**BT-Tap** is a comprehensive Bluetooth Classic and BLE penetration testing framework built for automotive In-Vehicle Infotainment (IVI) security assessments. It automates the full attack chain — from device discovery and service enumeration through identity spoofing, data extraction, call interception, media control, vulnerability scanning, protocol fuzzing, and report generation.
 
-Built in Python with a Rich-powered CLI, BT-Tap wraps the Linux Bluetooth stack (BlueZ, hcitool, bluetoothctl) and provides 88 commands across 18 modules, all accessible from a single `bt-tap` entry point.
+Built in Python with a Rich-powered CLI, BT-Tap wraps the Linux Bluetooth stack (BlueZ, hcitool, bluetoothctl) and provides session-based assessment tracking with auto-report generation across 17 modules, all accessible from a single `bt-tap` entry point.
 
 > **Authorized use only.** This tool is intended for penetration testing engagements, security research, CTF competitions, and educational purposes with explicit authorization. Do not use against systems you do not own or have written permission to test.
 
@@ -35,7 +35,6 @@ Built in Python with a Rich-powered CLI, BT-Tap wraps the Linux Bluetooth stack 
   - [HFP — Call Interception](#hfp--call-interception)
   - [Audio Capture & Injection](#audio-capture--injection)
   - [AVRCP — Media Control](#avrcp--media-control)
-  - [TPMS — Tire Pressure Sensor Attacks](#tpms--tire-pressure-sensor-attacks)
   - [OPP — File Push](#opp--file-push)
   - [AT Command Extraction](#at-command-extraction)
   - [Vulnerability Scanning](#vulnerability-scanning)
@@ -74,20 +73,26 @@ Built in Python with a Rich-powered CLI, BT-Tap wraps the Linux Bluetooth stack 
 - **A2DP (Advanced Audio)** — media stream capture, audio injection to car speakers, microphone eavesdropping, live loopback
 - **AVRCP (Media Control)** — play/pause/stop/skip, volume manipulation, volume ramp escalation, skip flood DoS, metadata surveillance
 - **OPP (Object Push)** — push arbitrary files or crafted vCards to IVI
-- **TPMS (Tire Pressure Monitoring)** — BLE TPMS sensor discovery, advertisement sniffing, sensor impersonation (fake pressure/temp), advertisement flood DoS, 315/433 MHz RF capture via SDR
-
 ### Identity Spoofing
-- **MAC address spoofing** — multiple backend support (bdaddr, spooftooph, btmgmt)
+- **MAC address spoofing** — multiple backend support (bdaddr, spooftooph, btmgmt) with hardware rejection detection and post-change verification
 - **Full identity clone** — MAC + device name + device class
+- **Chipset detection** — identifies adapter chipset (Intel, CSR, Broadcom, Realtek) and recommends spoofing strategy
 - **Adapter restore** — revert to original MAC after testing
 
 ### Vulnerability Assessment
 - **Evidence-based findings** — each result is tagged as `confirmed`, `potential`, or `unverified`
-- **CVE susceptibility heuristics** — BlueBorne, KNOB, BLURtooth (version/evidence-based indicators)
-- **Legacy pairing indicators** — detect missing SSP advertisement and probe pairing method (e.g., Just Works)
+- **CVE susceptibility heuristics** — BlueBorne, KNOB, BLURtooth, BIAS, BrakTooth (version/chipset-based indicators)
+- **Legacy pairing indicators** — detect missing SSP via LMP features and probe pairing method
 - **Active service exposure probes** — verify sensitive RFCOMM service reachability
 - **BLE writable-surface analysis** — enumerate writable GATT characteristics
-- **BIAS tracking** — flagged as requiring active validation (not passively confirmed)
+- **EATT detection** — probe L2CAP PSM 0x0027 to detect BT 5.2+ Enhanced ATT
+- **SDP continuation state probing** — test for BlueBorne CVE-2017-0785 info leak vector
+
+### Session & Reporting
+- **Session tracking** — `--session` flag accumulates all command outputs for unified reporting
+- **Auto-report generation** — `bt-tap report` auto-collects all session data
+- **Workflow execution** — `bt-tap run` chains multiple commands in sequence
+- **Playbook support** — define reusable command sequences in text files
 
 ### Offensive Testing
 - **Pairing flood DoS** — rapid pairing request bombardment
@@ -287,29 +292,30 @@ python3 -m bt_tap.cli scan classic
 ## Quick Start
 
 ```bash
-# 1. Check your adapter is up
+# 1. Check your adapter (shows chipset, BT version, spoofing support)
 sudo bt-tap adapter list
-sudo bt-tap adapter up hci0
+sudo bt-tap adapter info hci0
 
-# 2. Scan for nearby Bluetooth devices
-sudo bt-tap scan classic -d 15
+# 2. Start a session — all output is auto-logged for reporting
+sudo bt-tap -s mytest scan classic -d 15
 
-# 3. Enumerate services — omit MAC to get an interactive device picker!
-sudo bt-tap recon sdp                   # picks device interactively
-sudo bt-tap recon sdp AA:BB:CC:DD:EE:FF # or pass MAC directly
+# 3. Enumerate services (omit MAC for interactive device picker)
+sudo bt-tap -s mytest recon sdp AA:BB:CC:DD:EE:FF
 
-# 4. Scan for hidden RFCOMM services
-sudo bt-tap recon rfcomm-scan           # interactive picker
+# 4. Fingerprint the IVI (identifies manufacturer, BT version, attack surface)
+sudo bt-tap -s mytest recon fingerprint AA:BB:CC:DD:EE:FF
 
 # 5. Run vulnerability scan
-sudo bt-tap vulnscan                    # interactive picker
+sudo bt-tap -s mytest vulnscan AA:BB:CC:DD:EE:FF
 
-# 6. Full hijack — interactive dual-device picker selects IVI + Phone
-sudo bt-tap hijack                      # picks both devices interactively
-sudo bt-tap hijack AA:BB:CC:DD:EE:FF 11:22:33:44:55:66 -n "Galaxy S24"  # or explicit
+# 6. Full hijack
+sudo bt-tap -s mytest hijack AA:BB:CC:DD:EE:FF 11:22:33:44:55:66 -n "Galaxy S24"
 
-# 7. Generate a report from the output
-sudo bt-tap report hijack_output/ --format html --output report.html
+# 7. Generate report — auto-collects everything from the session
+sudo bt-tap -s mytest report
+
+# Or run a complete workflow in one command:
+sudo bt-tap -s mytest run "scan classic" "recon fingerprint TARGET" "vulnscan TARGET" "report"
 ```
 
 ---
@@ -322,9 +328,10 @@ sudo bt-tap report hijack_output/ --format html --output report.html
 bt-tap [OPTIONS] COMMAND [ARGS]
 
 Options:
-  --version      Show version and exit
-  -v, --verbose  Increase verbosity (-v for verbose, -vv for debug)
-  --help         Show help and exit
+  --version          Show version and exit
+  -v, --verbose      Increase verbosity (-v for verbose, -vv for debug)
+  -s, --session TEXT Session name — auto-saves all output for unified reporting
+  --help             Show help and exit
 ```
 
 The `-v` flag controls how much detail you see during execution:
@@ -730,85 +737,6 @@ sudo bt-tap avrcp monitor AA:BB:CC:DD:EE:FF -d 600
 
 ---
 
-### TPMS — Tire Pressure Sensor Attacks
-#### BLE TPMS Operations
-
-```bash
-# Scan for BLE TPMS sensors nearby
-sudo bt-tap tpms scan -d 20
-
-# Sniff TPMS advertisements in real-time (60 seconds)
-sudo bt-tap tpms sniff -d 60 -o ./tpms_captures
-
-# Enhanced sniffing with nRF52840 dongle (PCAP output for Wireshark)
-sudo bt-tap tpms sniff -d 120 --nrf -o ./tpms_captures
-
-# Decode raw TPMS advertisement hex data
-sudo bt-tap tpms decode "001e1940010050c7"
-
-# Decode from btmon/HCI capture log
-sudo bt-tap tpms decode - --file tpms_capture/tpms_hci.log
-```
-
-#### Sensor Impersonation (Spoofing)
-
-```bash
-# Spoof a TPMS sensor with custom readings
-sudo bt-tap tpms spoof --pressure 32 --temp 25 --position 1
-
-# Trigger flat tire alert (0 PSI) on Front Left
-sudo bt-tap tpms flat-tire --position 1 --count 200
-
-# Trigger over-pressure alert (65 PSI + 85C)
-sudo bt-tap tpms over-pressure --position 2
-
-# Sustained low pressure warning
-sudo bt-tap tpms spoof -p 22 -c 500 --interval 50 --position 3
-```
-
-**Tire positions:** `1`=Front Left, `2`=Front Right, `3`=Rear Left, `4`=Rear Right, `5`=Spare
-
-#### Advertisement Flood
-
-```bash
-# Random flood — rapid conflicting values across all tires
-sudo bt-tap tpms flood -d 60 --mode random --interval 20
-
-# Pressure sweep — sawtooth 0→80 PSI cycle on one tire
-sudo bt-tap tpms flood --mode sweep --position 2 -d 30
-```
-
-#### 315/433 MHz SDR Capture
-
-```bash
-# Auto-hop between 315M and 433.92M frequencies
-sudo bt-tap tpms sdr -d 120
-
-# European frequency only
-sudo bt-tap tpms sdr -f 433.92M -d 60
-
-# Use USRP B210
-sudo bt-tap tpms sdr --device "driver=uhd" -d 120
-
-# List rtl_433 TPMS decoder protocols
-sudo bt-tap tpms sdr-protocols
-```
-
-#### HCI Capture for Deep Analysis
-
-```bash
-# Start background btmon capture
-sudo bt-tap tpms capture-start -o ./captures
-
-# ... perform TPMS attacks ...
-
-# Stop capture, then decode
-sudo bt-tap tpms capture-stop
-sudo bt-tap tpms decode - --file ./captures/tpms_hci.log
-```
-
----
-
 ### OPP — File Push
 
 Push files to the target device via Object Push Profile.
@@ -983,28 +911,27 @@ sudo bt-tap fuzz bss AA:BB:CC:DD:EE:FF
 
 ### Report Generation
 
-Generate styled pentest reports from attack output data.
+Generate styled pentest reports. With `--session`, auto-collects all session data.
 
 ```bash
-# HTML report (dark theme, styled tables)
+# Session-based (recommended) — auto-collects everything
+sudo bt-tap -s mytest report
+sudo bt-tap -s mytest report --format json
+
+# Legacy directory mode
 sudo bt-tap report hijack_output/ --format html --output report.html
-
-# JSON report (machine-readable)
-sudo bt-tap report hijack_output/ --format json --output report.json
-
-# Default (HTML)
-sudo bt-tap report ./auto_output/
 ```
 
-The report generator automatically ingests:
-- `attack_results.json` — hijack phase results
-- `*.vcf` files — phonebook/call log entries (counted)
-- `*vuln*.json` — vulnerability findings
-- `*pbap*.json` — phonebook data
-- `*map*.json` — message data
-- `*fuzz*.json` — fuzzing results
-- `*dos*.json` / `*flood*.json` — DoS test results
-- `*rfcomm*.json` / `*l2cap*.json` / `*scan*.json` — recon data
+The report includes:
+- Device fingerprint (manufacturer, BT version, attack surface, vulnerability indicators)
+- Scan results (Classic + BLE devices with device class and distance)
+- Vulnerability findings (evidence-based: confirmed/potential/unverified)
+- PBAP data (phonebook entries, call logs, vCard counts)
+- MAP data (message listings and content)
+- Attack chain results (hijack phase status)
+- Audio captures (HFP/A2DP recordings with duration)
+- Fuzzing and DoS test results
+- Session metadata (commands run, targets, timestamps)
 
 ---
 
@@ -1096,36 +1023,40 @@ hijack_output/
 
 ## Common Workflows
 
-### Workflow 1: Quick IVI Assessment
+### Workflow 1: Quick IVI Assessment (Session-Based)
 
 ```bash
-# Scan → Fingerprint → Vuln scan → Report
-sudo bt-tap scan classic -d 15 -o devices.json
-sudo bt-tap recon sdp AA:BB:CC:DD:EE:FF -o sdp.json
-sudo bt-tap recon fingerprint AA:BB:CC:DD:EE:FF -o fp.json
-sudo bt-tap vulnscan AA:BB:CC:DD:EE:FF -o vulns.json
+# Session tracks everything — report auto-collects at the end
+sudo bt-tap -s ivi_test scan classic -d 15
+sudo bt-tap -s ivi_test recon fingerprint AA:BB:CC:DD:EE:FF
+sudo bt-tap -s ivi_test vulnscan AA:BB:CC:DD:EE:FF
+sudo bt-tap -s ivi_test report
+
+# Or run it all in one command:
+sudo bt-tap -s ivi_test run "scan classic" "recon fingerprint TARGET" "vulnscan TARGET" "report"
 ```
 
 ### Workflow 2: Hidden Service Discovery
 
 ```bash
 # SDP browse + RFCOMM scan + L2CAP scan → diff for hidden services
-sudo bt-tap recon sdp AA:BB:CC:DD:EE:FF
-sudo bt-tap recon rfcomm-scan AA:BB:CC:DD:EE:FF -o rfcomm.json
-sudo bt-tap recon l2cap-scan AA:BB:CC:DD:EE:FF -o l2cap.json
+sudo bt-tap -s recon recon sdp AA:BB:CC:DD:EE:FF
+sudo bt-tap -s recon recon rfcomm-scan AA:BB:CC:DD:EE:FF
+sudo bt-tap -s recon recon l2cap-scan AA:BB:CC:DD:EE:FF
+sudo bt-tap -s recon report
 ```
 
 ### Workflow 3: Full Pentest with Report
 
 ```bash
 # Auto mode does everything
-sudo bt-tap auto AA:BB:CC:DD:EE:FF -d 30 -o pentest_toyota/
+sudo bt-tap -s pentest auto AA:BB:CC:DD:EE:FF -d 30
 
-# Or manual step-by-step
-sudo bt-tap scan classic -d 20
-sudo bt-tap vulnscan AA:BB:CC:DD:EE:FF
-sudo bt-tap hijack AA:BB:CC:DD:EE:FF 11:22:33:44:55:66 -n "Galaxy S24" -o output/
-sudo bt-tap report output/ --format html --output final_report.html
+# Or manual step-by-step with session tracking
+sudo bt-tap -s pentest scan classic -d 20
+sudo bt-tap -s pentest vulnscan AA:BB:CC:DD:EE:FF
+sudo bt-tap -s pentest hijack AA:BB:CC:DD:EE:FF 11:22:33:44:55:66 -n "Galaxy S24"
+sudo bt-tap -s pentest report
 ```
 
 ### Workflow 4: Audio Surveillance
@@ -1136,13 +1067,6 @@ sudo bt-tap audio profile hfp
 sudo bt-tap audio live           # Real-time mic stream to your laptop
 sudo bt-tap hfp capture AA:BB:CC:DD:EE:FF -d 300 -o call.wav
 sudo bt-tap audio review --dir .  # Review all captures
-```
-
-### Workflow 5: TPMS Security Assessment
-
-```bash
-# Scan for BLE TPMS sensors
-sudo bt-tap tpms scan -d 20
 
 # Sniff and decode sensor data
 sudo bt-tap tpms sniff -d 120 -o tpms_output/
@@ -1338,22 +1262,6 @@ sudo bt-tap audio restart
 # Switch profile if needed
 sudo bt-tap audio profile hfp    # For microphone
 sudo bt-tap audio profile a2dp   # For media
-```
-
-### TPMS "No sensors found"
-
-Most vehicle TPMS uses 315/433 MHz RF, not BLE. Only aftermarket BLE sensors and Tesla use Bluetooth.
-
-```bash
-# Check if sensors are RF-based (need SDR)
-sudo bt-tap tpms sdr -d 60
-
-# For BLE TPMS, sensors must be active (tire rotating >20 mph or triggered)
-# Try a longer scan duration
-sudo bt-tap tpms scan -d 30
-
-# Use nRF52840 for enhanced BLE capture
-sudo bt-tap tpms sniff --nrf -d 120
 ```
 
 ### WSL2 USB Passthrough
