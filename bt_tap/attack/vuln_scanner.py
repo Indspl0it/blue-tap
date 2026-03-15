@@ -8,8 +8,10 @@ This scanner emphasizes evidence-based classification:
 It avoids declaring definitive CVE exploitation unless direct evidence exists.
 """
 
+import errno
 import re
 import socket
+import struct
 
 from bt_tap.recon.sdp import browse_services, check_ssp, get_raw_sdp
 from bt_tap.recon.rfcomm_scan import RFCOMMScanner
@@ -398,7 +400,6 @@ def _check_eatt_support(address: str) -> list[dict]:
     to PSM 0x0027, it supports BT 5.2+ EATT — indicates a newer stack
     with parallel GATT capability and mandatory encryption.
     """
-    import errno
 
     findings: list[dict] = []
 
@@ -447,6 +448,555 @@ def _check_eatt_support(address: str) -> list[dict]:
             sock.close()
     except OSError:
         pass
+
+    return findings
+
+
+def _check_hidden_rfcomm(address: str, services: list[dict]) -> list[dict]:
+    """Diff RFCOMM scan against SDP to find unadvertised services."""
+    findings: list[dict] = []
+
+    sdp_channels = []
+    for svc in services:
+        if svc.get("protocol") == "RFCOMM":
+            ch = svc.get("channel")
+            if isinstance(ch, int):
+                sdp_channels.append(ch)
+
+    if not sdp_channels:
+        verbose("No SDP RFCOMM channels to diff against; skipping hidden-service check")
+        return findings
+
+    try:
+        scanner = RFCOMMScanner(address)
+        hidden = scanner.find_hidden_services(sdp_channels)
+    except Exception as exc:
+        verbose(f"Hidden RFCOMM scan failed: {exc}")
+        return findings
+
+    severity_map = {
+        "at_modem": "CRITICAL",
+        "obex": "HIGH",
+        "silent_open": "MEDIUM",
+        "raw_data": "MEDIUM",
+    }
+
+    for h in hidden:
+        ch = h["channel"]
+        rtype = h.get("response_type", "unknown")
+        sev = severity_map.get(rtype, "MEDIUM")
+        findings.append(
+            _finding(
+                sev,
+                f"Hidden RFCOMM Service (ch {ch})",
+                f"Channel {ch} is open but not advertised in SDP. Response type: {rtype}.",
+                impact="Unadvertised services may be debug/factory interfaces lacking auth controls.",
+                remediation="Disable or authenticate unadvertised RFCOMM channels.",
+                status="confirmed",
+                confidence="high",
+                evidence=f"Channel {ch} open ({rtype}), not in SDP channels {sdp_channels}",
+            )
+        )
+
+    return findings
+
+
+def _check_encryption_enforcement(address: str, services: list[dict]) -> list[dict]:
+    """Test whether sensitive RFCOMM services accept unencrypted connections."""
+    findings: list[dict] = []
+
+    SOL_BLUETOOTH = 274
+    BT_SECURITY = 4
+
+    sensitive_keywords = ("pbap", "phonebook", "map", "message", "hfp", "hands-free", "handsfree")
+    targets = []
+    for svc in services:
+        name = svc.get("name", "")
+        lname = name.lower()
+        if not any(k in lname for k in sensitive_keywords):
+            continue
+        if svc.get("protocol") != "RFCOMM":
+            continue
+        ch = svc.get("channel")
+        if isinstance(ch, int):
+            targets.append((name, ch))
+
+    AF_BLUETOOTH = getattr(socket, "AF_BLUETOOTH", 31)
+    BTPROTO_RFCOMM = getattr(socket, "BTPROTO_RFCOMM", 3)
+
+    for svc_name, ch in targets:
+        try:
+            sock = socket.socket(AF_BLUETOOTH, socket.SOCK_STREAM, BTPROTO_RFCOMM)
+            sock.settimeout(4.0)
+            # Set security level to BT_SECURITY_LOW (1)
+            sec_struct = struct.pack("BBH", 1, 0, 0)
+            sock.setsockopt(SOL_BLUETOOTH, BT_SECURITY, sec_struct)
+            try:
+                sock.connect((address, ch))
+                # Connection succeeded without encryption
+                findings.append(
+                    _finding(
+                        "HIGH",
+                        f"No Encryption Required ({svc_name})",
+                        f"{svc_name} on channel {ch} accepted connection at BT_SECURITY_LOW.",
+                        impact="Data transferred over this profile may be sent unencrypted.",
+                        remediation="Enforce BT_SECURITY_MEDIUM or higher on sensitive services.",
+                        status="confirmed",
+                        confidence="high",
+                        evidence=f"RFCOMM ch {ch} ({svc_name}) connected with BT_SECURITY_LOW",
+                    )
+                )
+                sock.close()
+            except OSError as exc:
+                sock.close()
+                if exc.errno == errno.EACCES:
+                    findings.append(
+                        _finding(
+                            "INFO",
+                            f"Encryption Enforced ({svc_name})",
+                            f"{svc_name} on channel {ch} correctly refused unencrypted connection.",
+                            status="confirmed",
+                            confidence="high",
+                            evidence=f"RFCOMM ch {ch} ({svc_name}) returned EACCES at BT_SECURITY_LOW",
+                        )
+                    )
+                else:
+                    verbose(f"Encryption check for {svc_name}/ch{ch}: {exc}")
+        except OSError as exc:
+            verbose(f"Socket setup failed for encryption check on {svc_name}/ch{ch}: {exc}")
+
+    return findings
+
+
+def _check_pin_lockout(address: str, hci: str, ssp: bool | None) -> list[dict]:
+    """Test whether legacy-pairing target implements PIN lockout."""
+    findings: list[dict] = []
+
+    if ssp is not False:
+        verbose("SSP is enabled or unknown; skipping PIN lockout check")
+        return findings
+
+    try:
+        from bt_tap.attack.pin_brute import PINBruteForce
+
+        brute = PINBruteForce(address, hci=hci)
+        result = brute.detect_lockout(attempts=3)
+    except Exception as exc:
+        verbose(f"PIN lockout detection failed: {exc}")
+        return findings
+
+    locked_out = result.get("locked_out", False)
+    timings = result.get("timings", [])
+    timing_str = ", ".join(f"{t:.3f}s" for t in timings)
+
+    if not locked_out:
+        avg_time = sum(timings) / len(timings) if timings else 0
+        if avg_time < 2.0:
+            findings.append(
+                _finding(
+                    "HIGH",
+                    "No PIN Lockout (Fast Rejections)",
+                    "Target rejected wrong PINs quickly with no lockout. Brute force is feasible.",
+                    impact="An attacker can enumerate all 10,000 4-digit PINs in minutes.",
+                    remediation="Implement exponential backoff or lockout after repeated failed pairings.",
+                    status="confirmed",
+                    confidence="high",
+                    evidence=f"Timings: [{timing_str}], no lockout detected",
+                )
+            )
+        else:
+            findings.append(
+                _finding(
+                    "MEDIUM",
+                    "No PIN Lockout Detected",
+                    "Target did not lock out after wrong PINs, but rejections were not fast.",
+                    impact="PIN brute force may be feasible but slower than expected.",
+                    remediation="Implement lockout after repeated failed pairings.",
+                    status="confirmed",
+                    confidence="medium",
+                    evidence=f"Timings: [{timing_str}], no lockout detected",
+                )
+            )
+    else:
+        findings.append(
+            _finding(
+                "INFO",
+                "PIN Lockout Detected",
+                "Target implements lockout or backoff after repeated wrong PINs.",
+                status="confirmed",
+                confidence="high",
+                evidence=f"Timings: [{timing_str}], lockout detected",
+            )
+        )
+
+    return findings
+
+
+def _check_device_class(address: str, hci: str) -> list[dict]:
+    """Parse device class of device and flag interesting service bits."""
+    findings: list[dict] = []
+
+    if not check_tool("hcitool"):
+        return findings
+
+    result = run_cmd(["hcitool", "-i", hci, "info", address], timeout=12)
+    if result.returncode != 0:
+        return findings
+
+    m = re.search(r"Class:\s*(0x[0-9a-fA-F]+)", result.stdout)
+    if not m:
+        return findings
+
+    from bt_tap.core.scanner import parse_device_class
+
+    cod = parse_device_class(m.group(1))
+    svc_list = cod.get("services", [])
+    major = cod.get("major", "Unknown")
+    minor = cod.get("minor", "Unknown")
+
+    flagged = []
+    if "Object Transfer" in svc_list:
+        flagged.append("Object Transfer")
+    if "Networking" in svc_list:
+        flagged.append("Networking")
+
+    if flagged:
+        findings.append(
+            _finding(
+                "MEDIUM",
+                "Interesting Device Class Services",
+                f"Device class advertises attack-relevant services: {', '.join(flagged)}.",
+                impact="Object Transfer / Networking service bits increase OBEX/network attack surface.",
+                remediation="Disable unnecessary service class bits in device firmware.",
+                status="confirmed",
+                confidence="medium",
+                evidence=f"CoD {cod.get('raw', m.group(1))}: major={major}, minor={minor}, services={svc_list}",
+            )
+        )
+    else:
+        info(f"Device class: {major}/{minor}, services: {svc_list}")
+
+    return findings
+
+
+def _check_lmp_features(address: str, hci: str) -> list[dict]:
+    """Parse LMP feature bits from hcitool info and flag missing security features."""
+    findings: list[dict] = []
+
+    if not check_tool("hcitool"):
+        return findings
+
+    result = run_cmd(["hcitool", "-i", hci, "info", address], timeout=12)
+    if result.returncode != 0:
+        return findings
+
+    m = re.search(r"Features:\s*(0x[0-9a-fA-F]+(?:\s+0x[0-9a-fA-F]+)*)", result.stdout)
+    if not m:
+        verbose("No Features line in hcitool info output")
+        return findings
+
+    raw_features = m.group(1)
+    byte_strs = raw_features.strip().split()
+    feature_bytes = []
+    for bs in byte_strs:
+        try:
+            feature_bytes.append(int(bs, 16))
+        except ValueError:
+            feature_bytes.append(0)
+
+    # Pad to at least 8 bytes
+    while len(feature_bytes) < 8:
+        feature_bytes.append(0)
+
+    def has_bit(byte_idx: int, bit: int) -> bool:
+        if byte_idx >= len(feature_bytes):
+            return False
+        return bool(feature_bytes[byte_idx] & (1 << bit))
+
+    # Check security-relevant bits
+    if not has_bit(0, 2):
+        findings.append(
+            _finding(
+                "CRITICAL",
+                "LMP: Encryption Not Supported",
+                "Target LMP features indicate encryption is not supported.",
+                impact="All Bluetooth traffic to this device is unencrypted.",
+                remediation="Device firmware must support encryption. Consider replacing hardware.",
+                status="confirmed",
+                confidence="high",
+                evidence=f"Features byte 0 bit 2 = 0 (features: {raw_features})",
+            )
+        )
+
+    if has_bit(0, 5):
+        findings.append(
+            _finding(
+                "INFO",
+                "LMP: Role Switch Supported",
+                "Target supports role switch. This is a prerequisite for BIAS attacks.",
+                cve="CVE-2020-10135",
+                status="confirmed",
+                confidence="medium",
+                evidence=f"Features byte 0 bit 5 = 1 (features: {raw_features})",
+            )
+        )
+
+    if has_bit(5, 3):
+        findings.append(
+            _finding(
+                "MEDIUM",
+                "LMP: Pause Encryption Supported",
+                "Target supports pause encryption, which is related to KNOB attack surface.",
+                cve="CVE-2019-9506",
+                impact="Pause encryption can facilitate key length negotiation attacks.",
+                remediation="Verify firmware enforces minimum key length regardless of pause encryption.",
+                status="confirmed",
+                confidence="medium",
+                evidence=f"Features byte 5 bit 3 = 1 (features: {raw_features})",
+            )
+        )
+
+    if not has_bit(6, 3):
+        findings.append(
+            _finding(
+                "HIGH",
+                "LMP: SSP Not Supported in Features",
+                "Target LMP features do not include Secure Simple Pairing support.",
+                impact="Device relies on legacy PIN pairing, vulnerable to passive eavesdropping of pairing exchange.",
+                remediation="Use hardware that supports SSP (Bluetooth 2.1+).",
+                status="confirmed",
+                confidence="high",
+                evidence=f"Features byte 6 bit 3 = 0 (features: {raw_features})",
+            )
+        )
+
+    if not has_bit(7, 3):
+        findings.append(
+            _finding(
+                "MEDIUM",
+                "LMP: Secure Connections Not Supported",
+                "Target does not support Secure Connections (P-256 ECDH).",
+                impact="Falls back to legacy pairing crypto (P-192), weaker against offline brute force.",
+                remediation="Use hardware supporting Bluetooth 4.1+ Secure Connections.",
+                status="confirmed",
+                confidence="high",
+                evidence=f"Features byte 7 bit 3 = 0 (features: {raw_features})",
+            )
+        )
+
+    return findings
+
+
+def _check_authorization_model(address: str, services: list[dict]) -> list[dict]:
+    """Test if PBAP/MAP services allow unauthenticated OBEX access."""
+    findings: list[dict] = []
+
+    AF_BLUETOOTH = getattr(socket, "AF_BLUETOOTH", 31)
+    BTPROTO_RFCOMM = getattr(socket, "BTPROTO_RFCOMM", 3)
+
+    # PBAP target UUID
+    PBAP_UUID = bytes.fromhex("796135f0f0c511d809660800200c9a66")
+
+    profile_channels = []
+    for svc in services:
+        name = svc.get("name", "")
+        lname = name.lower()
+        if svc.get("protocol") != "RFCOMM":
+            continue
+        ch = svc.get("channel")
+        if not isinstance(ch, int):
+            continue
+        if any(k in lname for k in ("pbap", "phonebook", "map", "message")):
+            profile_channels.append((name, ch))
+
+    for svc_name, ch in profile_channels:
+        try:
+            sock = socket.socket(AF_BLUETOOTH, socket.SOCK_STREAM, BTPROTO_RFCOMM)
+            sock.settimeout(4.0)
+            try:
+                sock.connect((address, ch))
+            except OSError as exc:
+                sock.close()
+                if exc.errno == errno.EACCES:
+                    findings.append(
+                        _finding(
+                            "INFO",
+                            f"RFCOMM Auth Required ({svc_name})",
+                            f"{svc_name} on channel {ch} requires authentication to connect.",
+                            status="confirmed",
+                            confidence="high",
+                            evidence=f"RFCOMM ch {ch} ({svc_name}) returned EACCES on connect",
+                        )
+                    )
+                else:
+                    verbose(f"RFCOMM connect to {svc_name}/ch{ch} failed: {exc}")
+                continue
+
+            # Connected — send OBEX Connect with target UUID
+            # OBEX Connect: opcode=0x80, version=0x10, flags=0x00, maxlen=0xFFFF
+            # Target header: HI=0x46, length=2+16
+            target_header = b"\x46" + struct.pack(">H", 2 + len(PBAP_UUID)) + PBAP_UUID
+            obex_body = b"\x10\x00" + struct.pack(">H", 0xFFFF) + target_header
+            obex_connect = b"\x80" + struct.pack(">H", 3 + len(obex_body)) + obex_body
+
+            try:
+                sock.sendall(obex_connect)
+                sock.settimeout(3.0)
+                resp = sock.recv(1024)
+            except (OSError, socket.timeout):
+                resp = b""
+            finally:
+                sock.close()
+
+            if resp and resp[0] == 0xA0:
+                findings.append(
+                    _finding(
+                        "CRITICAL",
+                        f"Unauthenticated OBEX Access ({svc_name})",
+                        f"{svc_name} on channel {ch} returned OBEX Success (0xA0) without authentication.",
+                        impact="Phonebook/message data may be accessible without pairing.",
+                        remediation="Require authentication and authorization before OBEX profile access.",
+                        status="confirmed",
+                        confidence="high",
+                        evidence=f"OBEX Connect to ch {ch} ({svc_name}) returned 0x{resp[0]:02X}",
+                    )
+                )
+            elif resp and resp[0] == 0xC1:
+                findings.append(
+                    _finding(
+                        "INFO",
+                        f"OBEX Authorization Enforced ({svc_name})",
+                        f"{svc_name} on channel {ch} returned Unauthorized (0xC1).",
+                        status="confirmed",
+                        confidence="high",
+                        evidence=f"OBEX Connect to ch {ch} ({svc_name}) returned 0x{resp[0]:02X}",
+                    )
+                )
+            elif resp:
+                verbose(f"OBEX response from {svc_name}/ch{ch}: 0x{resp[0]:02X}")
+        except OSError as exc:
+            verbose(f"Authorization check socket error for {svc_name}/ch{ch}: {exc}")
+
+    return findings
+
+
+def _check_automotive_diagnostics(address: str, services: list[dict]) -> list[dict]:
+    """Probe for automotive diagnostic interfaces via SPP/DUN channels."""
+    findings: list[dict] = []
+
+    AF_BLUETOOTH = getattr(socket, "AF_BLUETOOTH", 31)
+    BTPROTO_RFCOMM = getattr(socket, "BTPROTO_RFCOMM", 3)
+
+    # Find SPP (0x1101) and DUN (0x1103) channels
+    diag_channels = []
+    diag_keywords = ("diagnostic", "obd", "can", "ecu", "debug", "factory", "gateway")
+
+    for svc in services:
+        uuid = svc.get("uuid", "").lower()
+        name = svc.get("name", "")
+        lname = name.lower()
+        ch = svc.get("channel")
+        if svc.get("protocol") != "RFCOMM" or not isinstance(ch, int):
+            continue
+
+        is_spp = "1101" in uuid
+        is_dun = "1103" in uuid
+        has_keyword = any(k in lname for k in diag_keywords)
+
+        if is_spp or is_dun or has_keyword:
+            diag_channels.append((name, ch, is_spp, is_dun, has_keyword))
+
+    # Check SDP names for diagnostic keywords even without SPP/DUN UUID
+    for svc in services:
+        name = svc.get("name", "")
+        lname = name.lower()
+        if any(k in lname for k in diag_keywords):
+            ch = svc.get("channel")
+            if isinstance(ch, int) and not any(d[1] == ch for d in diag_channels):
+                diag_channels.append((name, ch, False, False, True))
+
+    if not diag_channels:
+        return findings
+
+    # Flag keyword matches in SDP names
+    for name, ch, is_spp, is_dun, has_keyword in diag_channels:
+        if has_keyword:
+            findings.append(
+                _finding(
+                    "HIGH",
+                    f"Diagnostic Service Name ({name})",
+                    f"SDP service '{name}' on channel {ch} matches automotive diagnostic keywords.",
+                    impact="May provide access to vehicle diagnostic or CAN bus interfaces.",
+                    remediation="Remove or authenticate diagnostic Bluetooth services in production.",
+                    status="confirmed",
+                    confidence="medium",
+                    evidence=f"SDP name '{name}' matches diagnostic keywords, ch {ch}",
+                )
+            )
+
+    # Actively probe SPP/DUN channels
+    probes = [b"ATI\r\n", b"ATZ\r\n", b"0100\r\n"]
+    for name, ch, is_spp, is_dun, has_keyword in diag_channels:
+        if not (is_spp or is_dun):
+            continue
+        try:
+            sock = socket.socket(AF_BLUETOOTH, socket.SOCK_STREAM, BTPROTO_RFCOMM)
+            sock.settimeout(4.0)
+            try:
+                sock.connect((address, ch))
+            except OSError:
+                sock.close()
+                continue
+
+            responses = []
+            for probe in probes:
+                try:
+                    sock.sendall(probe)
+                    sock.settimeout(2.0)
+                    data = sock.recv(1024)
+                    if data:
+                        responses.append((probe.strip().decode(), data))
+                except (OSError, socket.timeout):
+                    continue
+
+            sock.close()
+
+            for probe_name, resp in responses:
+                resp_text = resp.decode("ascii", errors="replace")
+                if "ELM" in resp_text or any(
+                    c in resp_text for c in ("41 00", "41 0C", "7E8")
+                ):
+                    findings.append(
+                        _finding(
+                            "CRITICAL",
+                            f"CAN Bus Access via Bluetooth ({name})",
+                            f"Channel {ch} responded to OBD probe with ELM/PID data.",
+                            impact="Direct CAN bus access enables vehicle diagnostics, "
+                                   "ECU interrogation, and potentially safety-critical commands.",
+                            remediation="Remove Bluetooth-to-CAN bridges or require strong auth.",
+                            status="confirmed",
+                            confidence="high",
+                            evidence=f"Probe '{probe_name}' on ch {ch} returned: {resp_text[:100]}",
+                        )
+                    )
+                    break
+                elif b"OK" in resp or b"ERROR" in resp or b"AT" in resp.upper():
+                    findings.append(
+                        _finding(
+                            "HIGH",
+                            f"Diagnostic Serial Access ({name})",
+                            f"Channel {ch} responded to AT command with modem-style response.",
+                            impact="AT-command serial access may allow modem control or diagnostic operations.",
+                            remediation="Authenticate and restrict AT-command interfaces.",
+                            status="confirmed",
+                            confidence="high",
+                            evidence=f"Probe '{probe_name}' on ch {ch} returned: {resp_text[:100]}",
+                        )
+                    )
+                    break
+
+        except OSError as exc:
+            verbose(f"Diagnostic probe on {name}/ch{ch} failed: {exc}")
 
     return findings
 
@@ -525,6 +1075,27 @@ def scan_vulnerabilities(address: str, hci: str = "hci0") -> list[dict]:
 
     section("Check 8: EATT Support (BT 5.2+ Indicator)", style="bt.cyan")
     findings.extend(_check_eatt_support(address))
+
+    section("Check 9: Hidden RFCOMM Services", style="bt.cyan")
+    findings.extend(_check_hidden_rfcomm(address, services))
+
+    section("Check 10: Encryption Enforcement", style="bt.cyan")
+    findings.extend(_check_encryption_enforcement(address, services))
+
+    section("Check 11: PIN Lockout Behavior", style="bt.cyan")
+    findings.extend(_check_pin_lockout(address, hci, ssp))
+
+    section("Check 12: Device Class Analysis", style="bt.cyan")
+    findings.extend(_check_device_class(address, hci))
+
+    section("Check 13: LMP Feature Bits", style="bt.cyan")
+    findings.extend(_check_lmp_features(address, hci))
+
+    section("Check 14: Authorization Model (OBEX)", style="bt.cyan")
+    findings.extend(_check_authorization_model(address, services))
+
+    section("Check 15: Automotive Diagnostics", style="bt.cyan")
+    findings.extend(_check_automotive_diagnostics(address, services))
 
     _print_findings(address, findings)
     return findings
