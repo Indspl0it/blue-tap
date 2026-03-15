@@ -1034,24 +1034,44 @@ Phase tracking with tree-style indentation:
 
 ## Output Directory Structure
 
-After a hijack or auto run, the output directory looks like:
+Every bt-tap run creates a session directory under `sessions/`:
 
 ```
-hijack_output/
-├── attack_results.json    # Phase-by-phase results and timing
+sessions/
+└── bt-tap_20260315_143022/           # auto-named, or your -s name
+    ├── session.json                   # session metadata + command log
+    ├── 001_scan_classic.json          # scan results
+    ├── 002_fingerprint.json           # device fingerprint
+    ├── 003_vulnscan.json              # vulnerability findings
+    ├── report.html                    # generated report
+    └── report.json                    # JSON report
+```
+
+After a hijack or auto run, extracted data is organized by profile:
+
+```
+sessions/my_assessment/auto/          # or hijack_output/
+├── auto_results.json                  # phase-by-phase attack results
 ├── pbap/
-│   ├── pb.vcf             # Main phonebook (vCard format)
-│   ├── ich.vcf            # Incoming call history
-│   ├── och.vcf            # Outgoing call history
-│   ├── mch.vcf            # Missed call history
-│   └── sim_pb.vcf         # SIM phonebook
+│   ├── telecom_pb.vcf                 # main phonebook (vCard)
+│   ├── telecom_ich.vcf                # incoming call history
+│   ├── telecom_och.vcf                # outgoing call history
+│   ├── telecom_mch.vcf                # missed call history
+│   ├── telecom_cch.vcf                # combined call history
+│   ├── telecom_spd.vcf                # speed dial
+│   ├── telecom_fav.vcf                # favorites
+│   └── SIM1_telecom_pb.vcf            # SIM phonebook
 ├── map/
-│   ├── inbox/             # SMS inbox messages
-│   └── sent/              # Sent messages
-├── audio/
-│   └── call_001.wav       # Captured call audio
-├── report.html            # Styled HTML pentest report
-└── report.json            # Machine-readable JSON report
+│   ├── inbox_listing.xml              # message listing (handles, subjects)
+│   ├── inbox/
+│   │   ├── 000001.bmsg                # individual messages (bMessage format)
+│   │   └── 000002.bmsg
+│   ├── sent/
+│   ├── outbox/
+│   ├── deleted/
+│   └── draft/
+├── report.html                        # HTML pentest report
+└── report.json                        # machine-readable JSON report
 ```
 
 ---
