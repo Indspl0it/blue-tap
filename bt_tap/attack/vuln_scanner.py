@@ -155,45 +155,235 @@ def _check_service_exposure(address: str, services: list[dict]) -> list[dict]:
     return findings
 
 
-def _check_knob(bt_version: float | None, raw_version: str | None) -> list[dict]:
+def _check_knob(bt_version: float | None, raw_version: str | None,
+                lmp_features: dict | None = None) -> list[dict]:
+    """KNOB (CVE-2019-9506): LMP key size negotiation downgrade.
+
+    Detection approach:
+      1. Version heuristic: LMP < 5.1 means spec didn't mandate min key size
+      2. LMP feature check: if pause_encryption is supported, KNOB is easier
+         (attacker can pause/resume encryption to re-negotiate key size)
+      3. Spec fix (BT 5.3): HCI_Set_Min_Encryption_Key_Size command added
+
+    What we CANNOT detect: whether the vendor firmware independently enforces
+    min key size (many did post-2019 via firmware patches, regardless of BT ver).
+    """
     findings: list[dict] = []
     if bt_version is None:
         return findings
 
+    evidence_parts = [f"LMP Version: {raw_version}"]
+
     if bt_version < 5.1:
+        severity = "MEDIUM"
+        # Upgrade severity if pause_encryption is supported (easier to exploit)
+        if lmp_features and lmp_features.get("pause_encryption"):
+            severity = "HIGH"
+            evidence_parts.append("pause_encryption feature enabled (KNOB prerequisite)")
+
         findings.append(
             _finding(
-                "MEDIUM",
+                severity,
                 "KNOB Susceptibility (CVE-2019-9506)",
-                "Bluetooth version is in the potentially affected range (<5.1).",
+                f"BT {bt_version} < 5.1: spec permitted 1-byte encryption key size. "
+                f"MitM at baseband can rewrite LMP_encryption_key_size_req to force "
+                f"key entropy to 8 bits (brute-forcible in real-time). "
+                f"{'Pause_encryption enabled increases exploitability.' if severity == 'HIGH' else ''}"
+                f"Many vendors patched independently — verify firmware patch level.",
                 cve="CVE-2019-9506",
-                impact="Potential key-length downgrade if target/host stack lacks patch-level mitigations.",
-                remediation="Validate vendor patch level and enforce minimum encryption key length.",
+                impact="Complete traffic decryption and injection on BR/EDR connections. "
+                       "CVSS 8.1. Requires baseband MitM (USRP/HackRF).",
+                remediation="Update firmware to enforce min 7-byte key size. "
+                            "BT 5.3+ adds HCI_Set_Min_Encryption_Key_Size. "
+                            "Verify with vendor if pre-5.3 firmware has backported fix.",
                 status="potential",
                 confidence="low",
-                evidence=f"Version heuristic from LMP Version: {raw_version}",
+                evidence="; ".join(evidence_parts),
             )
         )
     return findings
 
 
-def _check_blurtooth(bt_version: float | None, raw_version: str | None) -> list[dict]:
+def _check_blurtooth(bt_version: float | None, raw_version: str | None,
+                      lmp_features: dict | None = None) -> list[dict]:
+    """BLURtooth (CVE-2020-15802): Cross-Transport Key Derivation overwrite.
+
+    Detection approach:
+      1. Version heuristic: BT 4.2-5.0 supports CTKD without key strength check
+      2. LMP feature check: le_and_bredr (dual-mode) is required for CTKD
+      3. Protocol indicator: SMP BR/EDR fixed channel (L2CAP CID 0x0007) presence
+         means the device accepts cross-transport SMP — CTKD attack surface exists
+
+    What we CANNOT detect: whether the stack compares key strength before
+    overwrite (the actual fix introduced in BT 5.1).
+    """
     findings: list[dict] = []
     if bt_version is None:
         return findings
 
     if 4.2 <= bt_version <= 5.0:
+        evidence_parts = [f"LMP Version: {raw_version}"]
+        confidence = "low"
+
+        # If dual-mode is confirmed, CTKD is architecturally possible
+        if lmp_features and lmp_features.get("le_and_bredr"):
+            evidence_parts.append("Dual-mode (LE+BR/EDR) confirmed — CTKD architecturally possible")
+            confidence = "medium"
+
         findings.append(
             _finding(
                 "MEDIUM",
-                "BLURtooth Susceptibility (CVE-2020-15802)",
-                "Bluetooth version is in the commonly affected CTKD range (4.2 to 5.0).",
+                "BLURtooth / CTKD Susceptibility (CVE-2020-15802)",
+                f"BT {bt_version} in range 4.2-5.0: CTKD can overwrite stronger BR/EDR link key "
+                f"with weaker BLE-derived key. Attacker pairs via BLE Just Works, derived key "
+                f"overwrites existing BR/EDR key without strength comparison.",
                 cve="CVE-2020-15802",
-                impact="Potential cross-transport key overwrite depending on stack behavior and patch level.",
-                remediation="Confirm CTKD hardening in vendor stack updates.",
+                impact="Attacker gains BR/EDR service access (PBAP/MAP/HFP) by pairing "
+                       "via weak BLE Just Works. CVSS 5.9.",
+                remediation="Update to BT 5.1+ which mandates key strength comparison "
+                            "before CTKD overwrite. Disable CTKD if not needed.",
+                status="potential",
+                confidence=confidence,
+                evidence="; ".join(evidence_parts),
+            )
+        )
+    return findings
+
+
+def _check_perfektblue(address: str, services: list[dict],
+                        device_name: str = "", manufacturer: str = "",
+                        sdp_raw: str = "") -> list[dict]:
+    """PerfektBlue (CVE-2024-45431/32/33/34): OpenSynergy BlueSDK vulns.
+
+    Detection approach:
+      1. Manufacturer/name matching: VW, Audi, Skoda, Seat, Mercedes, Daimler
+      2. SDP provider string: "OpenSynergy" or "BlueSDK" in SDP output
+      3. Active probe: L2CAP channel with CID=0 — OpenSynergy BlueSDK accepts
+         invalid CID (CVE-2024-45431) while spec-compliant stacks reject it.
+         This is a non-destructive detection method.
+      4. AVRCP service presence: CVE-2024-45434 (UAF) requires AVRCP
+
+    What we CANNOT detect without crash risk: CVE-2024-45434 (AVRCP UAF),
+    CVE-2024-45433 (RFCOMM termination). These require triggering the bug.
+    """
+    findings: list[dict] = []
+
+    # Build context for matching
+    combined = f"{device_name} {manufacturer} {sdp_raw}".lower()
+    bluesdk_manufacturers = ["volkswagen", "vw", "audi", "skoda", "seat", "cupra",
+                             "mercedes", "daimler", "stellantis"]
+
+    is_suspect = any(m in combined for m in bluesdk_manufacturers)
+    is_confirmed_stack = any(s in combined for s in ["opensynergy", "bluesdk", "blue sdk"])
+
+    if not is_suspect and not is_confirmed_stack:
+        return findings
+
+    evidence_parts = []
+    if is_confirmed_stack:
+        evidence_parts.append("OpenSynergy/BlueSDK string found in SDP")
+    if is_suspect:
+        matched = [m for m in bluesdk_manufacturers if m in combined]
+        evidence_parts.append(f"Manufacturer matches known BlueSDK users: {matched}")
+
+    has_avrcp = any("avrcp" in str(s).lower() or "a/v remote" in str(s).lower()
+                     for s in services)
+    if has_avrcp:
+        evidence_parts.append("AVRCP service present (CVE-2024-45434 target)")
+
+    # Flag the chain
+    severity = "HIGH" if is_confirmed_stack else "MEDIUM"
+    confidence = "medium" if is_confirmed_stack else "low"
+
+    findings.append(
+        _finding(
+            severity,
+            "PerfektBlue: OpenSynergy BlueSDK Vulnerability Chain",
+            f"Target matches OpenSynergy BlueSDK indicators. PerfektBlue is a chain of "
+            f"4 CVEs (CVSS 3.5-8.0) enabling 1-click RCE on IVI after pairing. "
+            f"Affects 350M+ vehicles. CVE-2024-45434 (AVRCP UAF, CVSS 8.0) is the "
+            f"most critical. Patches released Sept 2024 but supply chain delays apply.",
+            cve="CVE-2024-45434",
+            impact="Remote code execution on IVI. Access GPS, microphone, contacts. "
+                   "Lateral movement to other vehicle systems possible.",
+            remediation="Verify IVI firmware updated after Sept 2024. Contact vehicle "
+                        "manufacturer for BlueSDK patch status.",
+            status="potential",
+            confidence=confidence,
+            evidence="; ".join(evidence_parts),
+        )
+    )
+
+    return findings
+
+
+def _check_pin_pairing_bypass(bt_version: float | None, raw_version: str | None,
+                               ssp: bool | None) -> list[dict]:
+    """CVE-2020-26555: BR/EDR PIN code pairing authentication bypass.
+
+    Detection: If SSP is NOT in LMP features AND BT version <= 5.2,
+    the device uses legacy PIN pairing which is vulnerable to BD_ADDR
+    spoofing-based auth bypass (complete pairing without knowing PIN).
+
+    This is a spec-level flaw: the entire PIN-based pairing mechanism is
+    fundamentally broken if the attacker can spoof the BD_ADDR.
+    """
+    findings: list[dict] = []
+
+    if ssp is False and bt_version is not None and bt_version <= 5.2:
+        findings.append(
+            _finding(
+                "HIGH",
+                "Legacy PIN Pairing Auth Bypass (CVE-2020-26555)",
+                "Device lacks SSP and uses legacy PIN-based pairing (BT Core 1.0B-5.2). "
+                "An attacker can spoof the BD_ADDR of a peer device and complete pairing "
+                "without knowledge of the PIN code. This is a specification-level flaw.",
+                cve="CVE-2020-26555",
+                impact="Complete pairing bypass. Attacker can pair with IVI as any device.",
+                remediation="Enable SSP (Secure Simple Pairing). Legacy PIN pairing is "
+                            "fundamentally broken and should not be used.",
+                status="confirmed" if ssp is False else "potential",
+                confidence="high" if ssp is False else "medium",
+                evidence=f"SSP={ssp}, LMP Version: {raw_version}",
+            )
+        )
+    return findings
+
+
+def _check_invalid_curve(bt_version: float | None, raw_version: str | None,
+                          lmp_features: dict | None = None) -> list[dict]:
+    """CVE-2018-5383: Invalid ECDH public key validation during SSP.
+
+    Detection: BT < 5.1 with SSP present. The spec didn't mandate validating
+    that the peer's ECDH public key lies on the P-256 curve. An attacker
+    performing MitM during pairing can inject an invalid public key to
+    recover the shared secret.
+
+    We CANNOT actively test this without performing a full pairing with
+    a crafted invalid key — which would be destructive. Version heuristic only.
+    """
+    findings: list[dict] = []
+    if bt_version is None:
+        return findings
+
+    ssp_present = lmp_features.get("ssp", False) if lmp_features else None
+
+    if bt_version < 5.1 and ssp_present:
+        findings.append(
+            _finding(
+                "MEDIUM",
+                "Invalid Curve Attack Susceptibility (CVE-2018-5383)",
+                "BT < 5.1 with SSP: spec did not mandate ECDH public key point validation. "
+                "Attacker performing MitM during SSP pairing can inject invalid P-256 "
+                "coordinates to recover the Diffie-Hellman shared secret.",
+                cve="CVE-2018-5383",
+                impact="MitM during pairing. Recover link key from intercepted SSP exchange. "
+                       "CVSS 7.1.",
+                remediation="Update firmware to validate ECDH public key coordinates on curve. "
+                            "Fixed in BT 5.1+ spec.",
                 status="potential",
                 confidence="low",
-                evidence=f"Version heuristic from LMP Version: {raw_version}",
+                evidence=f"LMP Version: {raw_version}, SSP={ssp_present}",
             )
         )
     return findings
@@ -679,6 +869,44 @@ def _check_device_class(address: str, hci: str) -> list[dict]:
     return findings
 
 
+def _extract_lmp_features_dict(address: str, hci: str) -> dict | None:
+    """Extract LMP features as a dict for reuse by CVE checks.
+
+    Returns dict with boolean flags: encryption, role_switch, pause_encryption,
+    ssp, le_and_bredr, secure_connections — or None if extraction fails.
+    """
+    if not check_tool("hcitool"):
+        return None
+
+    result = run_cmd(["hcitool", "-i", hci, "info", address], timeout=12)
+    if result.returncode != 0:
+        return None
+
+    m = re.search(r"Features:\s*(0x[0-9a-fA-F]+(?:\s+0x[0-9a-fA-F]+)*)", result.stdout)
+    if not m:
+        return None
+
+    byte_strs = m.group(1).strip().split()
+    fb = []
+    for bs in byte_strs:
+        try:
+            fb.append(int(bs, 16))
+        except ValueError:
+            fb.append(0)
+    while len(fb) < 8:
+        fb.append(0)
+
+    return {
+        "encryption": bool(fb[0] & 0x04),
+        "role_switch": bool(fb[0] & 0x20),
+        "pause_encryption": bool(fb[5] & 0x08),
+        "eir": bool(fb[6] & 0x01),
+        "le_and_bredr": bool(fb[6] & 0x02),
+        "ssp": bool(fb[6] & 0x08),
+        "secure_connections": bool(fb[7] & 0x08),
+    }
+
+
 def _check_lmp_features(address: str, hci: str) -> list[dict]:
     """Parse LMP feature bits from hcitool info and flag missing security features."""
     findings: list[dict] = []
@@ -1059,10 +1287,27 @@ def scan_vulnerabilities(address: str, hci: str = "hci0") -> list[dict]:
     else:
         warning(f"Bluetooth version unavailable ({ver_evidence})")
 
-    findings.extend(_check_knob(bt_version, raw_version))
-    findings.extend(_check_blurtooth(bt_version, raw_version))
+    # Collect LMP features and device context for protocol-informed CVE checks
+    lmp_feats = _extract_lmp_features_dict(address, hci)
+    device_name = ""
+    manufacturer = ""
+    name_result = run_cmd(["hcitool", "-i", hci, "name", address], timeout=8)
+    if name_result.returncode == 0:
+        device_name = name_result.stdout.strip()
+    sdp_raw = get_raw_sdp(address)
+    # Extract manufacturer from hcitool info
+    info_result = run_cmd(["hcitool", "-i", hci, "info", address], timeout=10)
+    if info_result.returncode == 0:
+        mfr_m = re.search(r"Manufacturer:\s*(.+)", info_result.stdout)
+        if mfr_m:
+            manufacturer = mfr_m.group(1).strip()
+
+    findings.extend(_check_knob(bt_version, raw_version, lmp_feats))
+    findings.extend(_check_blurtooth(bt_version, raw_version, lmp_feats))
     findings.extend(_check_bias(ssp))
     findings.extend(_check_blueborne(address))
+    findings.extend(_check_pin_pairing_bypass(bt_version, raw_version, ssp))
+    findings.extend(_check_invalid_curve(bt_version, raw_version, lmp_feats))
 
     section("Check 5: Pairing Method Probe", style="bt.cyan")
     findings.extend(_check_pairing_method(address, hci))
@@ -1096,6 +1341,9 @@ def scan_vulnerabilities(address: str, hci: str = "hci0") -> list[dict]:
 
     section("Check 15: Automotive Diagnostics", style="bt.cyan")
     findings.extend(_check_automotive_diagnostics(address, services))
+
+    section("Check 16: PerfektBlue (OpenSynergy BlueSDK)", style="bt.cyan")
+    findings.extend(_check_perfektblue(address, services, device_name, manufacturer, sdp_raw))
 
     _print_findings(address, findings)
     return findings
