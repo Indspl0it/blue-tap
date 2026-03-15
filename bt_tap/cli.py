@@ -26,31 +26,17 @@ def main(verbose, session_name):
     """BT-Tap: Bluetooth/BLE Penetration Testing Toolkit for Automotive IVI.
 
     \b
-    Use -s/--session to track an assessment:
-      bt-tap -s mytest scan classic              # scan and log
-      bt-tap -s mytest vulnscan AA:BB:CC:...     # vuln scan and log
-      bt-tap -s mytest report                    # auto-collect everything
+    Quick start:
+      bt-tap adapter list                        # check adapters
+      bt-tap scan classic                        # discover devices
+      bt-tap vulnscan AA:BB:CC:DD:EE:FF          # 16-check vuln scan
+      bt-tap hijack IVI_MAC PHONE_MAC            # full attack chain
 
     \b
-    Modules:
-      adapter    - HCI adapter management
-      scan       - Discover BT Classic and BLE devices
-      recon      - Enumerate services, fingerprint, channel scanning
-      spoof      - MAC address spoofing and device impersonation
-      pbap       - Phone Book Access Profile (phonebook, call logs)
-      map        - Message Access Profile (SMS/MMS)
-      hfp        - Hands-Free Profile (call audio intercept/inject)
-      audio      - Audio capture, injection, and review
-      avrcp      - AVRCP media control and attacks
-      opp        - Object Push Profile (file transfer to IVI)
-      vulnscan   - Vulnerability scanning
-      hijack     - Full attack chain orchestration
-      bias       - BIAS auth bypass attack (CVE-2020-10135)
-      dos        - DoS and pairing attacks
-      fuzz       - Protocol fuzzing (L2CAP, RFCOMM, AT)
-      report     - Pentest report generation
-      auto       - Automated discovery and attack
-      run        - Execute multiple commands in sequence
+    Session tracking (recommended for assessments):
+      bt-tap -s mytest scan classic              # auto-logs output
+      bt-tap -s mytest vulnscan TARGET           # auto-logs findings
+      bt-tap -s mytest report                    # collects everything
     """
     from bt_tap.utils.output import set_verbosity
     set_verbosity(verbose)

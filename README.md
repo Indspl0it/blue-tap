@@ -305,30 +305,29 @@ python3 -m bt_tap.cli scan classic
 ## Quick Start
 
 ```bash
-# 1. Check your adapter (shows chipset, BT version, spoofing support)
+# Check your adapter
 sudo bt-tap adapter list
-sudo bt-tap adapter info hci0
 
-# 2. Start a session — all output is auto-logged for reporting
-sudo bt-tap -s mytest scan classic -d 15
+# Scan for nearby devices
+sudo bt-tap scan classic -d 15
 
-# 3. Enumerate services (omit MAC for interactive device picker)
-sudo bt-tap -s mytest recon sdp AA:BB:CC:DD:EE:FF
+# Fingerprint a target (identifies IVI, shows attack surface)
+sudo bt-tap recon fingerprint AA:BB:CC:DD:EE:FF
 
-# 4. Fingerprint the IVI (identifies manufacturer, BT version, attack surface)
-sudo bt-tap -s mytest recon fingerprint AA:BB:CC:DD:EE:FF
+# Run 16-check vulnerability scan
+sudo bt-tap vulnscan AA:BB:CC:DD:EE:FF
 
-# 5. Run vulnerability scan
-sudo bt-tap -s mytest vulnscan AA:BB:CC:DD:EE:FF
+# Full hijack — spoof phone, connect to IVI, extract data
+sudo bt-tap hijack AA:BB:CC:DD:EE:FF 11:22:33:44:55:66 -n "Galaxy S24"
+```
 
-# 6. Full hijack
-sudo bt-tap -s mytest hijack AA:BB:CC:DD:EE:FF 11:22:33:44:55:66 -n "Galaxy S24"
+**Session mode** — tracks everything for a unified report:
 
-# 7. Generate report — auto-collects everything from the session
-sudo bt-tap -s mytest report
-
-# Or run a complete workflow in one command:
-sudo bt-tap -s mytest run "scan classic" "recon fingerprint TARGET" "vulnscan TARGET" "report"
+```bash
+sudo bt-tap -s assessment scan classic -d 15
+sudo bt-tap -s assessment vulnscan AA:BB:CC:DD:EE:FF
+sudo bt-tap -s assessment hijack AA:BB:CC:DD:EE:FF 11:22:33:44:55:66
+sudo bt-tap -s assessment report              # auto-collects all session data
 ```
 
 ---
@@ -801,57 +800,37 @@ sudo bt-tap at snarf AA:BB:CC:DD:EE:FF -m MC -r 1-50  # Missed calls
 
 ### Vulnerability Scanning
 
-Scan a target for Bluetooth CVE indicators and configuration weaknesses using
-an evidence-based model (`confirmed` / `potential` / `unverified`).
+Runs 16 security checks against a target device. Each finding is tagged as `confirmed` (directly observed), `potential` (version/heuristic), or `unverified` (needs active testing).
 
 ```bash
-# Full vulnerability scan
 sudo bt-tap vulnscan AA:BB:CC:DD:EE:FF
-
-# Specify adapter and save results
 sudo bt-tap vulnscan AA:BB:CC:DD:EE:FF -i hci0 -o vulns.json
-
-# Verbose mode shows check details
-sudo bt-tap -v vulnscan AA:BB:CC:DD:EE:FF
+sudo bt-tap -v vulnscan AA:BB:CC:DD:EE:FF    # verbose
 ```
 
-**16 checks performed:**
-
-| # | Check | What It Tests | Max Severity |
-|---|-------|--------------|-------------|
-| 1 | SSP Detection | Missing Secure Simple Pairing via LMP features | MEDIUM |
-| 2 | Service Exposure | Sensitive RFCOMM services (PBAP/MAP/OPP) reachable | MEDIUM |
-| 3 | L2CAP Reachability | Target responds to L2CAP echo (l2ping) | INFO |
-| 4 | CVE Detection | Protocol-informed checks (see below) | HIGH |
-| 5 | Pairing Method | Just Works vs Numeric Comparison vs Passkey | MEDIUM |
-| 6 | BLE Writable Surface | Writable GATT characteristics count and UUIDs | INFO |
-| 7 | BrakTooth Chipset | Known-vulnerable chipset family (ESP32, CSR, CYW, AX200) | MEDIUM |
-| 8 | EATT (BT 5.2+) | Enhanced ATT support via L2CAP PSM 0x0027 | INFO |
-| 9 | Hidden RFCOMM | Unadvertised channels (AT modem, OBEX, silent) | CRITICAL |
-| 10 | Encryption Enforcement | Sensitive profiles accept BT_SECURITY_LOW connections | HIGH |
-| 11 | PIN Lockout | Legacy pairing without rate-limiting | HIGH |
-| 12 | Device Class | CoD service bits (Object Transfer, Networking) | MEDIUM |
-| 13 | LMP Features | Missing encryption/SSP/SC, pause_encryption, role_switch | CRITICAL |
-| 14 | Authorization Model | Unauthenticated OBEX/PBAP access without pairing | CRITICAL |
-| 15 | Automotive Diagnostics | CAN bus access via SPP/DUN (ELM327/OBD probes) | CRITICAL |
-| 16 | PerfektBlue | OpenSynergy BlueSDK (VW/Audi/Skoda/Mercedes) CVE chain | HIGH |
-
-**CVE detection in Check 4 (protocol-informed, not just version matching):**
-
-| CVE | Detection Method | Confidence |
-|-----|-----------------|-----------|
-| CVE-2019-9506 (KNOB) | LMP version + pause_encryption feature bit | Low-Medium |
-| CVE-2020-10135 (BIAS) | SSP probe + active test via `bt-tap bias` | Low |
-| CVE-2020-15802 (BLURtooth) | Version 4.2-5.0 + dual-mode LE+BR/EDR confirmed | Low-Medium |
-| CVE-2017-1000251 (BlueBorne) | BlueZ version string in SDP provider | Medium |
-| CVE-2020-26555 (PIN Bypass) | No SSP in LMP features + BT<=5.2 | High |
-| CVE-2018-5383 (Invalid Curve) | BT<5.1 + SSP present (ECDH validation gap) | Low |
-| CVE-2024-45434 (PerfektBlue) | Manufacturer match + AVRCP service present | Low-Medium |
-
-> Note: `vulnscan` is an evidence-based triage tool. Findings are classified as
-> `confirmed` (directly observed), `potential` (version/heuristic), or `unverified`
-> (requires active exploit validation). Each CVE check documents what CAN vs
-> CANNOT be detected from standard HCI.
+| # | Check | What It Does | CVE | Severity |
+|---|-------|-------------|-----|----------|
+| 1 | SSP Detection | Checks LMP features for Secure Simple Pairing | — | MEDIUM |
+| 2 | Service Exposure | Probes PBAP/MAP/OPP RFCOMM channels for reachability | — | MEDIUM |
+| 3 | L2CAP Reachability | l2ping echo test | — | INFO |
+| 4a | KNOB | LMP version <5.1 + pause_encryption feature bit | CVE-2019-9506 | HIGH |
+| 4b | BIAS | SSP probe, requires active test via `bt-tap bias` | CVE-2020-10135 | MEDIUM |
+| 4c | BLURtooth | Version 4.2-5.0 + dual-mode LE+BR/EDR confirmed | CVE-2020-15802 | MEDIUM |
+| 4d | BlueBorne | BlueZ version string in SDP provider output | CVE-2017-1000251 | HIGH |
+| 4e | PIN Bypass | No SSP in LMP + BT<=5.2 = legacy PIN broken | CVE-2020-26555 | HIGH |
+| 4f | Invalid Curve | BT<5.1 + SSP present, ECDH validation not mandated | CVE-2018-5383 | MEDIUM |
+| 5 | Pairing Method | Probes IO capabilities: Just Works / Numeric Comparison | — | MEDIUM |
+| 6 | BLE Writable Surface | Enumerates writable GATT characteristics | — | INFO |
+| 7 | BrakTooth Chipset | Matches manufacturer against known-vulnerable chipsets | 25 CVEs | MEDIUM |
+| 8 | EATT | Probes L2CAP PSM 0x0027 for BT 5.2+ Enhanced ATT | — | INFO |
+| 9 | Hidden RFCOMM | Diffs open channels vs SDP — finds debug/diag ports | — | CRITICAL |
+| 10 | Encryption | Tests if PBAP/MAP/HFP accept BT_SECURITY_LOW | — | HIGH |
+| 11 | PIN Lockout | Tests rate-limiting on legacy pairing (3 wrong PINs) | — | HIGH |
+| 12 | Device Class | Parses CoD bits for Object Transfer, Networking | — | MEDIUM |
+| 13 | LMP Features | Parses 64-bit bitmask: encryption, SSP, SC, role_switch | — | CRITICAL |
+| 14 | Authorization | Sends raw OBEX Connect to PBAP to test unauth access | — | CRITICAL |
+| 15 | Automotive Diag | Probes SPP/DUN with AT and OBD commands (CAN bus) | — | CRITICAL |
+| 16 | PerfektBlue | Matches VW/Audi/Skoda/Mercedes + OpenSynergy BlueSDK | CVE-2024-45434 | HIGH |
 
 ---
 
