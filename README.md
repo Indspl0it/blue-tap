@@ -79,11 +79,16 @@ Built in Python with a Rich-powered CLI, BT-Tap wraps the Linux Bluetooth stack 
 - **Chipset detection** — identifies adapter chipset (Intel, CSR, Broadcom, Realtek) and recommends spoofing strategy
 - **Adapter restore** — revert to original MAC after testing
 
-### Vulnerability Assessment
+### Vulnerability Assessment (15 Checks)
 - **Evidence-based findings** — each result is tagged as `confirmed`, `potential`, or `unverified`
-- **CVE susceptibility heuristics** — BlueBorne, KNOB, BLURtooth, BIAS, BrakTooth (version/chipset-based indicators)
-- **Legacy pairing indicators** — detect missing SSP via LMP features and probe pairing method
-- **Active service exposure probes** — verify sensitive RFCOMM service reachability
+- **CVE susceptibility heuristics** — BlueBorne, KNOB, BLURtooth, BIAS, BrakTooth, PerfektBlue (version/chipset-based indicators)
+- **LMP feature analysis** — parses 64-bit feature bitmask for missing encryption, SSP, Secure Connections, pause_encryption (KNOB prerequisite), role_switch (BIAS prerequisite)
+- **Encryption enforcement** — tests if sensitive profiles (PBAP/MAP/HFP) accept unencrypted connections via BT_SECURITY_LOW
+- **Authorization model** — sends raw OBEX Connect to PBAP/MAP to test unauthenticated phonebook access
+- **Hidden RFCOMM services** — diffs open channels vs SDP to find unadvertised debug/diagnostic ports (AT modem = CRITICAL)
+- **Automotive diagnostics** — probes SPP/DUN channels with AT and OBD commands to detect CAN bus access via Bluetooth
+- **PIN lockout detection** — tests legacy pairing targets for rate-limiting behavior
+- **Device class analysis** — flags Object Transfer, Networking service bits
 - **BLE writable-surface analysis** — enumerate writable GATT characteristics
 - **EATT detection** — probe L2CAP PSM 0x0027 to detect BT 5.2+ Enhanced ATT
 - **SDP continuation state probing** — test for BlueBorne CVE-2017-0785 info leak vector
@@ -124,38 +129,40 @@ Built in Python with a Rich-powered CLI, BT-Tap wraps the Linux Bluetooth stack 
 ```
 bt-tap/
 ├── bt_tap/
-│   ├── cli.py                 # Click CLI (88 commands, 18 groups)
+│   ├── cli.py                 # Click CLI with session tracking + run command
 │   ├── core/
-│   │   ├── adapter.py         # HCI adapter management (hciconfig)
-│   │   ├── scanner.py         # Classic BT + BLE scanning (hcitool, bleak)
-│   │   └── spoofer.py         # MAC spoofing (bdaddr, spooftooph, btmgmt)
+│   │   ├── adapter.py         # HCI adapter management, chipset detection
+│   │   ├── scanner.py         # Classic + BLE scanning, CoD parsing, distance
+│   │   └── spoofer.py         # MAC spoofing with verification (bdaddr/spooftooph/btmgmt)
 │   ├── recon/
-│   │   ├── sdp.py             # SDP service browsing (sdptool)
-│   │   ├── gatt.py            # BLE GATT enumeration (bleak)
-│   │   ├── fingerprint.py     # Device fingerprinting
-│   │   ├── rfcomm_scan.py     # RFCOMM channel scanner (sockets)
-│   │   ├── l2cap_scan.py      # L2CAP PSM scanner (sockets)
-│   │   └── hci_capture.py     # HCI traffic capture (btmon)
+│   │   ├── sdp.py             # SDP service browsing, profile version parsing
+│   │   ├── gatt.py            # BLE GATT enumeration, UUID lookup, security hints
+│   │   ├── fingerprint.py     # Device fingerprint, IVI detection, vuln indicators
+│   │   ├── rfcomm_scan.py     # RFCOMM channel scanner (1-30)
+│   │   ├── l2cap_scan.py      # L2CAP PSM scanner (standard + dynamic)
+│   │   ├── hci_capture.py     # HCI traffic capture (btmon, pcap mode)
+│   │   └── sniffer.py         # nRF52840 + USRP B210 capture, key cracking
 │   ├── attack/
-│   │   ├── pbap.py            # PBAP phonebook extraction (PyOBEX)
-│   │   ├── map_client.py      # MAP message extraction (PyOBEX)
-│   │   ├── hfp.py             # HFP call audio (RFCOMM + SCO sockets)
-│   │   ├── a2dp.py            # A2DP audio capture/inject (PulseAudio)
-│   │   ├── avrcp.py           # AVRCP media control (D-Bus/BlueZ)
-│   │   ├── opp.py             # OPP file push (PyOBEX)
+│   │   ├── pbap.py            # PBAP phonebook (search, photos, stale data)
+│   │   ├── map_client.py      # MAP messages (push, notifications, bMessage)
+│   │   ├── hfp.py             # HFP calls (codec negotiation, silent call, AT)
+│   │   ├── a2dp.py            # A2DP audio (capture, inject, TTS, loopback)
+│   │   ├── avrcp.py           # AVRCP media control (D-Bus, player info)
+│   │   ├── opp.py             # OPP file push (OBEX)
 │   │   ├── bluesnarfer.py     # AT command extraction (RFCOMM)
-│   │   ├── hijack.py          # Full hijack orchestration
+│   │   ├── bias.py            # BIAS auth bypass (CVE-2020-10135)
+│   │   ├── hijack.py          # Full hijack orchestration (5 phases)
 │   │   ├── auto.py            # Automated discovery + attack
-│   │   ├── vuln_scanner.py    # CVE vulnerability scanner
-│   │   ├── dos.py             # Pairing flood / name flood DoS
-│   │   ├── pin_brute.py       # Legacy PIN brute-force (D-Bus Agent1)
-│   │   ├── tpms.py            # TPMS BLE/SDR attacks (scan, spoof, flood)
-│   │   └── fuzz.py            # L2CAP/RFCOMM/AT fuzzing
+│   │   ├── vuln_scanner.py    # 15-check vulnerability scanner
+│   │   ├── fuzz.py            # L2CAP/RFCOMM/SDP/AT fuzzing
+│   │   ├── dos.py             # Pairing flood, l2ping flood, name flood
+│   │   └── pin_brute.py       # Legacy PIN brute-force
 │   ├── report/
-│   │   └── generator.py       # HTML/JSON report generation
+│   │   └── generator.py       # HTML/JSON report (fingerprint, audio, vulns)
 │   └── utils/
-│       ├── bt_helpers.py      # MAC validation, profile UUIDs, PBAP paths
-│       ├── interactive.py     # Interactive device picker (scan + select)
+│       ├── bt_helpers.py      # MAC utils, OUI lookup, adapter state guard
+│       ├── session.py         # Session tracking for assessment workflows
+│       ├── interactive.py     # Interactive device picker (Classic + BLE)
 │       └── output.py          # Rich UI: banner, phases, tables, logging
 └── pyproject.toml
 ```
@@ -802,21 +809,29 @@ sudo bt-tap vulnscan AA:BB:CC:DD:EE:FF -i hci0 -o vulns.json
 sudo bt-tap -v vulnscan AA:BB:CC:DD:EE:FF
 ```
 
-**Checks performed:**
+**15 checks performed:**
 
-| Check | What It Tests |
-|-------|--------------|
-| SSP Support | Checks whether SSP is advertised in SDP (legacy-pairing indicator if absent) |
-| Sensitive RFCOMM Services | Actively probes advertised PBAP/MAP/OPP-like RFCOMM channels for reachability |
-| Pairing Method Probe | Attempts to detect pairing method (e.g., Just Works vs Numeric Comparison) |
-| Writable GATT Surface | Enumerates writable BLE characteristics as attack-surface indicators |
-| BlueBorne Indicator | Looks for vulnerable BlueZ version strings in SDP output (heuristic) |
-| KNOB Indicator | Flags versions below BT 5.1 as potentially susceptible (heuristic) |
-| BLURtooth Indicator | Flags BT 4.2–5.0 as potentially susceptible (heuristic) |
-| BIAS | Marked as unverified without active exploit validation |
+| # | Check | What It Tests | Max Severity |
+|---|-------|--------------|-------------|
+| 1 | SSP Detection | Missing Secure Simple Pairing via LMP features | MEDIUM |
+| 2 | Service Exposure | Sensitive RFCOMM services (PBAP/MAP/OPP) reachable | MEDIUM |
+| 3 | L2CAP Reachability | Target responds to L2CAP echo (l2ping) | INFO |
+| 4 | CVE Heuristics | KNOB (<5.1), BLURtooth (4.2-5.0), BIAS, BlueBorne | HIGH |
+| 5 | Pairing Method | Just Works vs Numeric Comparison vs Passkey | MEDIUM |
+| 6 | BLE Writable Surface | Writable GATT characteristics count and UUIDs | INFO |
+| 7 | BrakTooth Chipset | Known-vulnerable chipset family (ESP32, CSR, CYW, AX200) | MEDIUM |
+| 8 | EATT (BT 5.2+) | Enhanced ATT support via L2CAP PSM 0x0027 | INFO |
+| 9 | Hidden RFCOMM | Unadvertised channels (AT modem, OBEX, silent) | CRITICAL |
+| 10 | Encryption Enforcement | Sensitive profiles accept BT_SECURITY_LOW connections | HIGH |
+| 11 | PIN Lockout | Legacy pairing without rate-limiting | HIGH |
+| 12 | Device Class | CoD service bits (Object Transfer, Networking) | MEDIUM |
+| 13 | LMP Features | Missing encryption/SSP/SC, pause_encryption, role_switch | CRITICAL |
+| 14 | Authorization Model | Unauthenticated OBEX/PBAP access without pairing | CRITICAL |
+| 15 | Automotive Diagnostics | CAN bus access via SPP/DUN (ELM327/OBD probes) | CRITICAL |
 
-> Note: `vulnscan` is a triage tool. It does not claim definitive exploitability
-> for a CVE unless direct evidence is observed.
+> Note: `vulnscan` is an evidence-based triage tool. Findings are classified as
+> `confirmed` (directly observed), `potential` (version/heuristic), or `unverified`
+> (requires active exploit validation).
 
 ---
 
@@ -872,6 +887,12 @@ sudo bt-tap dos pin-brute AA:BB:CC:DD:EE:FF --start 0 --end 9999 --delay 0.5
 
 # Targeted PIN range (if you know it's 4-digit starting with 1)
 sudo bt-tap dos pin-brute AA:BB:CC:DD:EE:FF --start 1000 --end 1999
+
+# L2CAP echo flood — more effective than pairing flood (requires root)
+sudo bt-tap dos l2ping-flood AA:BB:CC:DD:EE:FF --count 1000 --size 600
+
+# L2CAP flood without flood mode (shows RTT per ping)
+sudo bt-tap dos l2ping-flood AA:BB:CC:DD:EE:FF --count 100 --no-flood
 ```
 
 ---
@@ -893,6 +914,9 @@ sudo bt-tap fuzz rfcomm AA:BB:CC:DD:EE:FF --channel 1 --mode at         # AT com
 
 # AT command fuzzing with specific patterns
 sudo bt-tap fuzz at AA:BB:CC:DD:EE:FF --channel 1 --patterns "long,null,format,unicode,overflow"
+
+# SDP continuation state probe (BlueBorne CVE-2017-0785 vector)
+sudo bt-tap fuzz sdp AA:BB:CC:DD:EE:FF
 
 # External tool: Bluetooth Stack Smasher
 sudo bt-tap fuzz bss AA:BB:CC:DD:EE:FF
@@ -1166,36 +1190,7 @@ IVI's authentication enforcement.
 | **BT 5.3+ with mutual auth patches** | Both sides must prove key knowledge | Vendor-specific — test anyway |
 | **IVI requires Numeric Comparison** | 6-digit code must match on both screens | Need physical access or social engineering |
 
-### Technical Detail: The Link Key Problem
 
-```
-Standard hijack flow:
-  You → spoof MAC "AA:BB:CC:DD:EE:FF" (phone's address)
-  You → connect to IVI
-  IVI → "I know AA:BB:CC:DD:EE:FF, we share link key 0xABCD1234..."
-  IVI → "Prove you know the key" (challenge-response)
-  You → ??? (don't have the key) → AUTH FAILURE
-
-With nRF52840/USRP key recovery:
-  nRF52840 → sniff BLE pairing exchange (BLE targets)
-  USRP B210 → sniff BR/EDR piconet traffic (Classic targets)
-  Crackle/tshark → extract link key from captured frames
-  bt-tap → inject recovered key into BlueZ
-  You → connect with correct key → SUCCESS
-
-With BIAS (CVE-2020-10135):
-  You → spoof MAC, connect to IVI
-  During LMP auth → force role switch (central↔peripheral)
-  IVI → confused about who should authenticate whom
-  Auth → completed unilaterally or skipped → SUCCESS (if unpatched)
-```
-
-### Recommendation for Pentesters
-
-1. **Always try simple hijack first** — many IVIs don't enforce key validation
-2. **If rejected**, run `bt-tap bias probe` to check BIAS vulnerability
-3. **If BIAS fails**, use nRF52840/USRP to capture the real pairing exchange
-4. **Document which scenario** the IVI falls into — this IS the pentest finding
 
 ---
 
