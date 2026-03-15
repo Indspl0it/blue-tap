@@ -84,15 +84,15 @@ def banner():
     _BANNER_SHOWN = True
     console.print(_LOGO, highlight=False)
     tagline = (
-        "[bt.dim]───────── [/bt.dim]"
+        "  [bt.dim]───────── [/bt.dim]"
         "[bt.cyan]Bluetooth/BLE[/bt.cyan] "
         "[bt.purple]Automotive IVI[/bt.purple] "
         "[bt.red]Pentest Toolkit[/bt.red]"
         "[bt.dim] ─────────[/bt.dim]"
     )
-    console.print(Align.center(tagline), highlight=False)
+    console.print(tagline, highlight=False)
     console.print(
-        Align.center("[bt.dim]v1.5.0 │ github.com/bt-tap[/bt.dim]"),
+        "  [bt.dim]v1.5.0 │ github.com/bt-tap[/bt.dim]",
         highlight=False,
     )
     console.print()
