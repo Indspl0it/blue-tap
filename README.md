@@ -79,19 +79,25 @@ Built in Python with a Rich-powered CLI, BT-Tap wraps the Linux Bluetooth stack 
 - **Chipset detection** — identifies adapter chipset (Intel, CSR, Broadcom, Realtek) and recommends spoofing strategy
 - **Adapter restore** — revert to original MAC after testing
 
-### Vulnerability Assessment (15 Checks)
+### Vulnerability Assessment (16 Checks)
 - **Evidence-based findings** — each result is tagged as `confirmed`, `potential`, or `unverified`
-- **CVE susceptibility heuristics** — BlueBorne, KNOB, BLURtooth, BIAS, BrakTooth, PerfektBlue (version/chipset-based indicators)
-- **LMP feature analysis** — parses 64-bit feature bitmask for missing encryption, SSP, Secure Connections, pause_encryption (KNOB prerequisite), role_switch (BIAS prerequisite)
-- **Encryption enforcement** — tests if sensitive profiles (PBAP/MAP/HFP) accept unencrypted connections via BT_SECURITY_LOW
+- **Protocol-informed CVE detection** — each check uses the right detection method for the vulnerability, not just version matching:
+  - **KNOB (CVE-2019-9506)** — LMP version + pause_encryption feature bit (exploitability indicator)
+  - **BIAS (CVE-2020-10135)** — SSP probe + active role-switch test via bias.py
+  - **BLURtooth (CVE-2020-15802)** — version range + le_and_bredr dual-mode confirmation (CTKD prerequisite)
+  - **BlueBorne (CVE-2017-1000251)** — BlueZ version in SDP provider string
+  - **PIN Bypass (CVE-2020-26555)** — no SSP in LMP features = legacy PIN = fundamentally broken
+  - **Invalid Curve (CVE-2018-5383)** — BT<5.1 + SSP present (ECDH validation not mandated)
+  - **BrakTooth (25 CVEs)** — chipset manufacturer matching (ESP32, CSR, Cypress, Intel, Qualcomm)
+  - **PerfektBlue (CVE-2024-45431/32/33/34)** — manufacturer match (VW/Audi/Skoda/Mercedes) + SDP provider + AVRCP presence
+- **LMP feature analysis** — parses 64-bit feature bitmask for missing encryption, SSP, Secure Connections, pause_encryption, role_switch
+- **Encryption enforcement** — tests if PBAP/MAP/HFP accept unencrypted connections via BT_SECURITY_LOW
 - **Authorization model** — sends raw OBEX Connect to PBAP/MAP to test unauthenticated phonebook access
-- **Hidden RFCOMM services** — diffs open channels vs SDP to find unadvertised debug/diagnostic ports (AT modem = CRITICAL)
-- **Automotive diagnostics** — probes SPP/DUN channels with AT and OBD commands to detect CAN bus access via Bluetooth
+- **Hidden RFCOMM services** — diffs open channels vs SDP to find unadvertised debug/diagnostic ports
+- **Automotive diagnostics** — probes SPP/DUN channels with AT and OBD commands for CAN bus access
 - **PIN lockout detection** — tests legacy pairing targets for rate-limiting behavior
-- **Device class analysis** — flags Object Transfer, Networking service bits
-- **BLE writable-surface analysis** — enumerate writable GATT characteristics
-- **EATT detection** — probe L2CAP PSM 0x0027 to detect BT 5.2+ Enhanced ATT
-- **SDP continuation state probing** — test for BlueBorne CVE-2017-0785 info leak vector
+- **Device class analysis** — CoD service bits (Object Transfer, Networking)
+- **EATT detection** — L2CAP PSM 0x0027 probe for BT 5.2+ Enhanced ATT
 
 ### Session & Reporting
 - **Session tracking** — `--session` flag accumulates all command outputs for unified reporting
@@ -809,14 +815,14 @@ sudo bt-tap vulnscan AA:BB:CC:DD:EE:FF -i hci0 -o vulns.json
 sudo bt-tap -v vulnscan AA:BB:CC:DD:EE:FF
 ```
 
-**15 checks performed:**
+**16 checks performed:**
 
 | # | Check | What It Tests | Max Severity |
 |---|-------|--------------|-------------|
 | 1 | SSP Detection | Missing Secure Simple Pairing via LMP features | MEDIUM |
 | 2 | Service Exposure | Sensitive RFCOMM services (PBAP/MAP/OPP) reachable | MEDIUM |
 | 3 | L2CAP Reachability | Target responds to L2CAP echo (l2ping) | INFO |
-| 4 | CVE Heuristics | KNOB (<5.1), BLURtooth (4.2-5.0), BIAS, BlueBorne | HIGH |
+| 4 | CVE Detection | Protocol-informed checks (see below) | HIGH |
 | 5 | Pairing Method | Just Works vs Numeric Comparison vs Passkey | MEDIUM |
 | 6 | BLE Writable Surface | Writable GATT characteristics count and UUIDs | INFO |
 | 7 | BrakTooth Chipset | Known-vulnerable chipset family (ESP32, CSR, CYW, AX200) | MEDIUM |
@@ -828,10 +834,24 @@ sudo bt-tap -v vulnscan AA:BB:CC:DD:EE:FF
 | 13 | LMP Features | Missing encryption/SSP/SC, pause_encryption, role_switch | CRITICAL |
 | 14 | Authorization Model | Unauthenticated OBEX/PBAP access without pairing | CRITICAL |
 | 15 | Automotive Diagnostics | CAN bus access via SPP/DUN (ELM327/OBD probes) | CRITICAL |
+| 16 | PerfektBlue | OpenSynergy BlueSDK (VW/Audi/Skoda/Mercedes) CVE chain | HIGH |
+
+**CVE detection in Check 4 (protocol-informed, not just version matching):**
+
+| CVE | Detection Method | Confidence |
+|-----|-----------------|-----------|
+| CVE-2019-9506 (KNOB) | LMP version + pause_encryption feature bit | Low-Medium |
+| CVE-2020-10135 (BIAS) | SSP probe + active test via `bt-tap bias` | Low |
+| CVE-2020-15802 (BLURtooth) | Version 4.2-5.0 + dual-mode LE+BR/EDR confirmed | Low-Medium |
+| CVE-2017-1000251 (BlueBorne) | BlueZ version string in SDP provider | Medium |
+| CVE-2020-26555 (PIN Bypass) | No SSP in LMP features + BT<=5.2 | High |
+| CVE-2018-5383 (Invalid Curve) | BT<5.1 + SSP present (ECDH validation gap) | Low |
+| CVE-2024-45434 (PerfektBlue) | Manufacturer match + AVRCP service present | Low-Medium |
 
 > Note: `vulnscan` is an evidence-based triage tool. Findings are classified as
 > `confirmed` (directly observed), `potential` (version/heuristic), or `unverified`
-> (requires active exploit validation).
+> (requires active exploit validation). Each CVE check documents what CAN vs
+> CANNOT be detected from standard HCI.
 
 ---
 
