@@ -111,8 +111,6 @@ class PINBruteForce:
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True,
-                errors="replace",
             )
 
             # Set up agent and initiate pairing
@@ -123,7 +121,7 @@ class PINBruteForce:
                 f"pair {self.address}",
             ]
             for cmd in setup_commands:
-                proc.stdin.write(cmd + "\n")
+                proc.stdin.write((cmd + "\n").encode())
                 proc.stdin.flush()
                 time.sleep(0.2)
 
@@ -143,16 +141,15 @@ class PINBruteForce:
                     output_buf += chunk.decode("utf-8", errors="replace")
 
                 if not pin_sent and ("Enter PIN" in output_buf or "Passkey" in output_buf):
-                    proc.stdin.write(pin + "\n")
+                    proc.stdin.write((pin + "\n").encode())
                     proc.stdin.flush()
                     pin_sent = True
-                    # Give bluetoothctl a moment to process before quitting
                     time.sleep(0.5)
 
                 if "Pairing successful" in output_buf or "Failed to pair" in output_buf:
                     break
 
-            proc.stdin.write("quit\n")
+            proc.stdin.write(b"quit\n")
             proc.stdin.flush()
             try:
                 proc.wait(timeout=3)

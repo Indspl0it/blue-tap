@@ -41,7 +41,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 </head>
 <body>
 <h1>BT-Tap Pentest Report</h1>
-<p class="meta">Generated: {generated} | Tool: BT-Tap v0.1.0</p>
+<p class="meta">Generated: {generated} | Tool: BT-Tap v1.0.0</p>
 
 {content}
 
@@ -61,6 +61,8 @@ class ReportGenerator:
         self.recon_results = []
         self.fuzz_results = []
         self.dos_results = []
+        self.fingerprint_results = {}
+        self.audio_captures = []
         self.other_data = {}
         self.notes = []
 
@@ -87,6 +89,14 @@ class ReportGenerator:
 
     def add_dos_results(self, data: dict):
         self.dos_results.append(data)
+
+    def add_fingerprint(self, data: dict):
+        self.fingerprint_results.update(data)
+
+    def add_audio_capture(self, filepath: str, duration: float = 0, description: str = ""):
+        self.audio_captures.append({
+            "file": filepath, "duration": duration, "description": description,
+        })
 
     def add_note(self, note: str):
         self.notes.append(note)
@@ -243,6 +253,34 @@ class ReportGenerator:
 
             sections.append("</div>")
 
+        # Fingerprint Results
+        if self.fingerprint_results:
+            sections.append('<div class="section">')
+            sections.append("<h2>Device Fingerprint</h2>")
+            sections.append("<table><tr><th>Property</th><th>Value</th></tr>")
+            display_keys = ["address", "name", "manufacturer", "is_ivi",
+                           "device_class", "bt_version", "lmp_version"]
+            for key in display_keys:
+                val = self.fingerprint_results.get(key)
+                if val is not None:
+                    sections.append(f"<tr><td>{_esc(key)}</td><td>{_esc(str(val))}</td></tr>")
+            sections.append("</table>")
+            # Attack surface
+            surface = self.fingerprint_results.get("attack_surface", [])
+            if surface:
+                sections.append("<h3>Attack Surface</h3><ul>")
+                for item in surface:
+                    sections.append(f"<li>{_esc(item)}</li>")
+                sections.append("</ul>")
+            # Vuln hints
+            hints = self.fingerprint_results.get("vuln_hints", [])
+            if hints:
+                sections.append("<h3>Vulnerability Indicators</h3><ul>")
+                for hint in hints:
+                    sections.append(f'<li class="vuln-medium">{_esc(hint)}</li>')
+                sections.append("</ul>")
+            sections.append("</div>")
+
         # Scan Results
         if self.scan_results:
             sections.append('<div class="section">')
@@ -336,6 +374,21 @@ class ReportGenerator:
                 sections.append(f"<pre>{_esc(json.dumps(data, indent=2, default=str)[:2000])}</pre>")
             sections.append("</div>")
 
+        # Audio Captures
+        if self.audio_captures:
+            sections.append('<div class="section">')
+            sections.append("<h2>Audio Captures</h2>")
+            sections.append("<table><tr><th>File</th><th>Duration</th><th>Description</th></tr>")
+            for cap in self.audio_captures:
+                dur = f"{cap.get('duration', 0):.1f}s" if cap.get("duration") else "N/A"
+                sections.append(
+                    f"<tr><td>{_esc(cap.get('file', ''))}</td>"
+                    f"<td>{dur}</td>"
+                    f"<td>{_esc(cap.get('description', ''))}</td></tr>"
+                )
+            sections.append("</table>")
+            sections.append("</div>")
+
         # Notes
         if self.notes:
             sections.append('<div class="section">')
@@ -350,7 +403,9 @@ class ReportGenerator:
             content=content,
         )
 
-        os.makedirs(os.path.dirname(output) if os.path.dirname(output) else ".", exist_ok=True)
+        outdir = os.path.dirname(output)
+        if outdir:
+            os.makedirs(outdir, exist_ok=True)
         with open(output, "w") as f:
             f.write(html)
         success(f"HTML report generated: {output}")
@@ -370,6 +425,7 @@ class ReportGenerator:
                 "high_severity": sum(1 for f in self.vuln_findings
                                      if f.get("severity", "").lower() in ("high", "critical")),
             },
+            "fingerprint": self.fingerprint_results,
             "scan_results": self.scan_results,
             "vulnerabilities": self.vuln_findings,
             "pbap_data": self.pbap_results,
@@ -378,11 +434,14 @@ class ReportGenerator:
             "recon_results": self.recon_results,
             "fuzz_results": self.fuzz_results,
             "dos_results": self.dos_results,
+            "audio_captures": self.audio_captures,
             "other_data": self.other_data,
             "notes": self.notes,
         }
 
-        os.makedirs(os.path.dirname(output) if os.path.dirname(output) else ".", exist_ok=True)
+        outdir = os.path.dirname(output)
+        if outdir:
+            os.makedirs(outdir, exist_ok=True)
         with open(output, "w") as f:
             json.dump(report, f, indent=2, default=str)
         success(f"JSON report generated: {output}")

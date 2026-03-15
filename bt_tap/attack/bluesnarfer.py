@@ -95,14 +95,26 @@ class ATClient:
             error(f"AT error: {e}")
             return ""
 
+    def list_available_memories(self) -> list[str]:
+        """Query which phonebook memories are available (AT+CPBS=?)."""
+        response = self.send_at("AT+CPBS=?")
+        if "ERROR" in response:
+            return []
+        # Parse: +CPBS: ("ME","SM","DC","RC","MC","ON","FD")
+        import re
+        return re.findall(r'"(\w+)"', response)
+
     def read_phonebook(self, memory: str = "ME",
                         start: int = 1, end: int = 500) -> list[dict]:
         """Read phonebook entries using AT+CPBR.
 
         Memory types: SM (SIM), ME (phone), DC (dialed), RC (received), MC (missed)
         """
-        # Select memory
-        self.send_at(f'AT+CPBS="{memory}"')
+        # Select memory and check it succeeded
+        select_response = self.send_at(f'AT+CPBS="{memory}"')
+        if "ERROR" in select_response:
+            warning(f"Memory type '{memory}' not available on this device")
+            return []
 
         # Read entries
         response = self.send_at(f"AT+CPBR={start},{end}", timeout=10.0)
@@ -230,9 +242,17 @@ class ATClient:
         _write_json(os.path.join(output_dir, "device_info.json"), device_info)
         success(f"IMEI: {device_info['imei']}")
 
-        # Phonebooks
-        for mem, desc in [("ME", "Phone"), ("SM", "SIM"), ("DC", "Dialed"),
-                          ("RC", "Received"), ("MC", "Missed")]:
+        # Check which memories are available first
+        available = self.list_available_memories()
+        if available:
+            info(f"Available phonebook memories: {', '.join(available)}")
+
+        # Phonebooks — only try memories that are available
+        memories = [("ME", "Phone"), ("SM", "SIM"), ("DC", "Dialed"),
+                    ("RC", "Received"), ("MC", "Missed")]
+        for mem, desc in memories:
+            if available and mem not in available:
+                continue
             info(f"Reading {desc} phonebook ({mem})...")
             entries = self.read_phonebook(mem)
             if entries:
@@ -247,6 +267,13 @@ class ATClient:
             results["sms"] = messages
             _write_json(os.path.join(output_dir, "sms.json"), messages)
             success(f"  SMS: {len(messages)} messages")
+
+        # Summary
+        total_items = sum(
+            len(v) for k, v in results.items()
+            if k != "device_info" and isinstance(v, list)
+        )
+        success(f"Dump complete: {total_items} total items -> {output_dir}")
 
         return results
 

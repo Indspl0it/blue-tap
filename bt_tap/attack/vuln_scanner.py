@@ -9,6 +9,7 @@ It avoids declaring definitive CVE exploitation unless direct evidence exists.
 """
 
 import re
+import socket
 
 from bt_tap.recon.sdp import browse_services, check_ssp, get_raw_sdp
 from bt_tap.recon.rfcomm_scan import RFCOMMScanner
@@ -327,6 +328,129 @@ def _check_writable_gatt(address: str) -> list[dict]:
     return findings
 
 
+# Known BrakTooth-vulnerable chipset manufacturers/keywords
+_BRAKTOOTH_CHIPSETS = {
+    "esp32": ["CVE-2021-28139", "CVE-2021-28136", "CVE-2021-28135"],
+    "cypress": ["CVE-2021-34145", "CVE-2021-34148"],
+    "cyw20735": ["CVE-2021-34145", "CVE-2021-34148", "CVE-2021-34147"],
+    "csr": ["CVE-2021-35093"],
+    "csr8510": ["CVE-2021-35093"],
+    "csr8811": ["CVE-2021-35093"],
+    "intel": ["CVE-2021-34147"],
+    "ax200": ["CVE-2021-34147"],
+    "qualcomm": ["CVE-2021-34147"],
+    "wcn3990": ["CVE-2021-34147"],
+}
+
+
+def _check_braktooth_chipset(address: str, hci: str) -> list[dict]:
+    """Flag known BrakTooth-vulnerable chipsets by manufacturer string.
+
+    BrakTooth attacks operate at LMP layer (below HCI) and cannot be
+    tested from standard BlueZ. But we can flag known-vulnerable chipsets
+    from the manufacturer ID in hcitool info output.
+    """
+    findings: list[dict] = []
+
+    result = run_cmd(["hcitool", "-i", hci, "info", address], timeout=10)
+    if result.returncode != 0:
+        return findings
+
+    manufacturer = ""
+    for line in result.stdout.splitlines():
+        if "Manufacturer:" in line:
+            manufacturer = line.split(":", 1)[1].strip().lower()
+            break
+
+    if not manufacturer:
+        return findings
+
+    for chipset_key, cves in _BRAKTOOTH_CHIPSETS.items():
+        if chipset_key in manufacturer:
+            findings.append(
+                _finding(
+                    "MEDIUM",
+                    f"BrakTooth Chipset Susceptibility ({chipset_key})",
+                    f"Target manufacturer '{manufacturer}' matches known BrakTooth-vulnerable "
+                    f"chipset family. BrakTooth affects LMP/baseband layer (16 vulns, 25 CVEs).",
+                    cve=cves[0],
+                    impact="Potential firmware crash, deadlock, or RCE via crafted LMP PDUs. "
+                           "Requires ESP32-based attack hardware or SDR, not testable via HCI.",
+                    remediation="Check vendor firmware update status. BrakTooth patches are chipset-specific.",
+                    status="potential",
+                    confidence="medium",
+                    evidence=f"Manufacturer: {manufacturer}, matched chipset: {chipset_key}",
+                )
+            )
+            info(f"BrakTooth chipset match: {manufacturer} ({cves[0]})")
+            break
+
+    if not findings:
+        info(f"No BrakTooth chipset match for: {manufacturer}")
+
+    return findings
+
+
+def _check_eatt_support(address: str) -> list[dict]:
+    """Probe for EATT (Enhanced ATT) support via L2CAP PSM 0x0027.
+
+    EATT was introduced in BT 5.2. If the target accepts L2CAP connection
+    to PSM 0x0027, it supports BT 5.2+ EATT — indicates a newer stack
+    with parallel GATT capability and mandatory encryption.
+    """
+    import errno
+
+    findings: list[dict] = []
+
+    try:
+        sock = socket.socket(
+            getattr(socket, "AF_BLUETOOTH", 31),
+            socket.SOCK_SEQPACKET,
+            getattr(socket, "BTPROTO_L2CAP", 0),
+        )
+        sock.settimeout(3.0)
+        try:
+            sock.connect((address, 0x0027))
+            findings.append(
+                _finding(
+                    "INFO",
+                    "EATT Supported (BT 5.2+)",
+                    "Target accepted L2CAP connection on PSM 0x0027 (EATT). "
+                    "Indicates BT 5.2+ stack with Enhanced Attribute Protocol.",
+                    impact="EATT allows parallel GATT operations — increased attack surface "
+                           "for race conditions in GATT servers. Encryption is mandatory on EATT.",
+                    status="confirmed",
+                    confidence="high",
+                    evidence="L2CAP PSM 0x0027 connection succeeded",
+                )
+            )
+            success("EATT supported (BT 5.2+)")
+        except OSError as exc:
+            if exc.errno == errno.ECONNREFUSED:
+                info("EATT not supported (PSM 0x0027 refused)")
+            elif exc.errno == errno.EACCES:
+                findings.append(
+                    _finding(
+                        "INFO",
+                        "EATT Present but Auth Required (BT 5.2+)",
+                        "PSM 0x0027 requires authentication — EATT is available but "
+                        "properly secured.",
+                        status="confirmed",
+                        confidence="high",
+                        evidence="L2CAP PSM 0x0027 returned EACCES",
+                    )
+                )
+                info("EATT present but requires auth (correctly secured)")
+            else:
+                verbose(f"EATT probe: {exc}")
+        finally:
+            sock.close()
+    except OSError:
+        pass
+
+    return findings
+
+
 def scan_vulnerabilities(address: str, hci: str = "hci0") -> list[dict]:
     """Run vulnerability and attack-surface checks against a target.
 
@@ -336,8 +460,13 @@ def scan_vulnerabilities(address: str, hci: str = "hci0") -> list[dict]:
     info(f"Scanning {address} for vulnerabilities and attack-surface indicators...")
     findings: list[dict] = []
 
+    from bt_tap.utils.bt_helpers import ensure_adapter_ready
+    if not ensure_adapter_ready(hci):
+        error("Adapter not ready — cannot scan")
+        return findings
+
     section("Check 1: Secure Simple Pairing", style="bt.cyan")
-    ssp = check_ssp(address)
+    ssp = check_ssp(address, hci)
     if ssp is False:
         findings.append(
             _finding(
@@ -390,6 +519,12 @@ def scan_vulnerabilities(address: str, hci: str = "hci0") -> list[dict]:
 
     section("Check 6: BLE Writable Surface", style="bt.cyan")
     findings.extend(_check_writable_gatt(address))
+
+    section("Check 7: BrakTooth Chipset Susceptibility", style="bt.cyan")
+    findings.extend(_check_braktooth_chipset(address, hci))
+
+    section("Check 8: EATT Support (BT 5.2+ Indicator)", style="bt.cyan")
+    findings.extend(_check_eatt_support(address))
 
     _print_findings(address, findings)
     return findings

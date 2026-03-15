@@ -214,9 +214,11 @@ class NRFBLESniffer:
             "-w", output_pcap,
         ]
         if target_address:
-            # Filter for target's advertising address
+            # Use -Y (display filter), NOT -f (capture/BPF filter).
+            # -f only accepts BPF syntax and will silently fail with
+            # Wireshark display filter syntax like btle.advertising_address.
             addr_filter = target_address.lower().replace("-", ":")
-            cmd.extend(["-f", f"btle.advertising_address == {addr_filter}"])
+            cmd.extend(["-Y", f"btle.advertising_address == {addr_filter}"])
 
         with step("Capturing BLE link layer via tshark"):
             try:
@@ -569,7 +571,9 @@ class USRPCapture:
 
             if os.path.exists(output_file):
                 size = os.path.getsize(output_file)
-                success(f"Captured {size} bytes ({size / (2 * 4):.0f} complex samples)")
+                # uhd_rx_cfile writes complex float32 = 8 bytes/sample (I+Q as float32)
+                samples = size // 8
+                success(f"Captured {size} bytes ({samples:,} complex float32 samples)")
                 return {
                     "success": True,
                     "file": output_file,
@@ -813,12 +817,28 @@ class LinkKeyExtractor:
                 key_section = f"[LinkKey]\nKey={link_key.upper()}\nType={key_type}\nPINLength=0\n"
 
                 if "[LinkKey]" in existing:
-                    # Replace existing LinkKey section
-                    new_content = re.sub(
-                        r"\[LinkKey\]\n(?:.*\n)*?(?=\[|\Z)",
-                        key_section,
-                        existing,
-                    )
+                    # Replace existing LinkKey section — parse line by line
+                    # to avoid fragile regex across section boundaries
+                    lines = existing.splitlines(keepends=True)
+                    new_lines = []
+                    in_linkkey = False
+                    replaced = False
+                    for ln in lines:
+                        if ln.strip() == "[LinkKey]":
+                            in_linkkey = True
+                            if not replaced:
+                                new_lines.append(key_section)
+                                replaced = True
+                            continue
+                        if in_linkkey:
+                            # Skip old LinkKey lines until next section or EOF
+                            if ln.strip().startswith("[") and ln.strip() != "[LinkKey]":
+                                in_linkkey = False
+                                new_lines.append(ln)
+                            # else: skip this line (old key data)
+                            continue
+                        new_lines.append(ln)
+                    new_content = "".join(new_lines)
                 else:
                     new_content = existing.rstrip() + "\n\n" + key_section
 

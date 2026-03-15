@@ -34,6 +34,10 @@ class AutoDiscovery:
         Scans for nearby devices and looks for phones (by device class or name)
         that are likely paired with the target IVI.
         """
+        from bt_tap.utils.bt_helpers import ensure_adapter_ready
+        if not ensure_adapter_ready(self.hci):
+            return None
+
         info(f"Scanning for phones near IVI {self.ivi_address} ({scan_duration}s)...")
         devices = scan_classic(scan_duration, self.hci)
 
@@ -57,14 +61,14 @@ class AutoDiscovery:
                               "motorola", "nokia", "lg", "sony", "htc"]
             is_phone = any(kw in name for kw in phone_keywords)
 
-            # Device class major = 0x02 (Phone)
-            # Scanner may return class as hex string (e.g. "0x5a020c")
-            try:
-                class_int = dev_class if isinstance(dev_class, int) else int(dev_class, 16)
-                if (class_int >> 8 & 0x1F) == 0x02:
+            # Use device class parser for reliable phone detection
+            if dev.get("class_info", {}).get("is_phone"):
+                is_phone = True
+            elif dev_class:
+                from bt_tap.core.scanner import parse_device_class
+                class_info = parse_device_class(dev_class)
+                if class_info.get("is_phone"):
                     is_phone = True
-            except (ValueError, TypeError):
-                pass
 
             if is_phone:
                 candidates.append(dev)

@@ -13,7 +13,11 @@ from bt_tap.utils.output import error, info, success, warning
 
 
 class HCICapture:
-    """Capture raw HCI traffic using btmon."""
+    """Capture raw HCI traffic using btmon.
+
+    Supports both text log output and binary pcap/btsnoop format for
+    Wireshark analysis.
+    """
 
     PID_FILE = "/tmp/bt_tap_btmon.pid"
 
@@ -22,11 +26,16 @@ class HCICapture:
         self.output_file: str | None = None
         self._fh = None
 
-    def start(self, output_file: str = "bt_capture.log") -> bool:
+    def start(self, output_file: str = "bt_capture.log",
+              hci: str | None = None, pcap: bool = False) -> bool:
         """Start btmon capture in the background.
 
         Args:
             output_file: Path to write captured HCI traffic.
+            hci: Optional HCI adapter index to capture (e.g., "hci0").
+                 If None, captures from all interfaces.
+            pcap: If True, write btsnoop binary format (for Wireshark).
+                  If False, write human-readable text log.
 
         Returns:
             True if btmon launched successfully.
@@ -36,21 +45,47 @@ class HCICapture:
             return False
 
         try:
-            self._fh = open(output_file, "w")
-            self.process = subprocess.Popen(
-                ["sudo", "btmon"],
-                stdout=self._fh,
-                stderr=subprocess.DEVNULL,
-            )
+            cmd = ["sudo", "btmon"]
+            if pcap:
+                # -w writes btsnoop format, openable in Wireshark
+                cmd.extend(["-w", output_file])
+                self._fh = None
+            else:
+                self._fh = open(output_file, "w")
+
+            if hci is not None:
+                # btmon uses index number, not "hci0" — extract the number
+                idx = hci.replace("hci", "")
+                cmd.extend(["-i", idx])
+
+            if pcap:
+                self.process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    # Use process group so we can kill btmon (not just sudo)
+                    preexec_fn=os.setsid,
+                )
+            else:
+                self.process = subprocess.Popen(
+                    cmd,
+                    stdout=self._fh,
+                    stderr=subprocess.DEVNULL,
+                    preexec_fn=os.setsid,
+                )
             self.output_file = output_file
 
-            # Persist PID so a separate stop invocation can find the process
+            # Persist PID (process group ID) so a separate stop invocation
+            # can find and kill the entire process group
             with open(self.PID_FILE, "w") as pf:
-                json.dump(
-                    {"pid": self.process.pid, "output_file": output_file}, pf
-                )
+                json.dump({
+                    "pgid": os.getpgid(self.process.pid),
+                    "pid": self.process.pid,
+                    "output_file": output_file,
+                }, pf)
 
-            info(f"btmon capture started -> {output_file}")
+            info(f"btmon capture started -> {output_file}"
+                 f"{' (btsnoop/pcap)' if pcap else ''}")
             return True
         except OSError as exc:
             if self._fh is not None:
@@ -66,35 +101,48 @@ class HCICapture:
             Path to the output file.
         """
         if self.process is not None:
-            # Same-process path: we launched btmon in this invocation
+            # Same-process path: kill the entire process group
             try:
-                self.process.terminate()
+                pgid = os.getpgid(self.process.pid)
+                os.killpg(pgid, signal.SIGTERM)
                 self.process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
-                self.process.wait(timeout=3)
+            except (subprocess.TimeoutExpired, OSError):
+                try:
+                    pgid = os.getpgid(self.process.pid)
+                    os.killpg(pgid, signal.SIGKILL)
+                    self.process.wait(timeout=3)
+                except OSError:
+                    pass
             self.process = None
         else:
-            # Cross-invocation path: recover PID from file
-            pid, output = self._read_pid_file()
-            if pid is None:
+            # Cross-invocation path: recover PGID from file
+            pgid, pid, output = self._read_pid_file()
+            if pgid is None and pid is None:
                 warning("No btmon process to stop")
                 return self.output_file or ""
             self.output_file = output
+
+            # Kill by process group first (catches both sudo and btmon)
             try:
-                os.kill(pid, signal.SIGTERM)
-                # Not our child, so waitpid may fail; just give it time
+                if pgid is not None:
+                    os.killpg(pgid, signal.SIGTERM)
+                elif pid is not None:
+                    os.kill(pid, signal.SIGTERM)
                 time.sleep(1)
-                # If still alive, force kill
+                # Verify dead
                 try:
-                    os.kill(pid, 0)
-                    os.kill(pid, signal.SIGKILL)
+                    if pgid is not None:
+                        os.killpg(pgid, 0)
+                        os.killpg(pgid, signal.SIGKILL)
+                    elif pid is not None:
+                        os.kill(pid, 0)
+                        os.kill(pid, signal.SIGKILL)
                 except OSError:
-                    pass
+                    pass  # already dead
             except OSError:
                 pass  # already dead
 
-        # Close the stdout file handle to avoid resource leak
+        # Close the stdout file handle
         if self._fh is not None:
             try:
                 self._fh.close()
@@ -127,18 +175,18 @@ class HCICapture:
             return False
 
     @classmethod
-    def _read_pid_file(cls) -> tuple[int | None, str | None]:
-        """Read PID and output_file from the PID file.
+    def _read_pid_file(cls) -> tuple[int | None, int | None, str | None]:
+        """Read PGID, PID, and output_file from the PID file.
 
         Returns:
-            (pid, output_file) or (None, None) if unavailable.
+            (pgid, pid, output_file) or (None, None, None) if unavailable.
         """
         try:
             with open(cls.PID_FILE, "r") as pf:
                 data = json.load(pf)
-            return data["pid"], data.get("output_file")
+            return data.get("pgid"), data.get("pid"), data.get("output_file")
         except (OSError, KeyError, json.JSONDecodeError, ValueError):
-            return None, None
+            return None, None, None
 
 
 def detect_pairing_mode(address: str, hci: str = "hci0") -> dict:
@@ -155,7 +203,7 @@ def detect_pairing_mode(address: str, hci: str = "hci0") -> dict:
         Dict with keys: ssp_supported, io_capability, pairing_method, raw_excerpt.
     """
     result = {
-        "ssp_supported": None,  # None = unknown (probe failed), True/False = determined
+        "ssp_supported": None,
         "io_capability": "Unknown",
         "pairing_method": "Unknown",
         "raw_excerpt": "",
@@ -168,13 +216,13 @@ def detect_pairing_mode(address: str, hci: str = "hci0") -> dict:
     tmp.close()
 
     cap = HCICapture()
-    if not cap.start(tmp_path):
+    if not cap.start(tmp_path, hci=hci):
         warning("HCI capture failed to start — SSP result is inconclusive")
         return result
 
     try:
-        # Give btmon a moment to attach
-        time.sleep(1)
+        # Give btmon time to attach to the HCI interface
+        time.sleep(2)
 
         # Initiate a pairing attempt via bluetoothctl
         try:
@@ -184,9 +232,14 @@ def detect_pairing_mode(address: str, hci: str = "hci0") -> dict:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
+            # Select the adapter first
+            proc.stdin.write(f"select {hci}\n".encode())
+            proc.stdin.flush()
+            time.sleep(0.5)
             proc.stdin.write(f"pair {address}\n".encode())
             proc.stdin.flush()
-            time.sleep(4)
+            # Wait for pairing negotiation to happen
+            time.sleep(6)
             proc.stdin.write(b"quit\n")
             proc.stdin.flush()
             proc.wait(timeout=5)
@@ -218,7 +271,8 @@ def detect_pairing_mode(address: str, hci: str = "hci0") -> dict:
                     result["ssp_supported"] = True
 
             if any(kw in lower for kw in ("pairing method", "just works",
-                                            "numeric comparison", "passkey")):
+                                            "numeric comparison", "passkey",
+                                            "out of band")):
                 relevant.append(line.rstrip())
                 if "just works" in lower:
                     result["pairing_method"] = "Just Works"
@@ -226,6 +280,12 @@ def detect_pairing_mode(address: str, hci: str = "hci0") -> dict:
                     result["pairing_method"] = "Numeric Comparison"
                 elif "passkey" in lower:
                     result["pairing_method"] = "Passkey Entry"
+                elif "out of band" in lower:
+                    result["pairing_method"] = "Out of Band (OOB)"
+
+            # Also capture link key type indications
+            if "link key" in lower:
+                relevant.append(line.rstrip())
 
         result["raw_excerpt"] = "\n".join(relevant[:20])
 

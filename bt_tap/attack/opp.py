@@ -41,6 +41,7 @@ class OPPClient:
             self.sock = socket.socket(
                 socket.AF_BLUETOOTH, socket.SOCK_STREAM, socket.BTPROTO_RFCOMM
             )
+            self.sock.settimeout(15.0)
             self.sock.connect((self.address, self.channel))
 
             # OBEX Connect (no target UUID for OPP)
@@ -59,10 +60,19 @@ class OPPClient:
     def disconnect(self):
         if self.sock:
             try:
-                self.sock.close()
+                # Send OBEX Disconnect
+                pkt = struct.pack(">BH", 0x81, 3)
+                self.sock.send(pkt)
+                self._recv()
             except OSError:
                 pass
-            self.sock = None
+            finally:
+                try:
+                    self.sock.close()
+                except OSError:
+                    pass
+                self.sock = None
+            info("OPP disconnected")
 
     def push_file(self, filepath: str) -> bool:
         """Push a file to the remote device via OPP."""
@@ -148,9 +158,13 @@ TEL;TYPE=CELL:{phone}
         with open(tmpfile, "w") as f:
             f.write(vcard)
 
-        result = self.push_file(tmpfile)
-        os.unlink(tmpfile)
-        return result
+        try:
+            return self.push_file(tmpfile)
+        finally:
+            try:
+                os.unlink(tmpfile)
+            except OSError:
+                pass
 
     def _recv(self) -> bytes | None:
         try:

@@ -69,13 +69,19 @@ class BIASAttack:
         Checks:
           - SSP support (BIAS targets SSP-paired devices)
           - Bluetooth version (patched in some 5.3+ firmwares)
+          - Secure Connections feature (BIAS Variant 2 downgrades SC)
           - Whether the IVI initiates reconnection (BIAS is easier as responder)
 
         Returns dict with vulnerability assessment.
         """
+        from bt_tap.utils.bt_helpers import ensure_adapter_ready
+        if not ensure_adapter_ready(self.hci):
+            return {"potentially_vulnerable": False, "error": "adapter not ready"}
+
         result = {
             "potentially_vulnerable": False,
             "ssp_detected": None,
+            "sc_detected": None,
             "bt_version": None,
             "auto_reconnects": False,
             "notes": [],
@@ -161,6 +167,9 @@ class BIASAttack:
 
     def execute_role_switch(self) -> dict:
         """Attempt BIAS via role-switch downgrade (software-only approach).
+
+        BIAS Variant 1: Spoof phone MAC, disable SSP (force legacy auth),
+        connect. If IVI doesn't enforce mutual auth, connection succeeds.
 
         This is the best-effort software approach:
           1. Spoof phone MAC + identity

