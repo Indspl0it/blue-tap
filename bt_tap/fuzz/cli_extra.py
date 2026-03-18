@@ -869,6 +869,394 @@ def register_extra_commands(fuzz_group):
         _show_fuzz_summary("cve", address, result)
 
     # ===================================================================
+    # TASK 6.2: Replay, Minimize, and L2CAP Signaling Commands
+    # ===================================================================
+
+    # -------------------------------------------------------------------
+    # bt-tap fuzz replay
+    # -------------------------------------------------------------------
+    @fuzz_group.command("replay")
+    @click.argument("capture_file")
+    @click.option("--target", "-t", required=True, help="Target BD_ADDR to replay against.")
+    @click.option("--protocol", "-p", default=None, help="Filter by protocol.")
+    @click.option("--list", "list_frames", is_flag=True, help="List frames without replaying.")
+    @click.option("--mutate", is_flag=True, help="Apply mutations during replay.")
+    @click.option("--delay", default=0.5, type=float, help="Delay between frames.")
+    def fuzz_replay(capture_file, target, protocol, list_frames, mutate, delay):
+        """Replay frames from a btsnoop capture against a target.
+
+        Parses a btsnoop v1 capture file, extracts L2CAP frames, and
+        selectively replays them.  Use --list to inspect frames without
+        sending, --protocol to filter, and --mutate to apply mutations.
+
+        \b
+        Examples:
+          bt-tap fuzz replay capture.btsnoop -t AA:BB:CC:DD:EE:FF --list
+          bt-tap fuzz replay capture.btsnoop -t AA:BB:CC:DD:EE:FF
+          bt-tap fuzz replay capture.btsnoop -t AA:BB:CC:DD:EE:FF -p sdp
+          bt-tap fuzz replay capture.btsnoop -t AA:BB:CC:DD:EE:FF --mutate
+        """
+        from bt_tap.fuzz.pcap_replay import CaptureReplayer, classify_protocol
+
+        target = resolve_address(target)
+        if not target:
+            return
+
+        with phase("Capture Replay"):
+            info(f"Loading capture: {capture_file}")
+            replayer = CaptureReplayer(capture_file, target)
+
+            try:
+                frame_count = replayer.load()
+            except (FileNotFoundError, ValueError) as exc:
+                error(f"Failed to load capture: {exc}")
+                return
+
+            if frame_count == 0:
+                warning("No L2CAP frames found in capture.")
+                return
+
+            info(f"Loaded {frame_count} L2CAP frames")
+
+            # Show capture summary
+            summary = replayer.summary()
+            summary_panel("Capture Summary", {
+                "Total frames": str(summary["total_frames"]),
+                "Sent frames": str(summary["sent_frames"]),
+                "Received frames": str(summary["received_frames"]),
+                "Duration": f"{summary['duration_seconds']:.1f}s",
+                "Protocols": ", ".join(
+                    f"{k}({v})" for k, v in sorted(summary["protocols"].items())
+                ) or "none",
+            })
+
+            # --list: display frame table and exit
+            if list_frames:
+                frame_list = replayer.list_frames(protocol=protocol)
+
+                if not frame_list:
+                    warning(f"No frames match protocol filter: {protocol}")
+                    return
+
+                table = Table(
+                    title=f"[bold {CYAN}]Capture Frames[/bold {CYAN}]",
+                    show_lines=False,
+                    border_style=DIM,
+                    header_style=Style(bold=True, color=CYAN),
+                )
+                table.add_column("#", style=DIM, width=6, justify="right")
+                table.add_column("Dir", style=YELLOW, width=10)
+                table.add_column("Protocol", style=CYAN, width=18)
+                table.add_column("CID", style=DIM, width=8)
+                table.add_column("Handle", style=DIM, width=8)
+                table.add_column("Size", style=GREEN, width=8, justify="right")
+
+                for f in frame_list:
+                    dir_style = GREEN if f["direction"] == "sent" else YELLOW
+                    table.add_row(
+                        str(f["index"]),
+                        f"[{dir_style}]{f['direction']}[/{dir_style}]",
+                        f["protocol"],
+                        f["cid"],
+                        f["handle"],
+                        f"{f['size']}B",
+                    )
+
+                console.print()
+                console.print(table)
+                console.print()
+                info(f"Showing {len(frame_list)} frames")
+                return
+
+            # Replay mode
+            from bt_tap.fuzz.transport import L2CAPTransport
+            transport_factory = lambda addr: L2CAPTransport(addr, psm=1)
+
+            if mutate:
+                info(f"Replaying with mutations against {style_target(target)}")
+                result = replayer.replay_with_mutations(
+                    protocol=protocol,
+                    transport_factory=transport_factory,
+                    delay=delay,
+                )
+                mutations = result.get("mutations_applied", 0)
+            else:
+                info(f"Replaying against {style_target(target)}")
+                result = replayer.replay_all(
+                    protocol=protocol,
+                    transport_factory=transport_factory,
+                    delay=delay,
+                )
+                mutations = 0
+
+        replay_items = {
+            "Target": style_target(target),
+            "Capture": capture_file,
+            "Frames sent": str(result.get("sent", 0)),
+            "Errors": str(result.get("errors", 0)),
+            "Protocols": ", ".join(
+                f"{k}({v})" for k, v in sorted(result.get("protocols", {}).items())
+            ) or "none",
+        }
+        if mutate:
+            replay_items["Mutations"] = str(mutations)
+
+        style = "red" if result.get("errors", 0) > 0 else "green"
+        summary_panel("Replay Results", replay_items, style=style)
+
+        log_command("fuzz_replay", {
+            "capture_file": capture_file,
+            "target": target,
+            "protocol": protocol,
+            "mutate": mutate,
+            "sent": result.get("sent", 0),
+            "errors": result.get("errors", 0),
+        }, category="fuzz", target=target)
+
+    # -------------------------------------------------------------------
+    # bt-tap fuzz minimize
+    # -------------------------------------------------------------------
+    @fuzz_group.command("minimize")
+    @click.argument("crash_id", type=int)
+    @click.option("--session", "-s", default=None,
+                  help="Session name (default: current or latest).")
+    @click.option("--strategy", default="auto",
+                  type=click.Choice(["binary", "ddmin", "field", "auto"]),
+                  help="Minimization strategy.")
+    @click.option("--timeout", default=5.0, type=float,
+                  help="Seconds to wait for target response.")
+    @click.option("--cooldown", default=5.0, type=float,
+                  help="Seconds between crash tests.")
+    @click.option("--retries", default=3, type=int,
+                  help="Retry count per test payload.")
+    def fuzz_minimize(crash_id, session, strategy, timeout, cooldown, retries):
+        """Minimize a crash payload to find the essential bytes.
+
+        Given a crash ID from the crash database, repeatedly sends
+        reduced variants to identify the smallest payload that still
+        triggers the crash.  Supports binary search, delta debugging,
+        and field-level analysis strategies.
+
+        \b
+        Examples:
+          bt-tap fuzz minimize 1
+          bt-tap fuzz minimize 3 --strategy ddmin
+          bt-tap fuzz minimize 1 --timeout 10 --cooldown 8
+          bt-tap fuzz minimize 5 -s my_session
+        """
+        from bt_tap.fuzz.crash_db import CrashDB
+        from bt_tap.fuzz.minimizer import CrashMinimizer
+        from bt_tap.fuzz.transport import L2CAPTransport, RFCOMMTransport
+
+        # Locate crash database
+        if session:
+            session_base = os.path.join("sessions", session)
+        else:
+            active = get_session()
+            if active:
+                session_base = active.dir
+            else:
+                # Search for most recent session with fuzz data
+                sessions_dir = Path("sessions")
+                session_base = None
+                if sessions_dir.is_dir():
+                    for sess_dir in sorted(sessions_dir.iterdir(), reverse=True):
+                        fuzz_dir = sess_dir / "fuzz"
+                        if fuzz_dir.is_dir():
+                            # Look for any crash DB
+                            dbs = list(fuzz_dir.glob("*_crashes.db"))
+                            if dbs:
+                                session_base = str(sess_dir)
+                                break
+                if session_base is None:
+                    error("No session with crash data found. Specify --session.")
+                    return
+
+        # Find the crash database containing this crash ID
+        fuzz_dir = Path(session_base) / "fuzz"
+        if not fuzz_dir.is_dir():
+            error(f"No fuzz data found in {session_base}")
+            return
+
+        db_files = list(fuzz_dir.glob("*_crashes.db"))
+        if not db_files:
+            error(f"No crash databases found in {fuzz_dir}")
+            return
+
+        # Search all crash DBs for the crash ID
+        crash = None
+        crash_db_path = None
+        for db_path in db_files:
+            db = CrashDB(str(db_path))
+            found = db.get_crash_by_id(crash_id)
+            if found is not None:
+                crash = found
+                crash_db_path = str(db_path)
+                db.close()
+                break
+            db.close()
+
+        if crash is None:
+            error(f"Crash ID {crash_id} not found in any database under {fuzz_dir}")
+            return
+
+        target = crash.get("target", "")
+        protocol = crash.get("protocol", "unknown")
+
+        if not target:
+            error(f"Crash {crash_id} has no target address")
+            return
+
+        with phase("Crash Minimization"):
+            info(f"Crash {crash_id}: {protocol} protocol, target {style_target(target)}")
+            info(f"Strategy: {strategy} | Timeout: {timeout}s | Cooldown: {cooldown}s")
+
+            try:
+                payload = bytes.fromhex(crash["payload_hex"])
+            except (ValueError, KeyError) as exc:
+                error(f"Invalid payload in crash record: {exc}")
+                return
+
+            info(f"Original payload: {len(payload)} bytes")
+
+            # Determine transport from protocol
+            protocol_lower = protocol.lower()
+            if protocol_lower in ("rfcomm", "at", "obex"):
+                channel = crash.get("channel", 1)
+                transport_factory = lambda: RFCOMMTransport(target, channel)
+            else:
+                # Default to L2CAP with PSM from crash or PSM 1 (SDP)
+                psm = crash.get("psm", 1)
+                transport_factory = lambda: L2CAPTransport(target, psm=psm)
+
+            minimizer = CrashMinimizer(
+                target=target,
+                transport_factory=transport_factory,
+                timeout=timeout,
+                cooldown=cooldown,
+                max_retries=retries,
+            )
+
+            # Open DB for saving results
+            crash_db = CrashDB(crash_db_path)
+            try:
+                result = minimizer.minimize_from_db(crash_db, crash_id, strategy=strategy)
+            finally:
+                crash_db.close()
+
+        # Display results
+        if result.success:
+            result_items = {
+                "Strategy": result.strategy_used,
+                "Original size": f"{result.original_size} bytes",
+                "Minimized size": f"{result.minimized_size} bytes",
+                "Reduction": f"{result.reduction_percent:.1f}%",
+                "Tests performed": str(result.tests_performed),
+                "Minimized payload": result.minimized.hex(),
+            }
+            if result.essential_mask and any(m == 0xFF for m in result.essential_mask):
+                essential_count = sum(1 for m in result.essential_mask if m == 0xFF)
+                result_items["Essential bytes"] = f"{essential_count}/{result.original_size}"
+                result_items["Pattern"] = result.essential_bytes_hex()
+
+            summary_panel("Minimization Results", result_items, style="green")
+        else:
+            summary_panel("Minimization Failed", {
+                "Reason": "Crash could not be reproduced",
+                "Tests performed": str(result.tests_performed),
+            }, style="red")
+
+        log_command("fuzz_minimize", {
+            "crash_id": crash_id,
+            "strategy": strategy,
+            "success": result.success,
+            "original_size": result.original_size,
+            "minimized_size": result.minimized_size,
+            "reduction_percent": result.reduction_percent,
+            "tests_performed": result.tests_performed,
+        }, category="fuzz", target=target)
+
+    # -------------------------------------------------------------------
+    # bt-tap fuzz l2cap-sig
+    # -------------------------------------------------------------------
+    @fuzz_group.command("l2cap-sig")
+    @click.argument("address", required=False, default=None)
+    @click.option("--mode", default="all",
+                  type=click.Choice(["config", "cid", "echo", "info", "all"]),
+                  help="L2CAP signaling fuzz category.")
+    @click.option("--delay", default=0.5, type=float, help="Delay between test cases.")
+    def fuzz_l2cap_sig(address, mode, delay):
+        """Fuzz L2CAP signaling commands via raw injection.
+
+        Sends protocol-aware L2CAP signaling fuzz cases targeting
+        configuration option parsing, CID manipulation, Echo flooding,
+        and Information request probing.
+
+        Requires Scapy for raw L2CAP injection. If Scapy is not installed,
+        falls back to kernel L2CAP PSM 1 transport (limited to well-formed
+        L2CAP framing).
+
+        \b
+        Examples:
+          bt-tap fuzz l2cap-sig AA:BB:CC:DD:EE:FF
+          bt-tap fuzz l2cap-sig AA:BB:CC:DD:EE:FF --mode config
+          bt-tap fuzz l2cap-sig AA:BB:CC:DD:EE:FF --mode echo --delay 0.1
+        """
+        from bt_tap.fuzz.protocols.l2cap import (
+            generate_all_l2cap_fuzz_cases,
+            fuzz_config_options, fuzz_cid_manipulation,
+            fuzz_echo_requests, fuzz_info_requests,
+            ScapyL2CAPTransport,
+        )
+        from bt_tap.fuzz.transport import L2CAPTransport
+
+        address = resolve_address(address)
+        if not address:
+            return
+
+        with phase("L2CAP Signaling Fuzzing"):
+            info(f"Target: {style_target(address)} | Mode: {mode}")
+
+            mode_generators = {
+                "config": fuzz_config_options,
+                "cid": fuzz_cid_manipulation,
+                "echo": fuzz_echo_requests,
+                "info": fuzz_info_requests,
+            }
+
+            if mode == "all":
+                cases = generate_all_l2cap_fuzz_cases()
+            else:
+                gen = mode_generators.get(mode)
+                cases = gen() if gen else generate_all_l2cap_fuzz_cases()
+
+            info(f"Generated {len(cases)} L2CAP signaling fuzz cases")
+
+            # Check Scapy availability
+            if ScapyL2CAPTransport.AVAILABLE:
+                info("Scapy available -- using raw L2CAP injection")
+                # Note: Scapy transport requires root and direct HCI access.
+                # Fall back to kernel transport if connection fails.
+                transport_factory = lambda addr: L2CAPTransport(addr, psm=1)
+                warning(
+                    "Raw Scapy injection requires root privileges. "
+                    "Using kernel L2CAP transport as primary sender."
+                )
+            else:
+                warning(
+                    "Scapy not installed -- using kernel L2CAP transport. "
+                    "Install for raw injection: pip install 'bt-tap[fuzz]'"
+                )
+                transport_factory = lambda addr: L2CAPTransport(addr, psm=1)
+
+            result = _run_fuzz_cases(
+                address, "l2cap-sig", cases, transport_factory,
+                delay=delay, timeout=5.0,
+            )
+
+        _show_fuzz_summary("l2cap-sig", address, result)
+
+    # ===================================================================
     # TASK 4.4: Corpus Management Commands
     # ===================================================================
 

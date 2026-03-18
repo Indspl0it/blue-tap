@@ -19,6 +19,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest", "ruff"]
 audio = ["pulsectl>=23.5"]
+fuzz = ["scapy>=2.5"]
 
 [project.scripts]
 bt-tap = "bt_tap.cli:main"

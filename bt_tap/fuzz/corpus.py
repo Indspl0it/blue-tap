@@ -253,6 +253,7 @@ _PROTOCOL_GENERATORS: dict[str, tuple[str, str, str | None]] = {
     "ble-smp":      ("bt_tap.fuzz.protocols.smp",         "generate_all_smp_fuzz_cases",    None),
     "bnep":         ("bt_tap.fuzz.protocols.bnep",        "generate_all_bnep_fuzz_cases",   None),
     "rfcomm":       ("bt_tap.fuzz.protocols.rfcomm",      "generate_all_rfcomm_fuzz_cases", None),
+    "l2cap":        ("bt_tap.fuzz.protocols.l2cap",       "generate_all_l2cap_fuzz_cases",  None),
 }
 
 # All protocol families (used for "generate all")

@@ -36,6 +36,13 @@ from bt_tap.fuzz.engine import (
     parse_duration,
     PROTOCOL_TRANSPORT_MAP,
 )
+from bt_tap.fuzz.minimizer import (
+    BinarySearchReducer,
+    DeltaDebugReducer,
+    FieldReducer,
+    CrashMinimizer,
+    MinimizationResult,
+)
 
 __all__ = [
     "BluetoothTransport",
@@ -59,4 +66,9 @@ __all__ = [
     "CampaignStats",
     "parse_duration",
     "PROTOCOL_TRANSPORT_MAP",
+    "BinarySearchReducer",
+    "DeltaDebugReducer",
+    "FieldReducer",
+    "CrashMinimizer",
+    "MinimizationResult",
 ]
