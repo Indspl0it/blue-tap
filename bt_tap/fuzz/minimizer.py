@@ -42,10 +42,11 @@ class MinimizationResult:
     Attributes:
         original: The original crash payload.
         minimized: The smallest payload that still triggers the crash.
-        essential_mask: Same length as ``original``; ``0xFF`` at positions
+        essential_mask: Same length as ``minimized``; ``0xFF`` at positions
             whose value matters for the crash, ``0x00`` at positions that
-            can be zeroed without affecting reproducibility.  Only populated
-            when the field-level reducer runs.
+            can be zeroed without affecting reproducibility.  The mask is
+            relative to the minimized payload, not the original.  Only
+            populated when the field-level reducer runs.
         original_size: Length of the original payload in bytes.
         minimized_size: Length of the minimized payload in bytes.
         reduction_percent: How much smaller the minimized payload is,
@@ -84,10 +85,10 @@ class MinimizationResult:
         Returns:
             Space-separated hex string with ``??`` for non-essential bytes.
         """
-        if not self.essential_mask or len(self.essential_mask) != len(self.original):
-            return self.original.hex(" ")
+        if not self.essential_mask or len(self.essential_mask) != len(self.minimized):
+            return self.minimized.hex(" ")
         parts: list[str] = []
-        for i, (b, m) in enumerate(zip(self.original, self.essential_mask)):
+        for i, (b, m) in enumerate(zip(self.minimized, self.essential_mask)):
             if m == 0xFF:
                 parts.append(f"{b:02x}")
             else:
@@ -110,7 +111,7 @@ class MinimizationResult:
         ]
         if self.essential_mask and any(m == 0xFF for m in self.essential_mask):
             essential_count = sum(1 for m in self.essential_mask if m == 0xFF)
-            lines.append(f"  Essential:  {essential_count}/{self.original_size} bytes")
+            lines.append(f"  Essential:  {essential_count}/{len(self.essential_mask)} bytes")
             lines.append(f"  Pattern:    {self.essential_bytes_hex()}")
         if self.minimized_size > 0:
             lines.append(f"  Payload:    {self.minimized.hex()}")
@@ -280,8 +281,27 @@ class FieldReducer:
             original_byte = working[i]
 
             if original_byte == 0x00:
-                # Already zero -- mark as non-essential (zeroing is a no-op)
-                mask[i] = 0x00
+                # Already zero -- test with 0xFF instead.  If changing to
+                # 0xFF still crashes, the position doesn't matter (non-essential).
+                # If it stops crashing, this position must be 0x00 (essential).
+                working[i] = 0xFF
+                if crash_test(bytes(working)):
+                    # Still crashes with 0xFF -- position not essential
+                    working[i] = 0x00  # restore original value
+                    mask[i] = 0x00
+                    log.append(
+                        f"[field] Byte {i} (0x00) -> 0xFF: "
+                        f"still crashes (not essential)"
+                    )
+                else:
+                    # Crash stops -- must be 0x00, position is essential
+                    working[i] = 0x00  # restore original value
+                    mask[i] = 0xFF
+                    essential_count += 1
+                    log.append(
+                        f"[field] Byte {i} (0x00): "
+                        f"ESSENTIAL (crash stops with 0xFF)"
+                    )
                 continue
 
             working[i] = 0x00
@@ -365,7 +385,6 @@ class DeltaDebugReducer:
 
             # --- Phase 1: try removing each chunk --------------------------
             for i, chunk in enumerate(chunks):
-                iteration += 1
                 if iteration > max_iterations:
                     log.append(f"[ddmin] Hit iteration limit ({max_iterations})")
                     break
@@ -395,7 +414,6 @@ class DeltaDebugReducer:
 
             # --- Phase 2: try keeping each chunk alone ---------------------
             for i, chunk in enumerate(chunks):
-                iteration += 1
                 if iteration > max_iterations:
                     log.append(f"[ddmin] Hit iteration limit ({max_iterations})")
                     break
@@ -573,12 +591,16 @@ class CrashMinimizer:
                     # Timeout -- check if device is still alive
                     if not transport.is_alive():
                         return True
+                    # Ambiguous result (timeout but alive) -- retry
+                    continue
 
-                # Got a response -- device is fine, no crash
-                # (don't return False yet; retry in case crash is flaky)
+                # Got a valid response -- device is fine, no crash.
+                # No need to retry; a valid response is unambiguous.
+                return False
 
-            except OSError:
-                # General socket error -- check liveness
+            except Exception:
+                # General transport error (OSError, Bluetooth-specific exceptions,
+                # etc.) -- check liveness to determine if it's a crash.
                 if not transport.is_alive():
                     return True
             finally:
@@ -633,17 +655,11 @@ class CrashMinimizer:
         reduced, step_log, mask = reducer.reduce(payload, self._crash_test)
         log.extend(step_log)
 
-        # Build a mask at the original payload's length.  Positions that
-        # were already removed by size reduction are non-essential (0x00).
-        if len(original) != len(payload):
-            full_mask = bytearray(b"\x00" * len(original))
-            # The size-reduced payload is a contiguous subset or
-            # recombination.  We can only map field results for the
-            # payload we actually tested, so place the mask at the start.
-            # In practice the caller should use the mask relative to the
-            # minimized payload, not the original.
-            full_mask[: len(mask)] = mask
-            mask = bytes(full_mask)
+        # The essential_mask is relative to the minimized payload, not the
+        # original.  Expanding it to the original length would map positions
+        # incorrectly after binary/ddmin reduction (which removes and
+        # reorders bytes).  Callers should interpret the mask against the
+        # minimized payload returned alongside it.
 
         return reduced, mask
 
@@ -746,7 +762,7 @@ class CrashMinimizer:
             )
             essential_count = sum(1 for m in essential_mask if m == 0xFF)
             info(
-                f"Field analysis: {essential_count}/{len(current)} "
+                f"Field analysis: {essential_count}/{len(essential_mask)} "
                 f"bytes essential"
             )
 

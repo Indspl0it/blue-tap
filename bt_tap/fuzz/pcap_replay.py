@@ -266,8 +266,9 @@ def extract_l2cap_frames(
     """
     frames: list[L2CAPFrame] = []
 
-    # Reassembly buffer: connection_handle -> (l2cap_length, cid, accumulated_data, direction, timestamp)
-    pending: dict[int, tuple[int, int, bytearray, str, float]] = {}
+    # Reassembly buffer: (connection_handle, direction) -> (l2cap_length, cid, accumulated_data, direction, timestamp)
+    # Keyed by (handle, direction) to avoid merging fragments from opposite directions on the same handle.
+    pending: dict[tuple[int, str], tuple[int, int, bytearray, str, float]] = {}
 
     for record in records:
         # Filter to ACL data packets only
@@ -304,6 +305,11 @@ def extract_l2cap_frames(
         timestamp = record.timestamp_seconds
 
         acl_payload = data[offset:offset + acl_data_len]
+        if len(acl_payload) < acl_data_len:
+            logger.warning(
+                "Truncated ACL payload: expected %d, got %d",
+                acl_data_len, len(acl_payload),
+            )
         if len(acl_payload) == 0:
             continue
 
@@ -326,11 +332,11 @@ def extract_l2cap_frames(
                     direction=direction,
                     timestamp=timestamp,
                 ))
-                # Clear any stale pending for this handle
-                pending.pop(connection_handle, None)
+                # Clear any stale pending for this handle+direction
+                pending.pop((connection_handle, direction), None)
             else:
                 # First fragment — start reassembly
-                pending[connection_handle] = (
+                pending[(connection_handle, direction)] = (
                     l2cap_length,
                     l2cap_cid,
                     bytearray(l2cap_data),
@@ -340,15 +346,16 @@ def extract_l2cap_frames(
 
         elif pb_flag == _PB_CONTINUING:
             # Continuation fragment
-            if connection_handle not in pending:
+            pending_key = (connection_handle, direction)
+            if pending_key not in pending:
                 # No start fragment seen — drop
                 logger.debug(
-                    "Continuation fragment for handle 0x%03x with no pending start",
-                    connection_handle,
+                    "Continuation fragment for handle 0x%03x (%s) with no pending start",
+                    connection_handle, direction,
                 )
                 continue
 
-            l2cap_length, l2cap_cid, buf, orig_dir, orig_ts = pending[connection_handle]
+            l2cap_length, l2cap_cid, buf, orig_dir, orig_ts = pending[pending_key]
             buf.extend(acl_payload)
 
             if len(buf) >= l2cap_length:
@@ -361,7 +368,7 @@ def extract_l2cap_frames(
                     direction=orig_dir,
                     timestamp=orig_ts,
                 ))
-                del pending[connection_handle]
+                del pending[pending_key]
         # else: unknown PB flag — ignore
 
     return frames
@@ -425,7 +432,9 @@ def classify_protocol(frame: L2CAPFrame) -> str:
         # Extra validation: SDP has a 5-byte header (pdu_id, tid, param_len)
         if len(payload) >= 5:
             param_len = struct.unpack(">H", payload[3:5])[0]
-            if param_len <= len(payload) - 5 + 2:  # allow some slack
+            # +2 slack accounts for continuation state bytes that may
+            # follow the PDU body (e.g. ContinuationState in SDP responses).
+            if param_len <= len(payload) - 5 + 2:
                 return "sdp"
 
     # RFCOMM: check for RFCOMM address byte pattern.
@@ -436,11 +445,21 @@ def classify_protocol(frame: L2CAPFrame) -> str:
         if addr_byte & 0x01:  # EA bit set
             dlci = (addr_byte >> 2) & 0x3F
             ctrl = payload[1]
-            # Common RFCOMM control field values
-            if ctrl in (0x3F, 0xEF, 0x53, 0x73, 0x2F, 0xE3, 0x63):
-                return "rfcomm"
-            # SABM, UA, DM, DISC, UIH, UI frames
-            if (ctrl & 0xEF) in (0x2F, 0x63, 0x0F, 0x43, 0xEF, 0x03):
+            # RFCOMM frame types (control field values):
+            #   0x2F = SABM (Set Asynchronous Balanced Mode)
+            #   0x3F = SABM with P/F bit set
+            #   0x63 = UA (Unnumbered Acknowledgement)
+            #   0x73 = UA with P/F bit set
+            #   0x0F = DM (Disconnected Mode)
+            #   0x43 = DISC (Disconnect)
+            #   0x53 = DISC with P/F bit set
+            #   0xEF = UIH (Unnumbered Information with Header check)
+            #   0xE3 = UIH variant
+            #   0x03 = UI (Unnumbered Information)
+            # Check both exact matches and masked (ctrl & 0xEF) matches
+            # in a single consolidated set.
+            if ctrl in (0x3F, 0xEF, 0x53, 0x73, 0x2F, 0xE3, 0x63) or \
+               (ctrl & 0xEF) in (0x2F, 0x63, 0x0F, 0x43, 0xEF, 0x03):
                 return "rfcomm"
 
     # OBEX: opcodes
@@ -640,6 +659,13 @@ class CaptureReplayer:
             Dict with ``success``, ``index``, ``protocol``, ``size``,
             and optionally ``error``.
         """
+        if not self.frames:
+            return {
+                "success": False,
+                "index": index,
+                "error": "No frames loaded. Call load() first.",
+            }
+
         if index < 0 or index >= len(self.frames):
             return {
                 "success": False,
@@ -731,6 +757,10 @@ class CaptureReplayer:
                     mutator = _random.choice(mutators)
                     mutated = mutator(mutated)
                     result["mutations_applied"] += 1
+
+                # Skip sending empty payloads (mutations can reduce to empty bytes)
+                if not mutated:
+                    continue
 
                 if delay > 0 and result["sent"] > 0:
                     time.sleep(delay)

@@ -21,7 +21,10 @@ CVE targets: CVE-2017-0781 (Android BNEP via L2CAP), CVE-2020-0022 (BlueFrag)
 
 from __future__ import annotations
 
+import logging
 import struct
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -262,8 +265,14 @@ def encode_opt_fcs(fcs_type: int) -> bytes:
 
 
 def encode_opt_unknown(opt_type: int, data: bytes) -> bytes:
-    """Encode an arbitrary configuration option (for fuzzing unknown types)."""
-    return struct.pack("<BB", opt_type, len(data)) + data
+    """Encode an arbitrary configuration option (for fuzzing unknown types).
+
+    The length field is a single byte, so it is clamped to 255.  When data
+    exceeds 255 bytes, the length field reports 255 but the full data follows
+    -- this is intentional for fuzzing (creates a length-mismatch fuzz case).
+    """
+    length = min(len(data), 255)
+    return struct.pack("<BB", opt_type, length) + data
 
 
 # ===========================================================================
@@ -573,15 +582,18 @@ class ScapyL2CAPTransport:
     Args:
         target: BD_ADDR of the target device.
         hci: HCI interface to use (default: ``"hci0"``).
+        handle: ACL connection handle to use in HCI ACL headers.
+            Default is ``0x0040`` (typical first handle assigned by
+            the controller).
     """
 
     AVAILABLE = False  # Set to True if scapy imports succeed
 
-    def __init__(self, target: str, hci: str = "hci0") -> None:
+    def __init__(self, target: str, hci: str = "hci0", handle: int = 0x0040) -> None:
         self.target = target
         self.hci = hci
         self._sock = None
-        self._handle: int | None = None
+        self._handle: int = handle
 
         if not ScapyL2CAPTransport.AVAILABLE:
             raise RuntimeError(
@@ -599,14 +611,15 @@ class ScapyL2CAPTransport:
             from scapy.layers.bluetooth import BluetoothUserSocket
             self._sock = BluetoothUserSocket(self.hci)
             return True
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.info("BluetoothUserSocket failed for %s: %s", self.hci, exc)
 
         try:
             from scapy.layers.bluetooth import BluetoothHCISocket
             self._sock = BluetoothHCISocket(self.hci)
             return True
-        except Exception:
+        except Exception as exc:
+            logger.info("BluetoothHCISocket failed for %s: %s", self.hci, exc)
             return False
 
     def send_l2cap_frame(self, cid: int, payload: bytes) -> bool:
@@ -630,11 +643,12 @@ class ScapyL2CAPTransport:
 
             l2cap = L2CAP_Hdr(len=len(payload), cid=cid) / payload
             # HCI ACL: PB=0x02 (first automatically flushable), BC=0x00
-            acl = HCI_ACL_Hdr(handle=self._handle or 0x0040, PB=0x02, BC=0x00)
+            acl = HCI_ACL_Hdr(handle=self._handle, PB=0x02, BC=0x00)
             pkt = HCI_Hdr(type=0x02) / acl / l2cap
             self._sock.send(pkt)
             return True
-        except Exception:
+        except Exception as exc:
+            logger.info("Failed to send L2CAP frame (CID=0x%04x): %s", cid, exc)
             return False
 
     def send_config_req(self, dcid: int, options: bytes) -> bool:
