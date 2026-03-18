@@ -274,7 +274,8 @@ async def subscribe_notifications(address: str, uuid: str, duration: int = 30):
 
     def callback(sender, data):
         hex_data = data.hex()
-        str_data = _decode_value(data, str(sender))
+        char_uuid = sender.uuid if hasattr(sender, 'uuid') else str(sender)
+        str_data = _decode_value(data, char_uuid)
         info(f"Notification from {sender}: {hex_data} | {str_data}")
         notifications.append({"sender": str(sender), "hex": hex_data, "str": str_data})
 

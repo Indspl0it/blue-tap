@@ -89,8 +89,12 @@ class Session:
     SESSIONS_DIR = "sessions"
 
     def __init__(self, name: str, base_dir: str = "."):
-        self.name = name
-        self.dir = os.path.join(base_dir, self.SESSIONS_DIR, name)
+        # Sanitize name to prevent path traversal
+        safe_name = os.path.basename(name)
+        if not safe_name or safe_name != name:
+            raise ValueError(f"Invalid session name: {name!r} (must be a simple name, no path separators)")
+        self.name = safe_name
+        self.dir = os.path.join(base_dir, self.SESSIONS_DIR, safe_name)
         self.meta_file = os.path.join(self.dir, "session.json")
         self.command_count = 0
         self.metadata = {}
@@ -117,8 +121,13 @@ class Session:
 
     def _load(self):
         """Resume an existing session."""
-        with open(self.meta_file) as f:
-            self.metadata = json.load(f)
+        try:
+            with open(self.meta_file) as f:
+                self.metadata = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            # Corrupt session file — recreate from scratch
+            self._create()
+            return
         self.command_count = len(self.metadata.get("commands", []))
 
     def _save_meta(self):

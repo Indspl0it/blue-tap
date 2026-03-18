@@ -28,6 +28,7 @@ class L2CAPScanner:
 
     def __init__(self, address: str):
         self.address = address
+        self._local_addr: str | None = None
 
     # Well-known PSMs to scan first (fast), before full range
     PRIORITY_PSMS = [1, 3, 5, 7, 15, 17, 23, 25, 27, 31, 33, 35, 37]
@@ -41,9 +42,10 @@ class L2CAPScanner:
 
         Returns list of dicts with: psm, status, name.
         """
-        from bt_tap.utils.bt_helpers import ensure_adapter_ready
+        from bt_tap.utils.bt_helpers import ensure_adapter_ready, get_adapter_address
         if not ensure_adapter_ready(hci):
             return []
+        self._local_addr = get_adapter_address(hci)
         if full:
             psm_list = list(range(1, 4096, 2))
             info(f"Full L2CAP PSM scan (1-4095, ~{len(psm_list)} probes) on {self.address}...")
@@ -118,6 +120,8 @@ class L2CAPScanner:
             socket.AF_BLUETOOTH, socket.SOCK_SEQPACKET, socket.BTPROTO_L2CAP
         )
         sock.settimeout(timeout)
+        if self._local_addr:
+            sock.bind((self._local_addr, 0))
 
         try:
             sock.connect((self.address, psm))

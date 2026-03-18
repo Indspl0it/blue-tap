@@ -14,6 +14,7 @@ class RFCOMMScanner:
 
     def __init__(self, address: str):
         self.address = address
+        self._local_addr: str | None = None
 
     def scan_all_channels(self, timeout_per_ch: float = 2.0,
                             hci: str = "hci0") -> list[dict]:
@@ -22,9 +23,10 @@ class RFCOMMScanner:
         Returns a list of dicts with keys: channel, status, response_type.
         Status is one of: open, closed, timeout, host_unreachable.
         """
-        from bt_tap.utils.bt_helpers import ensure_adapter_ready
+        from bt_tap.utils.bt_helpers import ensure_adapter_ready, get_adapter_address
         if not ensure_adapter_ready(hci):
             return []
+        self._local_addr = get_adapter_address(hci)
 
         info(f"Scanning RFCOMM channels 1-{self.MAX_CHANNEL} on {self.address}...")
         results = []
@@ -64,6 +66,8 @@ class RFCOMMScanner:
             socket.AF_BLUETOOTH, socket.SOCK_STREAM, socket.BTPROTO_RFCOMM
         )
         sock.settimeout(timeout)
+        if self._local_addr:
+            sock.bind((self._local_addr, 0))
 
         try:
             sock.connect((self.address, channel))

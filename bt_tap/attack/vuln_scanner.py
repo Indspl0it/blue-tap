@@ -1063,7 +1063,7 @@ def _check_authorization_model(address: str, services: list[dict]) -> list[dict]
             # Connected — send OBEX Connect with target UUID
             # OBEX Connect: opcode=0x80, version=0x10, flags=0x00, maxlen=0xFFFF
             # Target header: HI=0x46, length=2+16
-            target_header = b"\x46" + struct.pack(">H", 2 + len(PBAP_UUID)) + PBAP_UUID
+            target_header = b"\x46" + struct.pack(">H", 3 + len(PBAP_UUID)) + PBAP_UUID
             obex_body = b"\x10\x00" + struct.pack(">H", 0xFFFF) + target_header
             obex_connect = b"\x80" + struct.pack(">H", 3 + len(obex_body)) + obex_body
 

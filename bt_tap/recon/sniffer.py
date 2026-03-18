@@ -214,18 +214,21 @@ class NRFBLESniffer:
             "-w", output_pcap,
         ]
         if target_address:
-            # Use -Y (display filter), NOT -f (capture/BPF filter).
-            # -f only accepts BPF syntax and will silently fail with
-            # Wireshark display filter syntax like btle.advertising_address.
+            # Two-pass approach: capture all packets, then filter.
+            # -Y (display filter) does NOT filter what -w writes to the pcap;
+            # -f (capture/BPF filter) doesn't support btle.* display-filter syntax.
+            # So we capture everything first, then filter with a second tshark pass.
             addr_filter = target_address.lower().replace("-", ":")
-            cmd.extend(["-Y", f"btle.advertising_address == {addr_filter}"])
+            self._pending_filter = f"btle.advertising_address == {addr_filter}"
+        else:
+            self._pending_filter = None
 
         with step("Capturing BLE link layer via tshark"):
             try:
                 self._proc = subprocess.Popen(
                     cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
                 )
                 info(f"tshark capture started (PID {self._proc.pid})")
 
@@ -243,6 +246,33 @@ class NRFBLESniffer:
                 return {"success": False, "error": str(e)}
             finally:
                 self._proc = None
+
+        # Second pass: filter the pcap if a target address was specified
+        if self._pending_filter and os.path.exists(output_pcap):
+            filtered_pcap = output_pcap + ".filtered"
+            filter_cmd = [
+                "tshark", "-r", output_pcap,
+                "-Y", self._pending_filter,
+                "-w", filtered_pcap,
+            ]
+            try:
+                filter_result = subprocess.run(
+                    filter_cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    timeout=60,
+                )
+                if filter_result.returncode == 0 and os.path.exists(filtered_pcap):
+                    os.replace(filtered_pcap, output_pcap)
+                    info("Filtered pcap to target address only")
+                else:
+                    warning("Post-capture filter failed; pcap contains all packets")
+                    if os.path.exists(filtered_pcap):
+                        os.remove(filtered_pcap)
+            except (subprocess.TimeoutExpired, OSError) as e:
+                warning(f"Post-capture filter error: {e}")
+                if os.path.exists(filtered_pcap):
+                    os.remove(filtered_pcap)
 
         return self._check_pcap_output(output_pcap, duration, target_address)
 
@@ -262,8 +292,8 @@ class NRFBLESniffer:
             try:
                 self._proc = subprocess.Popen(
                     cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
                 )
                 info(f"nrfutil capture started (PID {self._proc.pid})")
 
@@ -472,8 +502,8 @@ class USRPCapture:
             try:
                 self._proc = subprocess.Popen(
                     cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
                 )
                 info(f"btrx capture started (PID {self._proc.pid})")
 

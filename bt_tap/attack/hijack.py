@@ -118,8 +118,9 @@ class HijackSession:
                     self.avrcp_channel = find_service_channel(self.ivi_address, "A/V Remote", self.ivi_services)
 
             # Summary
+            ivi_name = self.ivi_fingerprint.get('name', 'Unknown') if self.ivi_fingerprint else 'Unknown'
             summary_panel("Recon Results", {
-                "IVI": f"{self.ivi_fingerprint.get('name', 'Unknown')} ({self.ivi_address})",
+                "IVI": f"{ivi_name} ({self.ivi_address})",
                 "Phone": f"{self.phone_name} ({self.phone_address})",
                 "PBAP Channel": str(self.pbap_channel or "NOT FOUND"),
                 "MAP Channel": str(self.map_channel or "NOT FOUND"),
@@ -127,7 +128,7 @@ class HijackSession:
                 "AVRCP Channel": str(self.avrcp_channel or "NOT FOUND"),
             })
 
-            if self.ivi_fingerprint.get("attack_surface"):
+            if self.ivi_fingerprint and self.ivi_fingerprint.get("attack_surface"):
                 for surface in self.ivi_fingerprint["attack_surface"]:
                     substep(f"Attack surface: {surface}")
 

@@ -96,6 +96,11 @@ def run_cmd(cmd: list[str], timeout: int = 30, check: bool = False) -> subproces
             cmd, returncode=-1,
             stdout="", stderr=f"Command timed out after {timeout}s",
         )
+    except FileNotFoundError:
+        return subprocess.CompletedProcess(
+            cmd, returncode=-1,
+            stdout="", stderr=f"Command not found: {cmd[0]}",
+        )
 
 
 def lookup_oui(mac: str) -> str:

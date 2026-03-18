@@ -82,7 +82,7 @@ class L2CAPFuzzer:
                     pass
 
     def null_flood(self, psm: int = 1, count: int = 1000) -> dict:
-        """Rapid-fire zero-byte packets to stress connection handling."""
+        """Rapid-fire zero-length packets to stress connection handling."""
         info(f"Flooding {count} null packets to {self.address} PSM {psm}")
         sent = 0
         errors = 0
@@ -92,7 +92,7 @@ class L2CAPFuzzer:
             sock.connect((self.address, psm))
             for _ in range(count):
                 try:
-                    sock.send(b"\x00")
+                    sock.send(b"")
                     sent += 1
                 except OSError:
                     errors += 1

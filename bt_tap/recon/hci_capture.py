@@ -19,7 +19,8 @@ class HCICapture:
     Wireshark analysis.
     """
 
-    PID_FILE = "/tmp/bt_tap_btmon.pid"
+    _PID_DIR = os.path.join(os.path.expanduser("~"), ".bt_tap")
+    PID_FILE = os.path.join(_PID_DIR, "btmon.pid")
 
     def __init__(self):
         self.process: subprocess.Popen | None = None
@@ -77,6 +78,7 @@ class HCICapture:
 
             # Persist PID (process group ID) so a separate stop invocation
             # can find and kill the entire process group
+            os.makedirs(self._PID_DIR, exist_ok=True)
             with open(self.PID_FILE, "w") as pf:
                 json.dump({
                     "pgid": os.getpgid(self.process.pid),
@@ -225,6 +227,7 @@ def detect_pairing_mode(address: str, hci: str = "hci0") -> dict:
         time.sleep(2)
 
         # Initiate a pairing attempt via bluetoothctl
+        proc = None
         try:
             proc = subprocess.Popen(
                 ["bluetoothctl"],
@@ -245,6 +248,9 @@ def detect_pairing_mode(address: str, hci: str = "hci0") -> dict:
             proc.wait(timeout=5)
         except Exception as exc:
             warning(f"bluetoothctl pairing probe error: {exc}")
+            if proc and proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=3)
 
         cap.stop()
 

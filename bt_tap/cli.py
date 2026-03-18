@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 
 import click
 from rich.table import Table
@@ -217,10 +218,12 @@ def scan_ble(duration, passive, output):
 def scan_all(duration, hci, output):
     """Scan both Classic BT and BLE simultaneously."""
     from bt_tap.core.scanner import scan_all as _scan_all
+    from bt_tap.utils.session import log_command
 
     devices = _scan_all(duration, hci)
     if devices:
         console.print(device_table(devices, "All Bluetooth Devices"))
+        log_command("scan_all", devices, category="scan")
     if output:
         _save_json(devices, output)
 
@@ -305,15 +308,21 @@ def recon_fingerprint(address, output):
         if class_info.get("services"):
             class_str += f" [{', '.join(class_info['services'])}]"
 
+    ivi_str = "[green]LIKELY[/green]" if fp.get("ivi_likely") else "[dim]Unknown[/dim]"
     panel_text = f"""[cyan]Address:[/cyan] {fp['address']}
 [cyan]Name:[/cyan] {fp['name']}
-[cyan]Manufacturer:[/cyan] {fp['manufacturer']}
-[cyan]Is IVI:[/cyan] {'[green]YES[/green]' if fp['is_ivi'] else '[red]NO[/red]'}
+[cyan]Chipset:[/cyan] {fp['manufacturer']}
+[cyan]IVI Likely:[/cyan] {ivi_str}
 [cyan]Device Class:[/cyan] {fp.get('device_class', 'N/A')} {class_str}
 [cyan]BT Version:[/cyan] {fp.get('lmp_version') or fp.get('bt_version') or 'N/A'}
 [cyan]Profiles:[/cyan] {len(fp['profiles'])}"""
 
     console.print(Panel(panel_text, title="Device Fingerprint", border_style="cyan"))
+
+    if fp.get("ivi_signals"):
+        console.print("\n[bold cyan]IVI Signals (heuristic):[/bold cyan]")
+        for sig in fp["ivi_signals"]:
+            console.print(f"  [cyan]~[/cyan] {sig}")
 
     if fp["attack_surface"]:
         console.print("\n[bold red]Attack Surface:[/bold red]")
@@ -2084,7 +2093,8 @@ def run_cmd_seq(commands, playbook):
     for i, cmd_str in enumerate(commands, 1):
         # Replace TARGET placeholder
         if target_addr:
-            cmd_str = cmd_str.replace("TARGET", target_addr).replace("target", target_addr)
+            cmd_str = re.sub(r'\bTARGET\b', target_addr, cmd_str)
+            cmd_str = re.sub(r'\btarget\b', target_addr, cmd_str)
 
         console.rule(f"[bold]Step {i}/{len(commands)}: {cmd_str}", style="dim")
 
@@ -2095,8 +2105,9 @@ def run_cmd_seq(commands, playbook):
             with ctx:
                 main.invoke(ctx)
             results.append({"step": i, "command": cmd_str, "status": "success"})
-        except SystemExit:
-            results.append({"step": i, "command": cmd_str, "status": "success"})
+        except SystemExit as e:
+            status = "success" if e.code in (None, 0) else "error"
+            results.append({"step": i, "command": cmd_str, "status": status})
         except click.exceptions.UsageError as e:
             error(f"Invalid command: {e}")
             results.append({"step": i, "command": cmd_str, "status": "error", "error": str(e)})

@@ -87,12 +87,6 @@ def parse_sdp_output(output: str) -> list[dict]:
                 elif "L2CAP" in uuid_name:
                     last_protocol = "L2CAP"
 
-            # Check for version in Profile Descriptor List lines
-            # Format: "Hands-Free" (0x111e)
-            #   Version: 0x0108
-            if in_profile_desc and m:
-                current.setdefault("_pending_profile_uuid", uuid_hex)
-
         elif line.startswith("Version:") and current:
             version_str = line.split(":", 1)[1].strip()
             # Parse version like 0x0108 -> "1.8", 0x0102 -> "1.2"
@@ -116,7 +110,10 @@ def parse_sdp_output(output: str) -> list[dict]:
             m = re.search(r"PSM:\s*(\S+)", line)
             if m:
                 current["protocol"] = "L2CAP"
-                current["channel"] = m.group(1)
+                try:
+                    current["channel"] = int(m.group(1), 0)
+                except (ValueError, TypeError):
+                    current["channel"] = m.group(1)
 
         elif line.startswith("Channel:") and current and last_protocol == "RFCOMM":
             m = re.search(r"Channel:\s*(\d+)", line)
@@ -128,7 +125,10 @@ def parse_sdp_output(output: str) -> list[dict]:
             m = re.search(r"PSM:\s*(\S+)", line)
             if m:
                 current["protocol"] = "L2CAP"
-                current["channel"] = m.group(1)
+                try:
+                    current["channel"] = int(m.group(1), 0)
+                except (ValueError, TypeError):
+                    current["channel"] = m.group(1)
 
         elif "OBEX" in line and current:
             current.setdefault("protocols", []).append("OBEX")
@@ -138,10 +138,6 @@ def parse_sdp_output(output: str) -> list[dict]:
 
     if current:
         services.append(current)
-
-    # Clean up internal keys
-    for svc in services:
-        svc.pop("_pending_profile_uuid", None)
 
     success(f"Found {len(services)} SDP service(s)")
     return services

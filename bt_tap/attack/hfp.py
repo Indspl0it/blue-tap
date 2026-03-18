@@ -66,6 +66,7 @@ class HFPClient:
         self.sco_sock = None
         self.ag_features = 0
         self.indicators = {}
+        self.indicator_values = {}
         self.slc_established = False
 
     def connect(self) -> bool:
@@ -74,6 +75,9 @@ class HFPClient:
             self.rfcomm_sock = socket.socket(
                 socket.AF_BLUETOOTH, socket.SOCK_STREAM, socket.BTPROTO_RFCOMM
             )
+            if self.channel is None:
+                error("No RFCOMM channel specified. Use SDP to discover the HFP channel.")
+                return False
             info(f"Connecting HFP to {self.address} channel {self.channel}...")
             self.rfcomm_sock.connect((self.address, self.channel))
             self.rfcomm_sock.settimeout(5.0)
@@ -444,7 +448,7 @@ class HFPClient:
         """
         info(f"Silent call to {number}...")
         result = self.dial(number)
-        if "OK" in result or "ERROR" not in result:
+        if result and ("OK" in result or "ERROR" not in result):
             # Immediately mute speaker and mic
             self._send_at("AT+VGS=0")  # Speaker volume 0
             self._send_at("AT+VGM=0")  # Mic volume 0
@@ -550,10 +554,15 @@ class HFPClient:
             self.indicators[name] = i
 
     def _parse_indicator_values(self, response: str):
-        """Parse +CIND? response for current indicator values."""
+        """Parse +CIND? response for current indicator values.
+
+        Stores values in self.indicator_values (separate from the
+        name-to-index mapping in self.indicators).
+        """
         values_str = response.split(":")[1].strip().split("\r")[0] if ":" in response else ""
         values = re.findall(r"(\d+)", values_str)
+        self.indicator_values = {}
         indicator_names = list(self.indicators.keys())
         for i, val in enumerate(values):
             if i < len(indicator_names):
-                self.indicators[indicator_names[i]] = int(val)
+                self.indicator_values[indicator_names[i]] = int(val)

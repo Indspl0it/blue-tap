@@ -116,15 +116,21 @@ def get_active_profile(mac: str) -> str:
 
 def unmute_source(source: str) -> bool:
     """Unmute an audio source and set volume to 100%."""
-    run_cmd(["pactl", "set-source-mute", source, "0"])
-    run_cmd(["pactl", "set-source-volume", source, "100%"])
+    r1 = run_cmd(["pactl", "set-source-mute", source, "0"])
+    r2 = run_cmd(["pactl", "set-source-volume", source, "100%"])
+    if r1.returncode != 0 or r2.returncode != 0:
+        warning(f"Unmute may have failed: {r1.stderr.strip()} {r2.stderr.strip()}")
+        return False
     success(f"Unmuted and set 100% volume: {source}")
     return True
 
 
 def mute_source(source: str) -> bool:
     """Mute an audio source."""
-    run_cmd(["pactl", "set-source-mute", source, "1"])
+    r = run_cmd(["pactl", "set-source-mute", source, "1"])
+    if r.returncode != 0:
+        warning(f"Mute may have failed: {r.stderr.strip()}")
+        return False
     info(f"Muted: {source}")
     return True
 

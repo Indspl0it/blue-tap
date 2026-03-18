@@ -258,7 +258,7 @@ class ReportGenerator:
             sections.append('<div class="section">')
             sections.append("<h2>Device Fingerprint</h2>")
             sections.append("<table><tr><th>Property</th><th>Value</th></tr>")
-            display_keys = ["address", "name", "manufacturer", "is_ivi",
+            display_keys = ["address", "name", "manufacturer", "ivi_likely",
                            "device_class", "bt_version", "lmp_version"]
             for key in display_keys:
                 val = self.fingerprint_results.get(key)

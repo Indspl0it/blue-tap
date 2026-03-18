@@ -1,40 +1,31 @@
-"""Device fingerprinting and IVI identification."""
+"""Device fingerprinting — BT version, chipset, profiles, and attack surface.
+
+IVI (In-Vehicle Infotainment) systems rarely advertise their make/model over
+Bluetooth. The device name is usually generic ("CAR-AUDIO", "My Car", or a
+random string), and the OUI maps to a chipset vendor (Broadcom, Qualcomm),
+not the vehicle OEM.
+
+What IS reliable:
+  - BT/LMP version and chipset vendor (from hcitool info)
+  - OUI-based chipset manufacturer (from MAC prefix)
+  - SDP service profiles (HFP AG, A2DP Sink, PBAP, MAP, etc.)
+  - Device class (Car Audio = 0x04/0x08)
+  - Attack surface derived from the above
+
+What is NOT reliable:
+  - Determining if something is definitely an IVI vs a Bluetooth speaker
+  - Identifying the car make/model/OEM from BT data alone
+  - Manufacturer attribution beyond the chipset vendor
+
+The `ivi_likely` field is a heuristic hint — never use it to gate workflows.
+"""
 
 import re
 
 from bt_tap.utils.bt_helpers import run_cmd
-from bt_tap.recon.sdp import browse_services, get_device_bt_version
+from bt_tap.recon.sdp import browse_services
 from bt_tap.utils.output import info, success, warning
 
-
-# Known IVI manufacturer patterns
-IVI_PATTERNS = {
-    "Harman": ["JBL", "Harman", "Samsung Harman", "Harman Kardon"],
-    "Bosch": ["Bosch"],
-    "Continental": ["Continental"],
-    "Denso": ["Denso", "DENSO"],
-    "Alpine": ["Alpine"],
-    "Pioneer": ["Pioneer", "Carrozzeria"],
-    "Kenwood": ["Kenwood", "JVC", "JVCKENWOOD"],
-    "Sony": ["Sony"],
-    "Panasonic": ["Panasonic", "Matsushita"],
-    "LG": ["LG Electronics", "LG Display"],
-    "Hyundai Mobis": ["Mobis", "MOBIS"],
-    "Visteon": ["Visteon"],
-    "Tesla": ["Tesla"],
-    "Aptiv": ["Aptiv", "Delphi"],
-    "Clarion": ["Clarion"],
-    "Garmin": ["Garmin"],
-    "Blaupunkt": ["Blaupunkt"],
-    "Magneti Marelli": ["Magneti", "Marelli"],
-    "Bose": ["Bose"],
-    "Bang & Olufsen": ["Bang & Olufsen", "B&O"],
-    "Burmester": ["Burmester"],
-    "Mark Levinson": ["Mark Levinson", "Lexus"],
-    "Faurecia": ["Faurecia"],
-    "Valeo": ["Valeo"],
-    "NXP": ["NXP"],
-}
 
 # Bluetooth profiles typically found on automotive IVIs
 IVI_PROFILES = {
@@ -60,15 +51,19 @@ IVI_DEVICE_CLASSES = {
 
 
 def fingerprint_device(address: str, hci: str = "hci0") -> dict:
-    """Fingerprint a Bluetooth device to identify IVI characteristics.
+    """Fingerprint a Bluetooth device — version, chipset, profiles, attack surface.
 
-    Gathers: name, device class, BT version, LMP features, manufacturer,
+    Gathers: name, device class, BT version, LMP features, chipset manufacturer,
     SDP services, and maps the full attack surface.
+
+    Does NOT attempt to identify the vehicle make/model — IVIs rarely expose
+    that information over Bluetooth.
     """
     from bt_tap.utils.bt_helpers import ensure_adapter_ready
     if not ensure_adapter_ready(hci):
         return {"address": address, "name": "", "manufacturer": "Unknown",
-                "is_ivi": False, "profiles": [], "attack_surface": [],
+                "is_ivi": False, "ivi_likely": False,
+                "profiles": [], "attack_surface": [],
                 "vuln_hints": [], "error": "adapter not ready"}
 
     info(f"Fingerprinting {address}...")
@@ -76,8 +71,9 @@ def fingerprint_device(address: str, hci: str = "hci0") -> dict:
     fp = {
         "address": address,
         "name": "",
-        "manufacturer": "Unknown",
-        "is_ivi": False,
+        "manufacturer": "Unknown",  # Chipset vendor, not car OEM
+        "is_ivi": False,            # Kept for backward compat (= ivi_likely)
+        "ivi_likely": False,        # Heuristic hint, never gate on this
         "device_class": None,
         "device_class_info": {},
         "bt_version": None,
@@ -85,6 +81,7 @@ def fingerprint_device(address: str, hci: str = "hci0") -> dict:
         "profiles": [],
         "attack_surface": [],
         "vuln_hints": [],
+        "ivi_signals": [],          # Why we think it might be an IVI
     }
 
     # Resolve name
@@ -101,8 +98,6 @@ def fingerprint_device(address: str, hci: str = "hci0") -> dict:
     if fp.get("device_class"):
         from bt_tap.core.scanner import parse_device_class
         fp["device_class_info"] = parse_device_class(fp["device_class"])
-        if fp["device_class_info"].get("is_ivi"):
-            fp["is_ivi"] = True
 
     # Enumerate services
     services = browse_services(address)
@@ -117,28 +112,31 @@ def fingerprint_device(address: str, hci: str = "hci0") -> dict:
             "provider": svc.get("provider"),
         })
 
-    # Determine if this is an IVI
-    _detect_ivi(fp)
+    # Heuristic IVI detection (signals only — not definitive)
+    _detect_ivi_signals(fp)
 
-    # Map attack surface
+    # Map attack surface (works regardless of IVI detection)
     _map_attack_surface(fp, services)
 
     # Check for vulnerability hints based on BT version
     _check_vuln_hints(fp)
 
-    # Identify manufacturer
-    _identify_manufacturer(fp)
-
-    if fp["is_ivi"]:
-        success(f"Identified as IVI: {fp['name']} ({fp['manufacturer']})")
+    if fp["ivi_likely"]:
+        success(f"Likely IVI: {fp['name']} — {len(fp['ivi_signals'])} signal(s)")
+        for sig in fp["ivi_signals"]:
+            info(f"  hint: {sig}")
     else:
-        info(f"Device: {fp['name']} ({fp['manufacturer']}) - not identified as IVI")
+        info(f"Device: {fp['name']} (chipset: {fp['manufacturer']})")
 
     return fp
 
 
 def _parse_hcitool_info(output: str, fp: dict):
-    """Parse hcitool info output for device class, manufacturer, features."""
+    """Parse hcitool info output for device class, manufacturer, features.
+
+    The 'Manufacturer' field from hcitool info is the *chipset* vendor
+    (Broadcom, Qualcomm, Intel), not the car/device OEM.
+    """
     for line in output.splitlines():
         if "Manufacturer:" in line:
             fp["manufacturer"] = line.split(":", 1)[1].strip()
@@ -160,24 +158,23 @@ def _parse_hcitool_info(output: str, fp: dict):
                 fp["device_class"] = m.group(1)
 
 
-def _detect_ivi(fp: dict):
-    """Detect if the device is an automotive IVI based on multiple signals."""
-    # Signal 1: Name patterns
-    name_lower = fp["name"].lower()
-    ivi_name_patterns = [
-        "car", "auto", "vehicle", "ivi", "infotainment", "head unit",
-        "carplay", "android auto", "sync", "uconnect", "mbux",
-        "idrive", "sensus", "entune", "mylink", "intellilink",
-        "starlink", "mazda connect", "honda connect", "nissan connect",
-    ]
-    if any(pat in name_lower for pat in ivi_name_patterns):
-        fp["is_ivi"] = True
+def _detect_ivi_signals(fp: dict):
+    """Collect heuristic signals that suggest the device might be an IVI.
 
-    # Signal 2: Device class = Car Audio
-    if fp.get("device_class_info", {}).get("is_ivi"):
-        fp["is_ivi"] = True
+    Each signal is recorded with its reasoning. The more signals present,
+    the more likely it's an IVI — but none are definitive. A Bluetooth
+    speakerphone with HFP AG + A2DP Sink looks identical to an IVI.
+    """
+    signals = []
 
-    # Signal 3: IVI-typical profile combination
+    # Signal 1: Device class = Car Audio (minor class 0x08 under Audio/Video)
+    class_info = fp.get("device_class_info", {})
+    if class_info.get("is_ivi"):
+        signals.append("Device class: Car Audio (0x04/0x08)")
+
+    # Signal 2: IVI-typical profile combination
+    # HFP AG + A2DP Sink is the strongest profile signal, but also matches
+    # any hands-free speakerphone. PBAP/MAP support increases confidence.
     profile_names = [p.get("profile", "") + " " + p.get("name", "") for p in fp["profiles"]]
     profile_text = " ".join(profile_names).lower()
 
@@ -187,23 +184,39 @@ def _detect_ivi(fp: dict):
     )
     has_a2dp_sink = "a2dp" in profile_text and "sink" in profile_text
     has_pbap = "pbap" in profile_text or "phonebook" in profile_text or "phone book" in profile_text
-    has_avrcp = "avrcp" in profile_text or "a/v remote" in profile_text
-    has_map = "map" in profile_text and ("message" in profile_text or "mas" in profile_text)
+    has_map = re.search(r'\bmap\b', profile_text) and ("message" in profile_text or "mas" in profile_text)
 
-    # IVIs typically have HFP AG + A2DP Sink + at least one of PBAP/AVRCP
     if has_hfp_ag and has_a2dp_sink:
-        fp["is_ivi"] = True
-    if has_hfp_ag and has_pbap:
-        fp["is_ivi"] = True
+        signals.append("Profiles: HFP AG + A2DP Sink (audio gateway pattern)")
+    if has_pbap:
+        signals.append("Profiles: PBAP (phonebook access — common on IVIs)")
+    if has_map:
+        signals.append("Profiles: MAP (message access — common on IVIs)")
 
-    # Signal 4: Device class major = Audio/Video with minor = Car Audio
-    class_info = fp.get("device_class_info", {})
-    if class_info.get("major") == "Audio/Video" and "car" in class_info.get("minor", "").lower():
-        fp["is_ivi"] = True
+    # Signal 3: Name hints (very weak — most IVIs use generic names)
+    name_lower = fp["name"].lower()
+    ivi_name_hints = [
+        "car", "auto", "vehicle", "ivi", "infotainment", "head unit",
+        "carplay", "android auto", "sync", "uconnect", "mbux",
+        "idrive", "sensus", "entune", "mylink", "intellilink",
+        "starlink", "mazda connect", "honda connect", "nissan connect",
+    ]
+    matched_hints = [h for h in ivi_name_hints if h in name_lower]
+    if matched_hints:
+        signals.append(f"Name contains: {', '.join(matched_hints)} (weak signal)")
+
+    fp["ivi_signals"] = signals
+    fp["ivi_likely"] = len(signals) >= 2
+    fp["is_ivi"] = fp["ivi_likely"]  # backward compat
 
 
 def _map_attack_surface(fp: dict, services: list[dict]):
-    """Map the full attack surface based on discovered profiles."""
+    """Map the full attack surface based on discovered profiles.
+
+    This works on ANY Bluetooth device, not just IVIs. Every device with
+    PBAP has a phonebook attack surface, regardless of whether we think
+    it's an IVI.
+    """
     profile_names = [p.get("profile", "") + " " + p.get("name", "") for p in fp["profiles"]]
     profile_text = " ".join(profile_names).lower()
     class_ids_text = " ".join(
@@ -272,22 +285,3 @@ def _check_vuln_hints(fp: dict):
             f"Legacy pairing: BT {ver} — may use fixed PIN. "
             f"PIN brute-force feasible."
         )
-
-
-def _identify_manufacturer(fp: dict):
-    """Identify IVI manufacturer from name, SDP provider, and hcitool data."""
-    search_strings = [
-        fp.get("name", ""),
-        fp.get("manufacturer", ""),
-    ]
-    # Also check SDP provider names
-    for p in fp.get("profiles", []):
-        if p.get("provider"):
-            search_strings.append(p["provider"])
-
-    combined = " ".join(search_strings).lower()
-
-    for mfr, patterns in IVI_PATTERNS.items():
-        if any(pat.lower() in combined for pat in patterns):
-            fp["manufacturer"] = mfr
-            return

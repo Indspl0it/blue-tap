@@ -11,3 +11,8 @@ build/
 *.pid
 .claude/cache/
 .claude/tsc-cache/
+target/received/*
+!target/received/.gitkeep
+target/.ivi_profile
+target/.ivi_adapter
+target/.ivi_phone
