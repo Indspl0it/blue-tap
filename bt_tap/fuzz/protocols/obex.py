@@ -439,29 +439,32 @@ def build_get(
 
 
 def build_put(
-    connection_id: int,
     name: str,
     type_str: bytes,
     body_data: bytes = b"",
     final: bool = True,
+    connection_id: Optional[int] = None,
 ) -> bytes:
     """Build an OBEX Put request.
 
     Uses End-of-Body for final packets and Body for intermediate packets.
 
     Args:
-        connection_id: Connection-ID from Connect response.
         name: Object name (UTF-16BE in Name header).
         type_str: MIME type bytes (null terminator appended automatically).
         body_data: Object body payload.
         final: If True, use Put Final with End-of-Body; otherwise Put
             with Body.
+        connection_id: Connection-ID from Connect response.  ``None`` omits
+            the header (appropriate for OPP which has no Target UUID).
 
     Returns:
         Complete Put / Put Final packet.
     """
     opcode = OBEX_PUT_FINAL if final else OBEX_PUT
-    headers = build_byte4_header(HI_CONNECTION_ID, connection_id)
+    headers = b""
+    if connection_id is not None:
+        headers += build_byte4_header(HI_CONNECTION_ID, connection_id)
     headers += build_unicode_header(HI_NAME, name)
     headers += build_byteseq_header(HI_TYPE, type_str + b"\x00")
     if body_data:
@@ -729,11 +732,11 @@ def build_opp_push(
         Complete Put Final packet with object data.
     """
     return build_put(
-        connection_id=0,  # OPP typically does not use Connection-ID
         name=name,
         type_str=type_str,
         body_data=body_data,
         final=True,
+        connection_id=None,  # OPP has no Target UUID, so no Connection-ID
     )
 
 
@@ -950,7 +953,7 @@ def fuzz_session_attacks() -> list[list[bytes]]:
         # Interleaved Put and Get
         [
             build_pbap_connect(),
-            build_put(1, "test.vcf", b"text/x-vcard", b"BEGIN:VCARD", final=False),
+            build_put("test.vcf", b"text/x-vcard", b"BEGIN:VCARD", final=False, connection_id=1),
             build_get(1, "pb.vcf", PBAP_TYPE_PHONEBOOK),
         ],
         # Rapid connect/disconnect (resource exhaustion)
@@ -1017,11 +1020,13 @@ def generate_all_obex_fuzz_cases(
         if isinstance(seed, bytes):
             cases.extend(fuzz_packet_length(seed))
 
-    # --- Header-level fuzzing ---
-    cases.append(build_path_traversal_name(depth=5))
-    cases.append(build_path_traversal_name(depth=20))
-    cases.append(fuzz_unicode_odd_bytes())
-    cases.append(fuzz_unicode_no_null())
+    # --- Header-level fuzzing (wrapped in OBEX packets) ---
+    # Path traversal names wrapped in SetPath packets
+    cases.append(build_setpath(name="../" * 5 + "etc/passwd", backup=True))
+    cases.append(build_setpath(name="../" * 20 + "etc/passwd", backup=True))
+    # Malformed Unicode headers wrapped in Get Final packets
+    cases.append(build_obex_packet(OBEX_GET_FINAL, fuzz_unicode_odd_bytes()))
+    cases.append(build_obex_packet(OBEX_GET_FINAL, fuzz_unicode_no_null()))
     cases.append(fuzz_duplicate_headers())
 
     # Corrupt individual header lengths

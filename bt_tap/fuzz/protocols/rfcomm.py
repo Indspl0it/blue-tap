@@ -343,8 +343,8 @@ def build_uih_with_credits(dlci: int, data: bytes = b"", credits: int = 0) -> by
         Complete UIH frame with credits field and correct FCS.
     """
     addr = build_address(dlci)
-    # Length covers credits byte + data
-    length_bytes = build_length(len(data) + 1)
+    # Length field covers data only (credits byte is NOT included per RFCOMM spec)
+    length_bytes = build_length(len(data))
     fcs = calculate_fcs(bytes([addr, RFCOMM_UIH]))
 
     return (
@@ -866,6 +866,126 @@ def fuzz_double_disc() -> list[bytes]:
     return cases
 
 
+def fuzz_credit_flow() -> list[bytes]:
+    """Generate UIH frames with credit-based flow control edge cases.
+
+    Tests boundary credit values, credits on invalid channels, and
+    credit exhaustion/overflow patterns.
+
+    Returns:
+        List of raw RFCOMM frame bytes exercising credit flow control.
+    """
+    cases: list[bytes] = []
+
+    # Credits=0 on valid DLCI (no credits granted)
+    cases.append(build_uih_with_credits(2, b"test", credits=0))
+
+    # Credits=255 (max uint8)
+    cases.append(build_uih_with_credits(2, b"test", credits=255))
+
+    # Credits=1 with large data payload
+    cases.append(build_uih_with_credits(2, b"A" * 512, credits=1))
+
+    # Credits on DLCI 0 (control channel — credits shouldn't be used here)
+    cases.append(build_uih_with_credits(0, b"test", credits=10))
+
+    # Credits on unopened channel (DLCI 30)
+    cases.append(build_uih_with_credits(30, b"test", credits=5))
+
+    # Multiple UIH-with-credits in rapid succession (exhaust/overflow credit counter)
+    for _ in range(10):
+        cases.append(build_uih_with_credits(2, b"x", credits=255))
+
+    return cases
+
+
+def fuzz_mux_length_mismatch() -> list[bytes]:
+    """Generate MUX commands with mismatched length fields.
+
+    The length field in a mux command TLV is manually set to differ from
+    the actual data size, testing parser robustness against truncated or
+    overstated payloads.
+
+    Returns:
+        List of raw RFCOMM frames (UIH on DLCI 0) with length mismatches.
+    """
+    cases: list[bytes] = []
+
+    # PN command: claimed length 8 but only 4 bytes data
+    mux_cmd = build_mux_command(MUX_PN, 8, b"\x00" * 4)
+    cases.append(build_uih(0, mux_cmd))
+
+    # MSC command: length=0 but with data present
+    mux_cmd = build_mux_command(MUX_MSC, 0, b"\x0B\xAD")
+    cases.append(build_uih(0, mux_cmd))
+
+    # RPN command: length exceeding actual data (claimed 16, actual 8)
+    dlci_byte = ((2 & 0x3F) << 2) | 0x02 | 0x01
+    rpn_short = bytes([dlci_byte, 0x03, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF])
+    mux_cmd = build_mux_command(MUX_RPN, 16, rpn_short)
+    cases.append(build_uih(0, mux_cmd))
+
+    # PN with length < required (claimed 4, but PN needs 8 bytes)
+    mux_cmd = build_mux_command(MUX_PN, 4, b"\x02\xE0\x00\x00\x7F\x00\x00\x07")
+    cases.append(build_uih(0, mux_cmd))
+
+    # Test command: length=0xFF but small payload
+    mux_cmd = build_mux_command(MUX_TEST, 0xFF, b"tiny")
+    cases.append(build_uih(0, mux_cmd))
+
+    return cases
+
+
+def fuzz_rpn_params() -> list[bytes]:
+    """Generate RPN commands with boundary and invalid parameter values.
+
+    Tests each RPN parameter field at valid boundaries and beyond, including
+    reserved/invalid values that should be rejected by conformant implementations.
+
+    Returns:
+        List of raw RFCOMM frames (UIH on DLCI 0) with RPN commands.
+    """
+    cases: list[bytes] = []
+
+    # Baud rate: valid range 0-7, invalid 8 and 255
+    for baud in [0, 1, 2, 3, 4, 5, 6, 7, 8, 255]:
+        cases.append(build_rpn(2, baud_rate=baud))
+
+    # Data bits: valid 0-3, invalid 4 and 255
+    for db in [0, 1, 2, 3, 4, 255]:
+        cases.append(build_rpn(2, data_bits=db))
+
+    # Stop bits: valid 0-1, invalid 2 and 255
+    for sb in [0, 1, 2, 255]:
+        cases.append(build_rpn(2, stop_bits=sb))
+
+    # Parity: valid 0-1, invalid 2 and 255
+    for p in [0, 1, 2, 255]:
+        cases.append(build_rpn(2, parity=p))
+
+    # Parity type: valid 0-3, invalid 4 and 255
+    for pt in [0, 1, 2, 3, 4, 255]:
+        cases.append(build_rpn(2, parity_type=pt))
+
+    # Flow control mask: build manually to test the flow control byte
+    # Normal build_rpn sets flow control to 0x00; build raw variants
+    dlci_byte = ((2 & 0x3F) << 2) | 0x02 | 0x01
+    for fc_mask in [0x00, 0x01, 0x3F, 0xFF]:
+        rpn_data = bytes([
+            dlci_byte,
+            0x03,       # baud_rate=9600
+            0x03,       # data_bits=8, stop=1, no parity
+            fc_mask,    # flow control
+            0x00,       # XON
+            0x00,       # XOFF
+            0xFF, 0xFF,  # parameter mask (all valid)
+        ])
+        mux_cmd = build_mux_command(MUX_RPN, len(rpn_data), rpn_data)
+        cases.append(build_uih(0, mux_cmd))
+
+    return cases
+
+
 # ===========================================================================
 # Master Generator
 # ===========================================================================
@@ -908,5 +1028,14 @@ def generate_all_rfcomm_fuzz_cases() -> list[bytes]:
 
     # Double disconnect
     cases.extend(fuzz_double_disc())
+
+    # Credit-based flow control edge cases
+    cases.extend(fuzz_credit_flow())
+
+    # MUX command length mismatches
+    cases.extend(fuzz_mux_length_mismatch())
+
+    # RPN parameter boundary values
+    cases.extend(fuzz_rpn_params())
 
     return cases

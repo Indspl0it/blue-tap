@@ -198,6 +198,31 @@ class ATCorpus:
         for val in [1, 2, 0, 255, 999]:
             corpus.append(at_cmd(f"AT+BCS={val}"))
 
+        # --- AT+BVRA enhanced voice recognition (HFP 1.8) ---
+        corpus.append(at_cmd('AT+BVRA=2,"text search query"'))
+        corpus.append(at_cmd('AT+BVRA=2,""'))                 # empty text
+        corpus.append(at_cmd(f'AT+BVRA=2,"{"A" * 1024}"'))    # overflow text
+        corpus.append(b'AT+BVRA=2,"\x00"\r')                  # null in text
+
+        # --- AT+BIND (HF indicators: enhanced safety=1, battery level=2) ---
+        corpus.append(at_cmd("AT+BIND=1,1"))
+        corpus.append(at_cmd("AT+BIND=2,1"))
+
+        # --- AT+BIEV (HF indicator value updates, HFP 1.7+) ---
+        # Enhanced safety indicator (ID=1): off/on
+        corpus.append(at_cmd("AT+BIEV=1,0"))
+        corpus.append(at_cmd("AT+BIEV=1,1"))
+        # Battery level indicator (ID=2): boundary values
+        for val in [0, 50, 100]:
+            corpus.append(at_cmd(f"AT+BIEV=2,{val}"))
+        # Battery level boundary overflow
+        corpus.append(at_cmd("AT+BIEV=2,101"))
+        corpus.append(at_cmd("AT+BIEV=2,255"))
+        corpus.append(at_cmd("AT+BIEV=2,-1"))
+        # Invalid indicator IDs
+        corpus.append(at_cmd("AT+BIEV=255,0"))
+        corpus.append(at_cmd("AT+BIEV=0,0"))
+
         return corpus
 
     # ------------------------------------------------------------------

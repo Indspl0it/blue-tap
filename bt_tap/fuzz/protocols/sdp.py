@@ -382,7 +382,7 @@ def build_service_attr_req(
     """
     if attr_ranges is None:
         attr_ranges = [(0x0000, 0xFFFF)]
-    attrs = encode_des([encode_uint32((lo << 16) | hi) for lo, hi in attr_ranges])
+    attrs = encode_des([encode_uint32((start << 16) | end) for start, end in attr_ranges])
     params = (
         struct.pack(">I", handle)
         + struct.pack(">H", max_bytes)
@@ -417,7 +417,7 @@ def build_service_search_attr_req(
     if attr_ranges is None:
         attr_ranges = [(0x0000, 0xFFFF)]
     pattern = encode_des([encode_uuid16(u) for u in uuids])
-    attrs = encode_des([encode_uint32((lo << 16) | hi) for lo, hi in attr_ranges])
+    attrs = encode_des([encode_uint32((start << 16) | end) for start, end in attr_ranges])
     params = pattern + struct.pack(">H", max_bytes) + attrs + continuation
     return build_sdp_pdu(SDP_SERVICE_SEARCH_ATTR_REQ, tid, params)
 
@@ -556,6 +556,13 @@ def fuzz_all_type_size_combos() -> list[bytes]:
             if size_idx in fixed_sizes:
                 data_len = fixed_sizes[size_idx]
                 cases.append(bytes([dtd]) + b"\x01" * data_len)
+
+                # Valid Nil encoding: DTD byte only, no data (0 bytes per spec).
+                # The case above (Nil + 1 byte dummy) is kept as a fuzz case to
+                # test how parsers handle unexpected data after Nil.
+                if type_desc == 0 and size_idx == 0:
+                    cases.append(bytes([0x00]))  # Nil DTD, no payload
+
             elif size_idx in var_prefix_sizes:
                 # Variable-length: provide a small length prefix + data
                 prefix_len = var_prefix_sizes[size_idx]
@@ -782,6 +789,7 @@ def generate_continuation_attacks(initial_cont_state: bytes) -> list[bytes]:
     ]
 
     # Incremental sweep: probe every offset 0x00-0xFF
+    # High-byte sweep: varies high byte, low byte = 0x00
     for i in range(256):
         if cont_len == 1:
             attacks.append(build_continuation(bytes([i])))
@@ -792,6 +800,25 @@ def generate_continuation_attacks(initial_cont_state: bytes) -> list[bytes]:
             attacks.append(build_continuation(
                 struct.pack(">H", i * 256) + initial_cont_state[2:]
             ))
+
+    # Low-byte sweep: varies low byte, high byte = 0x00 (doubles coverage)
+    for i in range(256):
+        if cont_len == 2:
+            attacks.append(build_continuation(struct.pack(">H", i)))
+        elif cont_len >= 3:
+            attacks.append(build_continuation(
+                struct.pack(">H", i) + initial_cont_state[2:]
+            ))
+
+    # Strategic 2-byte boundary values
+    if cont_len >= 2:
+        for value in (0x0000, 0x0001, 0x00FF, 0x0100, 0x7FFF, 0x8000, 0xFFFE, 0xFFFF):
+            if cont_len == 2:
+                attacks.append(build_continuation(struct.pack(">H", value)))
+            else:
+                attacks.append(build_continuation(
+                    struct.pack(">H", value) + initial_cont_state[2:]
+                ))
 
     return attacks
 

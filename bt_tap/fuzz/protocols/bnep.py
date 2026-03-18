@@ -549,6 +549,38 @@ def fuzz_extension_bit() -> list[bytes]:
         # Extension with length=255 but no data (truncated)
         cases.append(bytes([type_with_ext, 0x00, 0xFF]))
 
+    # -----------------------------------------------------------------------
+    # Cases with proper frame headers before extension data.
+    # The raw cases above (extension bit set without headers) are kept as-is
+    # to test header parsing robustness. These additional cases test extension
+    # parsing when the parser has successfully consumed the frame header.
+    # -----------------------------------------------------------------------
+
+    dummy_mac = b"\x11\x22\x33\x44\x55\x66"
+    ether_ipv4 = struct.pack(">H", 0x0800)
+
+    # -- Type 0x80: General Ethernet + extension bit --
+    # Proper 14-byte header (DstMAC + SrcMAC + EtherType) + valid extension
+    gen_hdr = dummy_mac + dummy_mac + ether_ipv4  # 14 bytes
+    # Valid extension header (type=0, length=4, 4 data bytes)
+    cases.append(bytes([0x80]) + gen_hdr + bytes([0x00, 0x04]) + b"\xDE\xAD\xBE\xEF")
+
+    # Proper header + truncated extension (length=0x20 but no data)
+    cases.append(bytes([0x80]) + gen_hdr + bytes([0x00, 0x20]))
+
+    # Proper header + chained extensions (first has more-bit, second is final)
+    ext_chain = bytes([0x80, 0x02]) + b"\xAA\xBB" + bytes([0x00, 0x02]) + b"\xCC\xDD"
+    cases.append(bytes([0x80]) + gen_hdr + ext_chain)
+
+    # -- Type 0x82: Compressed Ethernet + extension bit --
+    # Compressed has no MACs, only EtherType(2) before extension
+    cases.append(bytes([0x82]) + ether_ipv4 + bytes([0x00, 0x04]) + b"\xDE\xAD\xBE\xEF")
+
+    # -- Type 0x83: Compressed Source Only + extension bit --
+    # SrcMAC(6) + EtherType(2) before extension
+    src_hdr = dummy_mac + ether_ipv4  # 8 bytes
+    cases.append(bytes([0x83]) + src_hdr + bytes([0x00, 0x04]) + b"\xDE\xAD\xBE\xEF")
+
     return cases
 
 

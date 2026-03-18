@@ -166,6 +166,7 @@ class BluetoothTransport(ABC):
             error(f"Connect failed ({self.__class__.__name__}): {exc}")
             self.stats.errors += 1
             self._connected = False
+            self.close()
             return False
 
     def send(self, data: bytes) -> int:
@@ -184,9 +185,11 @@ class BluetoothTransport(ABC):
         if self._sock is None or not self._connected:
             if not self.reconnect():
                 raise ConnectionError("Not connected and reconnect failed")
+            if self._sock is None:
+                raise ConnectionError("Socket is None after reconnect")
 
         try:
-            sent = self._sock.send(data)  # type: ignore[union-attr]
+            sent = self._sock.send(data)
             self.stats.bytes_sent += sent
             self.stats.packets_sent += 1
             return sent
@@ -266,6 +269,10 @@ class BluetoothTransport(ABC):
             True if the device responds to an L2CAP echo within 3 seconds.
         """
         result = run_cmd(["l2ping", "-c", "1", "-t", "3", self.address], timeout=8)
+        if result.returncode != 0 and result.stderr:
+            stderr_lower = result.stderr.lower()
+            if "operation not permitted" in stderr_lower or "permission denied" in stderr_lower:
+                warning("l2ping requires root privileges or CAP_NET_RAW capability")
         return result.returncode == 0
 
     def reconnect(self) -> bool:
@@ -299,7 +306,10 @@ class BluetoothTransport(ABC):
         return self._connected
 
     def __enter__(self) -> "BluetoothTransport":
-        self.connect()
+        if not self.connect():
+            raise ConnectionError(
+                f"Failed to connect to {self.address} via {self.__class__.__name__}"
+            )
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:

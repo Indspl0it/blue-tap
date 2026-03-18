@@ -596,10 +596,8 @@ def fuzz_public_key_invalid_curve() -> list[bytes]:
         "96c298d84539a1f4a033eb2d817d0377f240a463e5e6bcf847422ce1f2d1176b"
     )
     gy = bytes.fromhex(
-        "f5513b0ab8d7e5b3efbb3bb0b4e09b0f60c6b16e3f1c3ad6e38c2d906d4bfbd0"
+        "f551bf376840b6cbce5e316b5733ce2b169e0f7c4aeb7e8e9b7f1afe2e342e4f"
     )
-    # Note: The above are reversed-byte-order representations used as fuzzing
-    # stimuli; exact generator point encoding varies by implementation.
 
     return [
         build_pairing_public_key(b"\x00" * 32, b"\x00" * 32),       # Zero point

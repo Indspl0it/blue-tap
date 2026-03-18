@@ -58,6 +58,8 @@ ATT_EXECUTE_WRITE_RSP = 0x19
 ATT_HANDLE_VALUE_NTF = 0x1B
 ATT_HANDLE_VALUE_IND = 0x1D
 ATT_HANDLE_VALUE_CFM = 0x1E
+ATT_READ_MULTIPLE_VAR_REQ = 0x20
+ATT_READ_MULTIPLE_VAR_RSP = 0x21
 ATT_WRITE_CMD = 0x52
 ATT_SIGNED_WRITE_CMD = 0xD2
 
@@ -89,6 +91,8 @@ OPCODE_NAMES: dict[int, str] = {
     ATT_HANDLE_VALUE_NTF: "Handle Value Notification",
     ATT_HANDLE_VALUE_IND: "Handle Value Indication",
     ATT_HANDLE_VALUE_CFM: "Handle Value Confirmation",
+    ATT_READ_MULTIPLE_VAR_REQ: "Read Multiple Variable Length Request",
+    ATT_READ_MULTIPLE_VAR_RSP: "Read Multiple Variable Length Response",
     ATT_WRITE_CMD: "Write Command",
     ATT_SIGNED_WRITE_CMD: "Signed Write Command",
 }
@@ -314,6 +318,25 @@ def build_read_multiple_req(handles: list[int]) -> bytes:
         PDU: opcode(1) + handles(2 LE each).
     """
     pdu = bytes([ATT_READ_MULTIPLE_REQ])
+    for h in handles:
+        pdu += struct.pack("<H", h & 0xFFFF)
+    return pdu
+
+
+def build_read_multiple_variable_req(handles: list[int]) -> bytes:
+    """Build a Read Multiple Variable Length Request PDU (opcode 0x20, BT 5.1+).
+
+    Reads multiple variable-length attribute values in a single request.
+    Similar to Read Multiple Request but each value in the response is
+    preceded by its length, allowing variable-length attributes.
+
+    Args:
+        handles: List of attribute handles (uint16 each).
+
+    Returns:
+        PDU: opcode(1) + handles(2 LE each).
+    """
+    pdu = bytes([ATT_READ_MULTIPLE_VAR_REQ])
     for h in handles:
         pdu += struct.pack("<H", h & 0xFFFF)
     return pdu
@@ -735,6 +758,111 @@ def fuzz_notification_from_client() -> list[bytes]:
     return cases
 
 
+def fuzz_read_multiple_variable() -> list[bytes]:
+    """Fuzz the Read Multiple Variable Length Request (opcode 0x20, BT 5.1+).
+
+    Tests boundary conditions:
+      - 0 handles (just opcode, no handles)
+      - 1 handle (minimum practical, but spec says SetOfHandles is 4+ bytes)
+      - 2 handles (minimum per spec)
+      - Many handles (32 sequential handles)
+      - Boundary handle values (0x0000, 0xFFFF)
+
+    Returns:
+        List of Read Multiple Variable Length Request PDU bytes.
+    """
+    cases: list[bytes] = []
+
+    # 0 handles — just the opcode byte
+    cases.append(bytes([ATT_READ_MULTIPLE_VAR_REQ]))
+
+    # 1 handle
+    cases.append(build_read_multiple_variable_req([0x0001]))
+
+    # 2 handles (minimum per spec)
+    cases.append(build_read_multiple_variable_req([0x0001, 0x0002]))
+
+    # Many handles
+    cases.append(build_read_multiple_variable_req(list(range(0x0001, 0x0021))))
+
+    # Boundary handle values
+    cases.append(build_read_multiple_variable_req([0x0000, 0xFFFF]))
+    cases.append(build_read_multiple_variable_req([0xFFFF, 0xFFFF]))
+
+    return cases
+
+
+def fuzz_truncated_pdus() -> list[bytes]:
+    """Generate truncated ATT PDUs with missing fields.
+
+    For each ATT opcode that has fields after the opcode byte, generates
+    versions with only the opcode (missing all fields) and versions missing
+    the last field. Tests parser robustness against short reads.
+
+    Returns:
+        List of truncated ATT PDU bytes.
+    """
+    cases: list[bytes] = []
+
+    # Empty PDU: zero bytes
+    cases.append(b"")
+
+    # Read Request (0x0A): opcode + handle(2)
+    cases.append(b"\x0A")                   # missing handle
+    cases.append(b"\x0A\x01")               # truncated uint16 handle
+
+    # Exchange MTU Request (0x02): opcode + MTU(2)
+    cases.append(b"\x02")                   # missing MTU
+    cases.append(b"\x02\x17")               # truncated MTU (1 of 2 bytes)
+
+    # Write Request (0x12): opcode + handle(2) + value(variable)
+    cases.append(b"\x12\x01\x00")           # handle only, missing value (valid 0-byte write)
+    cases.append(b"\x12\x01")               # truncated handle
+    cases.append(b"\x12")                   # missing handle entirely
+
+    # Find Information Request (0x04): opcode + start(2) + end(2)
+    cases.append(b"\x04\x01\x00")           # missing end handle
+    cases.append(b"\x04\x01")               # truncated start handle
+    cases.append(b"\x04")                   # missing both handles
+
+    # Read By Type Request (0x08): opcode + start(2) + end(2) + UUID(2 or 16)
+    cases.append(b"\x08\x01\x00\xFF\xFF")   # missing UUID
+    cases.append(b"\x08\x01\x00\xFF")       # truncated end handle
+    cases.append(b"\x08\x01\x00")           # missing end handle
+    cases.append(b"\x08")                   # missing all fields
+
+    # Read Blob Request (0x0C): opcode + handle(2) + offset(2)
+    cases.append(b"\x0C\x01\x00")           # missing offset
+    cases.append(b"\x0C")                   # missing handle and offset
+
+    # Prepare Write Request (0x16): opcode + handle(2) + offset(2) + value
+    cases.append(b"\x16\x01\x00")           # handle only, no offset, no value
+    cases.append(b"\x16\x01\x00\x00")       # handle + truncated offset
+    cases.append(b"\x16")                   # just opcode
+
+    # Execute Write Request (0x18): opcode + flags(1)
+    cases.append(b"\x18")                   # missing flags
+
+    # Find By Type Value Request (0x06): opcode + start(2) + end(2) + type(2) + value
+    cases.append(b"\x06\x01\x00\xFF\xFF")   # missing type and value
+    cases.append(b"\x06\x01\x00\xFF\xFF\x00\x28")  # type present but no value
+    cases.append(b"\x06")                   # just opcode
+
+    # Read By Group Type Request (0x10): opcode + start(2) + end(2) + UUID
+    cases.append(b"\x10\x01\x00\xFF\xFF")   # missing UUID
+    cases.append(b"\x10")                   # just opcode
+
+    # Read Multiple Request (0x0E): opcode + handles(2 each, min 2)
+    cases.append(b"\x0E\x01")               # truncated first handle
+    cases.append(b"\x0E")                   # just opcode
+
+    # Read Multiple Variable Length Request (0x20): opcode + handles
+    cases.append(b"\x20\x01")               # truncated first handle
+    cases.append(b"\x20")                   # just opcode
+
+    return cases
+
+
 # ===========================================================================
 # Master Generator
 # ===========================================================================
@@ -785,5 +913,11 @@ def generate_all_att_fuzz_cases() -> list[bytes]:
 
     # Invalid-direction PDUs (client sends server-only opcodes)
     cases.extend(fuzz_notification_from_client())
+
+    # Read Multiple Variable Length (BT 5.1+)
+    cases.extend(fuzz_read_multiple_variable())
+
+    # Truncated PDUs (missing fields)
+    cases.extend(fuzz_truncated_pdus())
 
     return cases

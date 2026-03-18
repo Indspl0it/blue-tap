@@ -18,12 +18,14 @@ Usage::
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import signal
 import socket
 import time
+import traceback
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any
@@ -252,7 +254,7 @@ class _StubCrashDB:
             "target": target,
             "protocol": protocol,
             "payload_hex": payload.hex(),
-            "payload_size": len(payload),
+            "payload_len": len(payload),
             "crash_type": crash_type,
             "severity": severity,
             "mutation_log": mutation_log,
@@ -264,7 +266,7 @@ class _StubCrashDB:
     def crash_count(self) -> int:
         return self._count
 
-    def get_all_crashes(self) -> list[dict]:
+    def get_crashes(self) -> list[dict]:
         crashes: list[dict] = []
         for fname in sorted(os.listdir(self._dir)):
             if fname.startswith("crash_") and fname.endswith(".json"):
@@ -301,12 +303,11 @@ class _StubCorpus:
         import random
         return os.urandom(random.randint(8, 256))
 
-    def add_seed(self, data: bytes, protocol: str = "", label: str = "") -> str:
+    def add_seed(self, protocol: str, data: bytes, name: str = "") -> str:
         """Save a seed to the corpus directory."""
         protocol_dir = os.path.join(self._dir, protocol) if protocol else self._dir
         os.makedirs(protocol_dir, exist_ok=True)
-        import hashlib
-        name = label or hashlib.sha256(data).hexdigest()[:16]
+        name = name or hashlib.sha256(data).hexdigest()[:16]
         path = os.path.join(protocol_dir, name)
         if not os.path.exists(path):
             with open(path, "wb") as f:
@@ -545,6 +546,9 @@ class FuzzCampaign:
         self._transports: dict[str, Any] = {}
         self._last_stats_time: float = 0.0
 
+        # Seen response fingerprints (for corpus dedup, fix #8)
+        self._seen_responses: set[str] = set()
+
         # Validate protocols
         unknown = [p for p in protocols if p not in PROTOCOL_TRANSPORT_MAP]
         if unknown:
@@ -552,6 +556,15 @@ class FuzzCampaign:
                 f"Unknown protocol(s): {', '.join(unknown)}. "
                 f"Known: {', '.join(sorted(PROTOCOL_TRANSPORT_MAP))}"
             )
+
+        # Filter to only known protocols
+        valid = [p for p in protocols if p in PROTOCOL_TRANSPORT_MAP]
+        if not valid:
+            raise ValueError(
+                f"No valid protocols after filtering. "
+                f"Known: {', '.join(sorted(PROTOCOL_TRANSPORT_MAP))}"
+            )
+        self.protocols = valid
 
     # ------------------------------------------------------------------
     # Transport setup
@@ -615,7 +628,20 @@ class FuzzCampaign:
             Tuple of (fuzz_bytes, mutation_log).
         """
         seed = self.corpus.get_random_seed(protocol)
-        mutated, mutation_log = self._mutator.mutate(seed)
+
+        # Handle None seed from corpus (generate random bytes as fallback)
+        if seed is None:
+            import random as _rng
+            seed = os.urandom(_rng.randint(8, 256))
+
+        # CorpusMutator.mutate() returns bytes, not a tuple.
+        # Wrap the call to always return (bytes, list[str]).
+        result = self._mutator.mutate(seed)
+        if isinstance(result, tuple):
+            mutated, mutation_log = result
+        else:
+            mutated = result
+            mutation_log = ["mutated"]
         return mutated, mutation_log
 
     # ------------------------------------------------------------------
@@ -650,17 +676,19 @@ class FuzzCampaign:
         # If the response is significantly different from typical responses,
         # save it as an interesting input for the corpus.
         if len(response) > 0:
-            # Heuristic: responses with error-like bytes at known positions
-            # could indicate edge cases worth exploring.
-            # Save interesting inputs back to corpus for coverage feedback.
-            try:
-                self.corpus.add_seed(
-                    payload,
-                    protocol=protocol,
-                    label=f"interesting_{self.stats.iterations}",
-                )
-            except (OSError, AttributeError):
-                pass
+            # Only add if the response fingerprint hasn't been seen before
+            # to prevent explosive corpus growth.
+            fingerprint = hashlib.sha256(response[:32]).hexdigest()
+            if fingerprint not in self._seen_responses:
+                self._seen_responses.add(fingerprint)
+                try:
+                    self.corpus.add_seed(
+                        protocol,
+                        payload,
+                        name=f"interesting_{self.stats.iterations}",
+                    )
+                except (OSError, AttributeError):
+                    pass
 
     # ------------------------------------------------------------------
     # Crash handling
@@ -773,8 +801,12 @@ class FuzzCampaign:
         self._last_stats_time = time.time()
 
         # Graceful shutdown on Ctrl+C
+        # signal.signal() fails from non-main threads with ValueError
         prev_handler = signal.getsignal(signal.SIGINT)
-        signal.signal(signal.SIGINT, self._handle_interrupt)
+        try:
+            signal.signal(signal.SIGINT, self._handle_interrupt)
+        except ValueError:
+            warning("Cannot install SIGINT handler from non-main thread")
 
         section("Fuzz Campaign", style="bt.red")
         info(f"Target: [bt.purple]{self.target}[/bt.purple]")
@@ -792,7 +824,10 @@ class FuzzCampaign:
                 f"Target {self.target} is not reachable. "
                 "Ensure it is powered on and in range."
             )
-            signal.signal(signal.SIGINT, prev_handler)
+            try:
+                signal.signal(signal.SIGINT, prev_handler)
+            except ValueError:
+                pass
             return {"result": "error", "reason": "target_unreachable"}
 
         success("Target is alive.")
@@ -802,7 +837,10 @@ class FuzzCampaign:
         self._setup_transports()
         if not self._transports:
             error("No valid transports configured. Check protocol names.")
-            signal.signal(signal.SIGINT, prev_handler)
+            try:
+                signal.signal(signal.SIGINT, prev_handler)
+            except ValueError:
+                pass
             return {"result": "error", "reason": "no_transports"}
 
         for proto, transport in self._transports.items():
@@ -840,7 +878,18 @@ class FuzzCampaign:
 
                 # Send and observe
                 try:
-                    if not transport.is_connected():
+                    # BluetoothTransport uses a .connected property,
+                    # _StubTransport uses .is_connected() method.
+                    _is_conn = (
+                        transport.connected
+                        if hasattr(transport, "connected") and isinstance(
+                            type(transport).__dict__.get("connected"), property
+                        )
+                        else transport.is_connected()
+                        if hasattr(transport, "is_connected")
+                        else False
+                    )
+                    if not _is_conn:
                         if not transport.connect():
                             self.stats.errors += 1
                             self.stats.iterations += 1
@@ -879,10 +928,13 @@ class FuzzCampaign:
                     self._last_stats_time = now
 
         except Exception as exc:
-            error(f"Campaign terminated with unexpected error: {exc}")
+            error(f"Campaign terminated with unexpected error: {exc}\n{traceback.format_exc()}")
         finally:
             # Restore original signal handler
-            signal.signal(signal.SIGINT, prev_handler)
+            try:
+                signal.signal(signal.SIGINT, prev_handler)
+            except ValueError:
+                pass
 
         # Finalize
         self._finalize()
@@ -965,7 +1017,7 @@ class FuzzCampaign:
             seeds.append((os.urandom(_rng.randint(8, 128)), f"random_{i}"))
 
         for data, label in seeds:
-            self.corpus.add_seed(data, protocol=protocol, label=label)
+            self.corpus.add_seed(protocol, data, name=label)
 
     # ------------------------------------------------------------------
     # Statistics display
@@ -1057,7 +1109,7 @@ class FuzzCampaign:
             console.print()
             info(f"[bt.red]{crash_count} crash(es)[/bt.red] logged to: {self._fuzz_dir}")
             try:
-                crashes = self.crash_db.get_all_crashes()
+                crashes = self.crash_db.get_crashes()
                 crash_table = Table(
                     title=f"[bold {RED}]Crashes[/bold {RED}]",
                     show_lines=True,
@@ -1086,7 +1138,7 @@ class FuzzCampaign:
                         crash.get("crash_type", "unknown"),
                         f"[{sev_style}]{sev}[/{sev_style}]",
                         crash.get("protocol", ""),
-                        str(crash.get("payload_size", "?")),
+                        str(crash.get("payload_len", "?")),
                         crash.get("timestamp", ""),
                     )
 

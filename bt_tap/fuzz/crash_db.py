@@ -15,6 +15,8 @@ import time
 from enum import Enum
 from typing import TYPE_CHECKING, Optional
 
+from bt_tap.utils.output import info, warning, error
+
 if TYPE_CHECKING:
     from bt_tap.fuzz.transport import BluetoothTransport
 
@@ -227,7 +229,9 @@ class CrashDB:
             ),
         )
         self._conn.commit()
-        return cursor.lastrowid  # type: ignore[return-value]
+        if cursor.lastrowid is None:
+            raise RuntimeError("INSERT succeeded but lastrowid is None")
+        return cursor.lastrowid
 
     # -- Queries ------------------------------------------------------------
 
@@ -248,7 +252,7 @@ class CrashDB:
             List of crash dicts ordered by timestamp descending.
         """
         clauses: list[str] = []
-        params: list[str] = []
+        params: list = []
 
         if protocol is not None:
             clauses.append("protocol = ?")
@@ -261,7 +265,8 @@ class CrashDB:
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         query = f"SELECT * FROM crashes{where} ORDER BY timestamp DESC"
         if limit > 0:
-            query += f" LIMIT {limit}"
+            query += " LIMIT ?"
+            params.append(limit)
 
         rows = self._conn.execute(query, params).fetchall()
         return [dict(row) for row in rows]
@@ -465,43 +470,61 @@ class CrashDB:
         """
         crash = self.get_crash_by_id(crash_id)
         if crash is None:
+            warning(f"Crash ID {crash_id} not found in database")
             return False
 
-        payload = bytes.fromhex(crash["payload_hex"])
+        try:
+            payload = bytes.fromhex(crash["payload_hex"])
+        except ValueError as exc:
+            warning(f"Corrupted payload hex for crash {crash_id}: {exc}")
+            return False
+
+        info(f"Reproducing crash {crash_id}: {len(payload)} byte payload "
+             f"via {crash.get('protocol', 'unknown')}")
 
         try:
             if not transport.connect():
                 # Cannot even connect — device may already be crashed
                 if not transport.is_alive():
+                    info(f"Crash {crash_id} reproduced: device unreachable on connect")
                     self.mark_reproduced(crash_id, True)
                     return True
+                warning(f"Crash {crash_id}: connect failed but device is alive")
                 return False
 
-            transport.send(payload)
+            sent = transport.send(payload)
+            info(f"Crash {crash_id}: sent {sent} bytes, waiting for response")
             response = transport.recv(recv_timeout=recv_timeout)
 
             if response is None:
                 # Connection closed by remote — crash reproduced
+                info(f"Crash {crash_id} reproduced: connection closed by remote")
                 self.mark_reproduced(crash_id, True)
                 return True
 
             if response == b"":
                 # Timeout — possible hang
+                info(f"Crash {crash_id}: recv timed out, checking device liveness")
                 if not transport.is_alive():
+                    info(f"Crash {crash_id} reproduced: device unresponsive after timeout")
                     self.mark_reproduced(crash_id, True)
                     return True
 
+            info(f"Crash {crash_id}: not reproduced (got {len(response)} byte response)")
             return False
 
         except (ConnectionResetError, BrokenPipeError, ConnectionError):
             # Connection drop — crash confirmed
+            info(f"Crash {crash_id} reproduced: connection dropped")
             self.mark_reproduced(crash_id, True)
             return True
         except OSError:
             # General socket error — device may have disappeared
             if not transport.is_alive():
+                info(f"Crash {crash_id} reproduced: device disappeared after OSError")
                 self.mark_reproduced(crash_id, True)
                 return True
+            warning(f"Crash {crash_id}: OSError but device still alive")
             return False
         finally:
             transport.close()
@@ -510,8 +533,9 @@ class CrashDB:
 
     def close(self) -> None:
         """Close the database connection."""
-        if self._conn:
+        if self._conn is not None:
             self._conn.close()
+            self._conn = None
 
     def __enter__(self) -> "CrashDB":
         return self
