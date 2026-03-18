@@ -1791,7 +1791,29 @@ def dos_l2ping_flood(address, count, size, no_flood):
 # ============================================================================
 @main.group()
 def fuzz():
-    """Protocol fuzzing (L2CAP, RFCOMM, AT commands)."""
+    """Protocol fuzzing -- campaign mode, legacy fuzzers, and crash management.
+
+    \b
+    Campaign (multi-protocol, dashboard):
+      bt-tap fuzz campaign AA:BB:CC:DD:EE:FF
+      bt-tap fuzz campaign -p sdp -p rfcomm --duration 30m --capture
+      bt-tap fuzz campaign --resume
+
+    \b
+    Crash management:
+      bt-tap fuzz crashes list
+      bt-tap fuzz crashes show 1
+      bt-tap fuzz crashes replay 1
+      bt-tap fuzz crashes export
+
+    \b
+    Legacy single-protocol fuzzers:
+      bt-tap fuzz l2cap AA:BB:CC:DD:EE:FF
+      bt-tap fuzz rfcomm AA:BB:CC:DD:EE:FF
+      bt-tap fuzz at AA:BB:CC:DD:EE:FF
+      bt-tap fuzz sdp AA:BB:CC:DD:EE:FF
+      bt-tap fuzz bss AA:BB:CC:DD:EE:FF
+    """
 
 
 @fuzz.command("l2cap")
@@ -1895,6 +1917,11 @@ def fuzz_bss(address):
     from bt_tap.attack.fuzz import bss_wrapper
     if not bss_wrapper(address):
         error("BSS not available or failed")
+
+
+# Register new protocol-aware fuzz commands (campaign dashboard + crash management)
+from bt_tap.fuzz.cli_commands import register_fuzz_commands
+register_fuzz_commands(fuzz)
 
 
 # ============================================================================
