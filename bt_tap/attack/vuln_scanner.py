@@ -317,6 +317,45 @@ def _check_perfektblue(address: str, services: list[dict],
     return findings
 
 
+def _check_bluffs(bt_version: float | None, raw_version: str | None) -> list[dict]:
+    """BLUFFS (CVE-2023-24023): Session key derivation attacks.
+
+    Detection approach:
+      1. Version heuristic: BT < 5.4 lacks the spec fixes for session key
+         derivation introduced in BT Core Spec Addendum 6 (CSA6)
+      2. BLUFFS enables an attacker within Bluetooth range to force the
+         establishment of weak session keys, breaking both forward and
+         future secrecy guarantees
+
+    What we CANNOT detect: whether the vendor has independently backported
+    the CSA6 mitigations (session key diversification) to older firmware.
+    """
+    findings: list[dict] = []
+    if bt_version is None:
+        return findings
+
+    if bt_version < 5.4:
+        findings.append(
+            _finding(
+                "MEDIUM",
+                "BLUFFS Session Key Derivation (CVE-2023-24023)",
+                f"Bluetooth version {bt_version} < 5.4 is susceptible to BLUFFS "
+                f"session key derivation attacks (CVE-2023-24023). An attacker "
+                f"within Bluetooth range could force the establishment of weak "
+                f"session keys, breaking forward and future secrecy.",
+                cve="CVE-2023-24023",
+                impact="Session key compromise allows decryption of past and "
+                       "future traffic if the attacker captures encrypted frames.",
+                remediation="Update to BT 5.4+ firmware or apply vendor patches "
+                            "addressing CVE-2023-24023.",
+                status="potential",
+                confidence="low",
+                evidence=f"LMP Version: {raw_version}",
+            )
+        )
+    return findings
+
+
 def _check_pin_pairing_bypass(bt_version: float | None, raw_version: str | None,
                                ssp: bool | None) -> list[dict]:
     """CVE-2020-26555: BR/EDR PIN code pairing authentication bypass.
@@ -1304,6 +1343,7 @@ def scan_vulnerabilities(address: str, hci: str = "hci0") -> list[dict]:
 
     findings.extend(_check_knob(bt_version, raw_version, lmp_feats))
     findings.extend(_check_blurtooth(bt_version, raw_version, lmp_feats))
+    findings.extend(_check_bluffs(bt_version, raw_version))
     findings.extend(_check_bias(ssp))
     findings.extend(_check_blueborne(address))
     findings.extend(_check_pin_pairing_bypass(bt_version, raw_version, ssp))
