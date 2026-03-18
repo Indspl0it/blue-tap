@@ -60,7 +60,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 </head>
 <body>
 <h1>BT-Tap Pentest Report</h1>
-<p class="meta">Generated: {generated} | Tool: BT-Tap v1.5.0</p>
+<p class="meta">Generated: {generated} | Tool: BT-Tap {version}</p>
 
 {content}
 
@@ -81,7 +81,10 @@ def _format_hexdump(data_hex: str, bytes_per_line: int = 16) -> str:
     try:
         raw = bytes.fromhex(data_hex)
     except (ValueError, TypeError):
-        return f"(invalid hex data: {data_hex[:60]}...)" if data_hex else "(no data)"
+        if not data_hex:
+            return "(no data)"
+        preview = data_hex[:60]
+        return f"(invalid hex data: {preview}{'...' if len(data_hex) > 60 else ''})"
 
     lines = ["Offset  Hex                                              ASCII"]
     for offset in range(0, len(raw), bytes_per_line):
@@ -203,7 +206,9 @@ class ReportGenerator:
                 with CrashDB(crashes_db_path) as db:
                     self._fuzz_crashes = db.get_crashes()
                 info(f"Loaded {len(self._fuzz_crashes)} crashes from crashes.db")
-            except Exception as exc:
+            except ImportError:
+                error("bt_tap.fuzz.crash_db not available — fuzzing module not installed")
+            except (OSError, ValueError) as exc:
                 info(f"Could not load crashes.db: {exc}")
 
         # Also check per-protocol crash DBs
@@ -214,14 +219,17 @@ class ReportGenerator:
                     from bt_tap.fuzz.crash_db import CrashDB
                     with CrashDB(proto_db_path) as db:
                         proto_crashes = db.get_crashes()
-                        # Deduplicate by payload_hash
-                        existing_hashes = {c.get("payload_hash") for c in self._fuzz_crashes}
+                        # Deduplicate by payload_hash (skip None hashes to avoid dropping data)
+                        existing_hashes = {c.get("payload_hash") for c in self._fuzz_crashes
+                                           if c.get("payload_hash") is not None}
                         for crash in proto_crashes:
-                            if crash.get("payload_hash") not in existing_hashes:
+                            h = crash.get("payload_hash")
+                            if h is None or h not in existing_hashes:
                                 self._fuzz_crashes.append(crash)
-                                existing_hashes.add(crash.get("payload_hash"))
+                                if h is not None:
+                                    existing_hashes.add(h)
                     info(f"Loaded additional crashes from {fname}")
-                except Exception as exc:
+                except (ImportError, OSError, ValueError) as exc:
                     info(f"Could not load {fname}: {exc}")
 
         # Count corpus seeds per protocol
@@ -296,12 +304,17 @@ class ReportGenerator:
 
             # Write binary payload
             payload_hex = crash.get("payload_hex", "")
-            try:
-                payload_bytes = bytes.fromhex(payload_hex)
-                with open(os.path.join(crashes_dir, bin_name), "wb") as f:
-                    f.write(payload_bytes)
-            except (ValueError, OSError):
-                pass
+            if not payload_hex:
+                info(f"Crash #{i}: empty payload, skipping .bin export")
+            else:
+                try:
+                    payload_bytes = bytes.fromhex(payload_hex)
+                    with open(os.path.join(crashes_dir, bin_name), "wb") as f:
+                        f.write(payload_bytes)
+                except ValueError:
+                    error(f"Crash #{i}: invalid hex in payload, skipping .bin export")
+                except OSError as exc:
+                    error(f"Crash #{i}: could not write {bin_name}: {exc}")
 
             # Write human-readable description
             desc_lines = [
@@ -424,9 +437,12 @@ class ReportGenerator:
         # Load attack_results.json
         results_file = os.path.join(dump_dir, "attack_results.json")
         if os.path.exists(results_file):
-            with open(results_file) as f:
-                self.attack_results = json.load(f)
-            info(f"Loaded attack results from {results_file}")
+            try:
+                with open(results_file) as f:
+                    self.attack_results = json.load(f)
+                info(f"Loaded attack results from {results_file}")
+            except (json.JSONDecodeError, OSError) as exc:
+                error(f"Could not load attack_results.json: {exc}")
 
         # Auto-detect fuzz/ subdirectory and load structured fuzz data
         fuzz_dir = os.path.join(dump_dir, "fuzz")
@@ -684,7 +700,7 @@ class ReportGenerator:
                         sections.append("<h5>Evidence</h5>")
                         proto_safe = protocol.replace("/", "-").replace(" ", "_")
                         sections.append(
-                            f"<p>Crash payload saved: fuzz/evidence/crash_{idx:03d}.bin</p>"
+                            f"<p>Crash payload saved: crashes/crash_{idx:03d}_{_esc(proto_safe)}.bin</p>"
                         )
                         capture_path = os.path.join(self._fuzz_evidence_dir, "capture.btsnoop")
                         if os.path.exists(capture_path):
@@ -995,10 +1011,16 @@ class ReportGenerator:
             sections.append("</div>")
 
         content = "\n".join(sections)
-        html = _HTML_TEMPLATE.format(
-            generated=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            content=content,
-        )
+        # Use .replace() instead of .format() to avoid KeyError from JSON
+        # curly braces in content (json.dumps output contains { and })
+        try:
+            from bt_tap import __version__
+        except ImportError:
+            __version__ = "unknown"
+        html = (_HTML_TEMPLATE
+                .replace("{generated}", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                .replace("{version}", f"v{__version__}")
+                .replace("{content}", content))
 
         outdir = os.path.dirname(output)
         if outdir:
@@ -1079,9 +1101,6 @@ class ReportGenerator:
 
 
 def _esc(text: str) -> str:
-    """Escape HTML special characters."""
-    return (str(text)
-            .replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-            .replace('"', "&quot;"))
+    """Escape HTML special characters including single quotes."""
+    import html as _html
+    return _html.escape(str(text), quote=True)
