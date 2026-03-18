@@ -13,11 +13,17 @@ import select
 import signal
 import socket
 import sys
-import termios
 import threading
 import time
-import tty
+import traceback
 from datetime import datetime
+
+try:
+    import termios
+    import tty
+    _HAS_TERMIOS = True
+except ImportError:
+    _HAS_TERMIOS = False
 from typing import Any
 
 import click
@@ -44,7 +50,7 @@ from bt_tap.utils.output import (
     ORANGE,
 )
 from bt_tap.utils.interactive import resolve_address
-from bt_tap.utils.session import get_session
+from bt_tap.utils.session import get_session, log_command
 
 from bt_tap.fuzz.engine import (
     FuzzCampaign,
@@ -104,8 +110,8 @@ class _KeyboardListener:
 
     def start(self) -> None:
         """Start listening for keypresses in a background thread."""
-        if not sys.stdin.isatty():
-            return  # Not a terminal (piped input), skip
+        if not sys.stdin.isatty() or not _HAS_TERMIOS:
+            return  # Not a terminal or no termios support, skip
         self._running = True
         self._thread = threading.Thread(target=self._listen, daemon=True)
         self._thread.start()
@@ -113,7 +119,7 @@ class _KeyboardListener:
     def stop(self) -> None:
         """Stop the listener and restore terminal settings."""
         self._running = False
-        if self._old_settings is not None:
+        if self._old_settings is not None and _HAS_TERMIOS:
             try:
                 termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, self._old_settings)
             except (termios.error, OSError):
@@ -132,6 +138,8 @@ class _KeyboardListener:
         return "Press 'p' to pause, 'q' to stop, 's' for stats"
 
     def _listen(self) -> None:
+        if not _HAS_TERMIOS:
+            return
         try:
             fd = sys.stdin.fileno()
             self._old_settings = termios.tcgetattr(fd)
@@ -567,7 +575,8 @@ def _campaign_command(fuzz_group):
         # ── Prepare campaign internals (transport, corpus) ────────────
         # We drive the main loop ourselves for dashboard control.
         cam._running = True
-        cam.stats = CampaignStats()
+        if not resume:
+            cam.stats = CampaignStats()
         cam._setup_transports()
 
         if not cam._transports:
@@ -682,16 +691,7 @@ def _campaign_command(fuzz_group):
 
                     # Send and observe
                     try:
-                        _is_conn = (
-                            transport.connected
-                            if hasattr(transport, "connected")
-                            and isinstance(
-                                type(transport).__dict__.get("connected"), property
-                            )
-                            else transport.is_connected()
-                            if hasattr(transport, "is_connected")
-                            else False
-                        )
+                        _is_conn = getattr(transport, 'connected', False)
                         if not _is_conn:
                             if not transport.connect():
                                 cam.stats.errors += 1
@@ -704,7 +704,7 @@ def _campaign_command(fuzz_group):
                             cam.stats.protocol_breakdown.get(protocol, 0) + 1
                         )
 
-                        response = transport.recv()
+                        response = transport.recv(recv_timeout=timeout)
                         cam._analyze_response(protocol, fuzz_case, response, mutation_log)
 
                     except ConnectionResetError:
@@ -761,7 +761,7 @@ def _campaign_command(fuzz_group):
                         time.sleep(delay)
 
         except Exception as exc:
-            error(f"Campaign error: {exc}")
+            error(f"Campaign error: {exc}\n{traceback.format_exc()}")
         finally:
             # Stop keyboard listener and restore terminal
             kb.stop()
@@ -838,6 +838,10 @@ def _record_crash(
     if transport is not None:
         try:
             transport.close()
+        except Exception:
+            pass
+        try:
+            transport.connect()
         except Exception:
             pass
         cam.stats.reconnects += 1
@@ -948,6 +952,12 @@ def _crash_commands(fuzz_group):
             )
 
         console.print(table)
+
+        log_command("fuzz_crashes_list", {
+            "count": len(crashes),
+            "protocol_filter": protocol,
+            "severity_filter": severity,
+        }, category="fuzz")
 
     # ── crashes show ──────────────────────────────────────────────────
 
@@ -1061,6 +1071,12 @@ def _crash_commands(fuzz_group):
                 border_style=DIM,
                 padding=(0, 2),
             ))
+
+        log_command("fuzz_crashes_show", {
+            "crash_id": crash_id,
+            "protocol": crash.get("protocol", ""),
+            "severity": crash.get("severity", ""),
+        }, category="fuzz")
 
     # ── crashes replay ────────────────────────────────────────────────
 
@@ -1221,6 +1237,12 @@ def _crash_commands(fuzz_group):
         if replay_capture_path and os.path.exists(replay_capture_path):
             info(f"Replay capture saved to: {replay_capture_path}")
 
+        log_command("fuzz_crashes_replay", {
+            "crash_id": crash_id,
+            "protocol": crash.get("protocol", ""),
+            "capture_path": replay_capture_path,
+        }, category="fuzz", target=target_addr)
+
     # ── crashes export ────────────────────────────────────────────────
 
     @fuzz_crashes.command("export")
@@ -1256,6 +1278,10 @@ def _crash_commands(fuzz_group):
             success(f"Crashes exported to: {output}")
             crash_count = db.crash_count()
             info(f"Total crashes exported: {crash_count}")
+            log_command("fuzz_crashes_export", {
+                "output": output,
+                "crash_count": crash_count,
+            }, category="fuzz")
         except OSError as exc:
             error(f"Export failed: {exc}")
         finally:

@@ -36,49 +36,10 @@ from __future__ import annotations
 import hashlib
 import random
 from dataclasses import dataclass, field
-from typing import Callable
 
 from bt_tap.fuzz.corpus import Corpus
 from bt_tap.fuzz.mutators import CorpusMutator
-
-
-# ---------------------------------------------------------------------------
-# Protocol registry — same lazy pattern as RandomWalkStrategy
-# ---------------------------------------------------------------------------
-
-def _get_protocol_registry() -> dict[str, Callable[[], list]]:
-    """Build the protocol -> generator mapping on first call."""
-    from bt_tap.fuzz.protocols.sdp import generate_all_sdp_fuzz_cases
-    from bt_tap.fuzz.protocols.obex import generate_all_obex_fuzz_cases
-    from bt_tap.fuzz.protocols.at_commands import ATCorpus
-    from bt_tap.fuzz.protocols.att import generate_all_att_fuzz_cases
-    from bt_tap.fuzz.protocols.smp import generate_all_smp_fuzz_cases
-    from bt_tap.fuzz.protocols.bnep import generate_all_bnep_fuzz_cases
-    from bt_tap.fuzz.protocols.rfcomm import generate_all_rfcomm_fuzz_cases
-
-    return {
-        "sdp": generate_all_sdp_fuzz_cases,
-        "obex-pbap": lambda: generate_all_obex_fuzz_cases(profile="pbap"),
-        "obex-map": lambda: generate_all_obex_fuzz_cases(profile="map"),
-        "obex-opp": lambda: generate_all_obex_fuzz_cases(profile="opp"),
-        "at-hfp": ATCorpus.generate_hfp_slc_corpus,
-        "at-phonebook": ATCorpus.generate_phonebook_corpus,
-        "at-sms": ATCorpus.generate_sms_corpus,
-        "ble-att": generate_all_att_fuzz_cases,
-        "ble-smp": generate_all_smp_fuzz_cases,
-        "bnep": generate_all_bnep_fuzz_cases,
-        "rfcomm": generate_all_rfcomm_fuzz_cases,
-    }
-
-
-_REGISTRY: dict[str, Callable[[], list]] | None = None
-
-
-def _registry() -> dict[str, Callable[[], list]]:
-    global _REGISTRY
-    if _REGISTRY is None:
-        _REGISTRY = _get_protocol_registry()
-    return _REGISTRY
+from bt_tap.fuzz.strategies._registry import get_registry, PROTOCOLS as _SHARED_PROTOCOLS
 
 
 # ---------------------------------------------------------------------------
@@ -99,6 +60,10 @@ _CRASH_ENERGY = 100
 
 # Maximum dedup retries per generate() call.
 _MAX_DEDUP_RETRIES = 8
+
+# Maximum interesting inputs per protocol.  When exceeded, the lowest-energy
+# inputs are evicted to bound memory usage during long campaigns.
+_MAX_INTERESTING_PER_PROTOCOL = 500
 
 
 # ---------------------------------------------------------------------------
@@ -141,19 +106,7 @@ class CoverageGuidedStrategy:
     """
 
     # Expose the full protocol list so callers can iterate or validate.
-    PROTOCOLS: frozenset[str] = frozenset({
-        "sdp",
-        "obex-pbap",
-        "obex-map",
-        "obex-opp",
-        "at-hfp",
-        "at-phonebook",
-        "at-sms",
-        "ble-att",
-        "ble-smp",
-        "bnep",
-        "rfcomm",
-    })
+    PROTOCOLS: frozenset[str] = _SHARED_PROTOCOLS
 
     def __init__(
         self,
@@ -198,7 +151,7 @@ class CoverageGuidedStrategy:
 
         Raises ``ValueError`` if *protocol* is not in :attr:`PROTOCOLS`.
         """
-        if protocol not in _registry():
+        if protocol not in get_registry():
             raise ValueError(
                 f"Unknown protocol {protocol!r}. "
                 f"Valid: {', '.join(sorted(self.PROTOCOLS))}"
@@ -262,6 +215,10 @@ class CoverageGuidedStrategy:
             # Assign energy — crashes get maximum energy.
             input_hash = self._input_hash(input_bytes)
             self._energy[input_hash] = _CRASH_ENERGY if crash else _INITIAL_ENERGY
+
+            # Evict lowest-energy inputs when the pool exceeds the cap.
+            if len(pool) > _MAX_INTERESTING_PER_PROTOCOL:
+                self._evict_lowest_energy(pool)
 
             # Persist to corpus if available.
             if self.corpus is not None:
@@ -363,15 +320,23 @@ class CoverageGuidedStrategy:
             for inp, energy in energised:
                 cumulative += energy
                 if r <= cumulative:
-                    # Decrement energy.
+                    # Decrement energy; remove entry when it hits 0.
                     h = self._input_hash(inp)
-                    self._energy[h] = max(0, energy - 1)
-                    return inp, f"interesting({protocol}, energy={energy - 1})"
+                    new_energy = max(0, energy - 1)
+                    if new_energy == 0:
+                        self._energy.pop(h, None)
+                    else:
+                        self._energy[h] = new_energy
+                    return inp, f"interesting({protocol}, energy={new_energy})"
             # Fallthrough: pick last.
             inp, energy = energised[-1]
             h = self._input_hash(inp)
-            self._energy[h] = max(0, energy - 1)
-            return inp, f"interesting({protocol}, energy={energy - 1})"
+            new_energy = max(0, energy - 1)
+            if new_energy == 0:
+                self._energy.pop(h, None)
+            else:
+                self._energy[h] = new_energy
+            return inp, f"interesting({protocol}, energy={new_energy})"
 
         # No energised inputs — uniform random from pool.
         inp = random.choice(pool)
@@ -499,7 +464,7 @@ class CoverageGuidedStrategy:
         if cached is not None:
             return cached
 
-        generator = _registry().get(protocol)
+        generator = get_registry().get(protocol)
         if generator is None:
             self._template_cache[protocol] = []
             return []
@@ -517,6 +482,25 @@ class CoverageGuidedStrategy:
 
         self._template_cache[protocol] = templates
         return templates
+
+    # ------------------------------------------------------------------
+    # Internal — pool management
+    # ------------------------------------------------------------------
+
+    def _evict_lowest_energy(self, pool: list[bytes]) -> None:
+        """Evict the lowest-energy inputs from *pool* to stay within cap.
+
+        Sorts inputs by energy (ascending), removes the bottom half,
+        and cleans up their energy dict entries.
+        """
+        # Sort by energy ascending — evict the least valuable.
+        pool.sort(key=lambda inp: self._energy.get(self._input_hash(inp), 0))
+        evict_count = len(pool) - _MAX_INTERESTING_PER_PROTOCOL
+        evicted = pool[:evict_count]
+        del pool[:evict_count]
+        # Clean up energy entries for evicted inputs.
+        for inp in evicted:
+            self._energy.pop(self._input_hash(inp), None)
 
     # ------------------------------------------------------------------
     # Internal — hashing helpers

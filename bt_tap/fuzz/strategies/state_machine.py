@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import os
 import random
+import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Optional
@@ -51,8 +52,8 @@ class ProtocolState:
     """
 
     name: str
-    valid_transitions: list[str] = field(default_factory=list)
-    entry_packets: list[bytes] = field(default_factory=list)
+    valid_transitions: tuple[str, ...] = field(default_factory=tuple)
+    entry_packets: tuple[bytes, ...] = field(default_factory=tuple)
 
 
 class StateMachineModel(ABC):
@@ -251,32 +252,32 @@ class OBEXStateMachine(StateMachineModel):
         self.states = {
             "disconnected": ProtocolState(
                 name="disconnected",
-                valid_transitions=["connected"],
-                entry_packets=[],
+                valid_transitions=("connected",),
+                entry_packets=(),
             ),
             "connected": ProtocolState(
                 name="connected",
-                valid_transitions=[
+                valid_transitions=(
                     "navigated", "getting", "putting", "disconnected",
-                ],
-                entry_packets=[connect_pkt],
+                ),
+                entry_packets=(connect_pkt,),
             ),
             "navigated": ProtocolState(
                 name="navigated",
-                valid_transitions=[
+                valid_transitions=(
                     "navigated", "getting", "putting", "disconnected",
-                ],
-                entry_packets=[setpath_pkt],
+                ),
+                entry_packets=(setpath_pkt,),
             ),
             "getting": ProtocolState(
                 name="getting",
-                valid_transitions=["connected"],
-                entry_packets=[get_pkt],
+                valid_transitions=("connected",),
+                entry_packets=(get_pkt,),
             ),
             "putting": ProtocolState(
                 name="putting",
-                valid_transitions=["connected"],
-                entry_packets=[put_pkt],
+                valid_transitions=("connected",),
+                entry_packets=(put_pkt,),
             ),
         }
 
@@ -433,43 +434,43 @@ class HFPStateMachine(StateMachineModel):
         self.states = {
             "idle": ProtocolState(
                 name="idle",
-                valid_transitions=["brsf"],
-                entry_packets=[],
+                valid_transitions=("brsf",),
+                entry_packets=(),
             ),
             "brsf": ProtocolState(
                 name="brsf",
-                valid_transitions=["bac"],
-                entry_packets=[brsf_pkt],
+                valid_transitions=("bac",),
+                entry_packets=(brsf_pkt,),
             ),
             "bac": ProtocolState(
                 name="bac",
-                valid_transitions=["cind_test"],
-                entry_packets=[bac_pkt],
+                valid_transitions=("cind_test",),
+                entry_packets=(bac_pkt,),
             ),
             "cind_test": ProtocolState(
                 name="cind_test",
-                valid_transitions=["cind_read"],
-                entry_packets=[cind_test_pkt],
+                valid_transitions=("cind_read",),
+                entry_packets=(cind_test_pkt,),
             ),
             "cind_read": ProtocolState(
                 name="cind_read",
-                valid_transitions=["cmer"],
-                entry_packets=[cind_read_pkt],
+                valid_transitions=("cmer",),
+                entry_packets=(cind_read_pkt,),
             ),
             "cmer": ProtocolState(
                 name="cmer",
-                valid_transitions=["chld"],
-                entry_packets=[cmer_pkt],
+                valid_transitions=("chld",),
+                entry_packets=(cmer_pkt,),
             ),
             "chld": ProtocolState(
                 name="chld",
-                valid_transitions=["slc_established"],
-                entry_packets=[chld_pkt],
+                valid_transitions=("slc_established",),
+                entry_packets=(chld_pkt,),
             ),
             "slc_established": ProtocolState(
                 name="slc_established",
-                valid_transitions=[],  # terminal for SLC sequence
-                entry_packets=[],
+                valid_transitions=(),  # terminal for SLC sequence
+                entry_packets=(),
             ),
         }
 
@@ -693,46 +694,46 @@ class SMPStateMachine(StateMachineModel):
             self.states = {
                 "idle": ProtocolState(
                     name="idle",
-                    valid_transitions=["feature_exchange"],
-                    entry_packets=[],
+                    valid_transitions=("feature_exchange",),
+                    entry_packets=(),
                 ),
                 "feature_exchange": ProtocolState(
                     name="feature_exchange",
-                    valid_transitions=["public_key"],
-                    entry_packets=[request_pkt, response_pkt],
+                    valid_transitions=("public_key",),
+                    entry_packets=(request_pkt, response_pkt),
                 ),
                 "public_key": ProtocolState(
                     name="public_key",
-                    valid_transitions=["confirm"],
-                    entry_packets=[pubkey_pkt, pubkey_pkt],  # both sides
+                    valid_transitions=("confirm",),
+                    entry_packets=(pubkey_pkt, pubkey_pkt),  # both sides
                 ),
                 "confirm": ProtocolState(
                     name="confirm",
-                    valid_transitions=["random"],
-                    entry_packets=[confirm_pkt],
+                    valid_transitions=("random",),
+                    entry_packets=(confirm_pkt,),
                 ),
                 "random": ProtocolState(
                     name="random",
-                    valid_transitions=["dhkey_check"],
-                    entry_packets=[random_pkt],
+                    valid_transitions=("dhkey_check",),
+                    entry_packets=(random_pkt,),
                 ),
                 "dhkey_check": ProtocolState(
                     name="dhkey_check",
-                    valid_transitions=["key_distribution"],
-                    entry_packets=[dhkey_pkt, dhkey_pkt],  # both sides
+                    valid_transitions=("key_distribution",),
+                    entry_packets=(dhkey_pkt, dhkey_pkt),  # both sides
                 ),
                 "key_distribution": ProtocolState(
                     name="key_distribution",
-                    valid_transitions=["paired"],
-                    entry_packets=[
+                    valid_transitions=("paired",),
+                    entry_packets=(
                         enc_info_pkt, central_id_pkt,
                         identity_pkt, identity_addr_pkt, signing_pkt,
-                    ],
+                    ),
                 ),
                 "paired": ProtocolState(
                     name="paired",
-                    valid_transitions=[],
-                    entry_packets=[],
+                    valid_transitions=(),
+                    entry_packets=(),
                 ),
             }
         else:
@@ -744,36 +745,36 @@ class SMPStateMachine(StateMachineModel):
             self.states = {
                 "idle": ProtocolState(
                     name="idle",
-                    valid_transitions=["feature_exchange"],
-                    entry_packets=[],
+                    valid_transitions=("feature_exchange",),
+                    entry_packets=(),
                 ),
                 "feature_exchange": ProtocolState(
                     name="feature_exchange",
-                    valid_transitions=["confirm"],
-                    entry_packets=[request_pkt, response_pkt],
+                    valid_transitions=("confirm",),
+                    entry_packets=(request_pkt, response_pkt),
                 ),
                 "confirm": ProtocolState(
                     name="confirm",
-                    valid_transitions=["random"],
-                    entry_packets=[confirm_pkt, confirm_pkt],  # I + R
+                    valid_transitions=("random",),
+                    entry_packets=(confirm_pkt, confirm_pkt),  # I + R
                 ),
                 "random": ProtocolState(
                     name="random",
-                    valid_transitions=["key_distribution"],
-                    entry_packets=[random_pkt, random_pkt],  # I + R
+                    valid_transitions=("key_distribution",),
+                    entry_packets=(random_pkt, random_pkt),  # I + R
                 ),
                 "key_distribution": ProtocolState(
                     name="key_distribution",
-                    valid_transitions=["paired"],
-                    entry_packets=[
+                    valid_transitions=("paired",),
+                    entry_packets=(
                         enc_info_pkt, central_id_pkt,
                         identity_pkt, identity_addr_pkt, signing_pkt,
-                    ],
+                    ),
                 ),
                 "paired": ProtocolState(
                     name="paired",
-                    valid_transitions=[],
-                    entry_packets=[],
+                    valid_transitions=(),
+                    entry_packets=(),
                 ),
             }
 
@@ -954,33 +955,33 @@ class ATTStateMachine(StateMachineModel):
         self.states = {
             "idle": ProtocolState(
                 name="idle",
-                valid_transitions=["mtu_exchanged"],
-                entry_packets=[],
+                valid_transitions=("mtu_exchanged",),
+                entry_packets=(),
             ),
             "mtu_exchanged": ProtocolState(
                 name="mtu_exchanged",
-                valid_transitions=["services_discovered"],
-                entry_packets=[mtu_pkt],
+                valid_transitions=("services_discovered",),
+                entry_packets=(mtu_pkt,),
             ),
             "services_discovered": ProtocolState(
                 name="services_discovered",
-                valid_transitions=["characteristics_discovered"],
-                entry_packets=[discover_services_pkt],
+                valid_transitions=("characteristics_discovered",),
+                entry_packets=(discover_services_pkt,),
             ),
             "characteristics_discovered": ProtocolState(
                 name="characteristics_discovered",
-                valid_transitions=["values_read"],
-                entry_packets=[discover_chars_pkt],
+                valid_transitions=("values_read",),
+                entry_packets=(discover_chars_pkt,),
             ),
             "values_read": ProtocolState(
                 name="values_read",
-                valid_transitions=["notifications_enabled"],
-                entry_packets=[read_value_pkt],
+                valid_transitions=("notifications_enabled",),
+                entry_packets=(read_value_pkt,),
             ),
             "notifications_enabled": ProtocolState(
                 name="notifications_enabled",
-                valid_transitions=[],
-                entry_packets=[write_cccd_pkt],
+                valid_transitions=(),
+                entry_packets=(write_cccd_pkt,),
             ),
         }
 
@@ -1117,26 +1118,35 @@ class StateMachineStrategy:
       - ``"att"``: ATT service discovery sequence
     """
 
+    # Shared model registry — intentionally class-level (singleton pattern).
+    # Models are expensive to construct so they are built once and shared
+    # across all instances.  The lock ensures safe lazy init when multiple
+    # threads instantiate simultaneously.
     MODELS: dict[str, StateMachineModel] = {}
-    """Lazily populated protocol model registry."""
+    _MODELS_LOCK: threading.Lock = threading.Lock()
 
     def __init__(self) -> None:
         # Lazily build models on first access to avoid import-time overhead.
         if not StateMachineStrategy.MODELS:
-            StateMachineStrategy.MODELS = {
-                "obex-pbap": OBEXStateMachine("pbap"),
-                "obex-map": OBEXStateMachine("map"),
-                "hfp": HFPStateMachine(),
-                "smp-legacy": SMPStateMachine(secure_connections=False),
-                "smp-sc": SMPStateMachine(secure_connections=True),
-                "att": ATTStateMachine(),
-            }
+            with StateMachineStrategy._MODELS_LOCK:
+                # Double-checked locking — another thread may have built
+                # them while we waited for the lock.
+                if not StateMachineStrategy.MODELS:
+                    StateMachineStrategy.MODELS = {
+                        "obex-pbap": OBEXStateMachine("pbap"),
+                        "obex-map": OBEXStateMachine("map"),
+                        "hfp": HFPStateMachine(),
+                        "smp-legacy": SMPStateMachine(secure_connections=False),
+                        "smp-sc": SMPStateMachine(secure_connections=True),
+                        "att": ATTStateMachine(),
+                    }
 
         self._stats_generated: int = 0
         self._stats_valid_mutated: int = 0
         self._stats_invalid: int = 0
         self._stats_skip: int = 0
         self._stats_regression: int = 0
+        self._stats_repeated: int = 0
 
     # ------------------------------------------------------------------
     # Public API
@@ -1378,6 +1388,7 @@ class StateMachineStrategy:
             "invalid_transitions": self._stats_invalid,
             "state_skips": self._stats_skip,
             "state_regressions": self._stats_regression,
+            "repeated_state": self._stats_repeated,
         }
 
     # ------------------------------------------------------------------
@@ -1433,6 +1444,7 @@ class StateMachineStrategy:
         # Second (repeated) entry
         packets.extend(state.entry_packets)
 
+        self._stats_repeated += 1
         return packets, [
             f"repeated_state({protocol}): "
             f"double entry to {state_name!r} "

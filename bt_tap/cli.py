@@ -1920,8 +1920,11 @@ def fuzz_bss(address):
 
 
 # Register new protocol-aware fuzz commands (campaign dashboard + crash management)
-from bt_tap.fuzz.cli_commands import register_fuzz_commands
-register_fuzz_commands(fuzz)
+try:
+    from bt_tap.fuzz.cli_commands import register_fuzz_commands
+    register_fuzz_commands(fuzz)
+except ImportError:
+    pass  # fuzz module dependencies not installed
 
 
 # ============================================================================

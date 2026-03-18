@@ -45,6 +45,26 @@ _ALL_PROTOCOLS = [
     "sdp", "obex", "at", "att", "smp", "bnep", "rfcomm", "l2cap",
 ]
 
+# Mapping from short CLI names to corpus _PROTOCOL_GENERATORS keys
+_PROTOCOL_SHORT_MAP: dict[str, list[str]] = {
+    "sdp": ["sdp"],
+    "obex": ["obex-pbap", "obex-map", "obex-opp"],
+    "at": ["at-hfp", "at-phonebook", "at-sms", "at-injection"],
+    "att": ["ble-att"],
+    "smp": ["ble-smp"],
+    "bnep": ["bnep"],
+    "rfcomm": ["rfcomm"],
+    "l2cap": ["l2cap"],
+}
+
+
+def _expand_protocol_names(short_names: list[str]) -> list[str]:
+    """Expand short CLI protocol names to corpus generator keys."""
+    expanded = []
+    for name in short_names:
+        expanded.extend(_PROTOCOL_SHORT_MAP.get(name, [name]))
+    return expanded
+
 
 # ---------------------------------------------------------------------------
 # Shared fuzz-case runner
@@ -92,14 +112,8 @@ def _run_fuzz_cases(
     corpus = Corpus(corpus_dir)
     generate_full_corpus(corpus, show_progress=True)
 
-    # Set up crash DB
-    if not session_dir:
-        session = get_session()
-        if session:
-            session_dir = session.dir
-        else:
-            session_dir = os.path.join("sessions", "fuzz_adhoc")
-    crash_db_path = os.path.join(session_dir, "fuzz", f"{protocol}_crashes.db")
+    # Set up crash DB (unified crashes.db for all protocols)
+    crash_db_path = os.path.join(session_dir, "fuzz", "crashes.db")
     db = CrashDB(crash_db_path)
 
     sent = 0
@@ -222,10 +236,6 @@ def _run_fuzz_cases(
                 except Exception:
                     errors += 1
                     break
-            except TimeoutError:
-                # Timeout may indicate hang
-                pass
-
             progress.advance(task)
             if delay > 0:
                 time.sleep(delay)
@@ -260,19 +270,6 @@ def _show_fuzz_summary(protocol: str, address: str, result: dict) -> None:
 
     # Log to session
     log_command(f"fuzz_{protocol}", result, category="fuzz", target=address)
-
-
-def _filter_cases_by_mode(cases: list[bytes], mode: str, mode_map: dict[str, list[str]]) -> list[bytes]:
-    """Filter fuzz cases by mode keyword in their description.
-
-    Since the protocol builders return raw bytes without descriptions, and the
-    master generators already combine all categories, mode filtering is best-effort.
-    For per-protocol commands we typically use the full set (mode=all) or
-    regenerate from specific sub-generators.  This is a no-op for mode='all'.
-    """
-    if mode == "all":
-        return cases
-    return cases
 
 
 # ===========================================================================
@@ -334,7 +331,7 @@ def register_extra_commands(fuzz_group):
             info(f"Generated {len(flat_cases)} OBEX fuzz cases for {profile}")
 
             rfcomm_channel = channel if channel else 19  # PBAP commonly on 19
-            transport_factory = lambda addr: RFCOMMTransport(addr, rfcomm_channel)
+            transport_factory = lambda addr, ch=rfcomm_channel: RFCOMMTransport(addr, ch)
 
             result = _run_fuzz_cases(
                 address, "obex", flat_cases, transport_factory,
@@ -748,7 +745,7 @@ def register_extra_commands(fuzz_group):
                     f"Device={stats.get('device_info', 0)}"
                 )
 
-            transport_factory = lambda addr: RFCOMMTransport(addr, channel)
+            transport_factory = lambda addr, ch=channel: RFCOMMTransport(addr, ch)
 
             result = _run_fuzz_cases(
                 address, "at", cases, transport_factory,
@@ -852,13 +849,28 @@ def register_extra_commands(fuzz_group):
 
             info(f"Loaded {len(payloads)} CVE test cases")
 
-            # Determine transport based on first CVE protocol
-            cve_list = strategy.list_cves()
-            from bt_tap.fuzz.transport import L2CAPTransport, BLETransport
+            # Determine transport based on CVE protocol using PROTOCOL_TRANSPORT_MAP
+            from bt_tap.fuzz.transport import L2CAPTransport, RFCOMMTransport, BLETransport
+            from bt_tap.fuzz.engine import PROTOCOL_TRANSPORT_MAP
 
-            # Use L2CAP PSM 1 as default (SDP), but this is best-effort
-            # since CVEs span multiple protocols
-            transport_factory = lambda addr: L2CAPTransport(addr, psm=1)
+            # Group payloads by CVE protocol and use correct transport
+            # For simplicity, use the protocol of the first CVE to pick transport
+            cve_list = strategy.list_cves()
+            first_proto = None
+            if cve_list:
+                first_proto = cve_list[0].get("protocol", "l2cap") if isinstance(cve_list[0], dict) else "l2cap"
+
+            spec = PROTOCOL_TRANSPORT_MAP.get(first_proto or "sdp", {"type": "l2cap", "psm": 1})
+            ttype = spec["type"]
+            if ttype == "rfcomm":
+                ch = spec.get("channel", 1)
+                transport_factory = lambda addr, _ch=ch: RFCOMMTransport(addr, _ch)
+            elif ttype == "ble":
+                cid = spec.get("cid", 4)
+                transport_factory = lambda addr, _cid=cid: BLETransport(addr, cid=_cid)
+            else:
+                psm = spec.get("psm", 1)
+                transport_factory = lambda addr, _psm=psm: L2CAPTransport(addr, psm=_psm)
 
             cases = [p for p, _ in payloads]
             result = _run_fuzz_cases(
@@ -1100,7 +1112,7 @@ def register_extra_commands(fuzz_group):
             error(f"Crash ID {crash_id} not found in any database under {fuzz_dir}")
             return
 
-        target = crash.get("target", "")
+        target = crash.get("target_addr", "")
         protocol = crash.get("protocol", "unknown")
 
         if not target:
@@ -1119,15 +1131,28 @@ def register_extra_commands(fuzz_group):
 
             info(f"Original payload: {len(payload)} bytes")
 
-            # Determine transport from protocol
-            protocol_lower = protocol.lower()
-            if protocol_lower in ("rfcomm", "at", "obex"):
-                channel = crash.get("channel", 1)
-                transport_factory = lambda: RFCOMMTransport(target, channel)
+            # Determine transport from protocol using PROTOCOL_TRANSPORT_MAP
+            from bt_tap.fuzz.engine import PROTOCOL_TRANSPORT_MAP
+            spec = PROTOCOL_TRANSPORT_MAP.get(protocol)
+            if spec is not None:
+                ttype = spec["type"]
+                if ttype == "rfcomm":
+                    _ch = spec.get("channel", 1)
+                    transport_factory = lambda _c=_ch: RFCOMMTransport(target, _c)
+                elif ttype == "ble":
+                    from bt_tap.fuzz.transport import BLETransport
+                    _cid = spec.get("cid", 4)
+                    transport_factory = lambda _ci=_cid: BLETransport(target, cid=_ci)
+                else:
+                    _psm = spec.get("psm", 1)
+                    transport_factory = lambda _p=_psm: L2CAPTransport(target, psm=_p)
             else:
-                # Default to L2CAP with PSM from crash or PSM 1 (SDP)
-                psm = crash.get("psm", 1)
-                transport_factory = lambda: L2CAPTransport(target, psm=psm)
+                # Fallback: guess from protocol name
+                protocol_lower = protocol.lower()
+                if protocol_lower in ("rfcomm", "at", "obex") or protocol_lower.startswith("at-") or protocol_lower.startswith("obex-"):
+                    transport_factory = lambda: RFCOMMTransport(target, 1)
+                else:
+                    transport_factory = lambda: L2CAPTransport(target, psm=1)
 
             minimizer = CrashMinimizer(
                 target=target,
@@ -1308,7 +1333,8 @@ def register_extra_commands(fuzz_group):
         corpus = Corpus(corpus_dir)
 
         with phase("Corpus Generation"):
-            protocols = _ALL_PROTOCOLS if protocol == "all" else [protocol]
+            short_names = _ALL_PROTOCOLS if protocol == "all" else [protocol]
+            protocols = _expand_protocol_names(short_names)
 
             table = Table(
                 title=f"[bold {CYAN}]Seed Corpus Generation[/bold {CYAN}]",

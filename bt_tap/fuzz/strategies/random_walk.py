@@ -19,58 +19,10 @@ from __future__ import annotations
 
 import hashlib
 import random
-from typing import Callable
 
 from bt_tap.fuzz.corpus import Corpus
 from bt_tap.fuzz.mutators import CorpusMutator
-
-
-# ---------------------------------------------------------------------------
-# Protocol registry — maps protocol names to their fuzz case generators.
-# Lazy-imported at first access to avoid circular imports and to keep
-# module load time near zero.
-# ---------------------------------------------------------------------------
-
-def _get_protocol_registry() -> dict[str, Callable[[], list]]:
-    """Build the protocol -> generator mapping on first call.
-
-    Each value is a callable that returns ``list[bytes]`` (or
-    ``list[bytes | list[bytes]]`` for OBEX).  Multi-packet sequences
-    (list[bytes] items) are flattened — each individual packet becomes
-    a separate template.
-    """
-    from bt_tap.fuzz.protocols.sdp import generate_all_sdp_fuzz_cases
-    from bt_tap.fuzz.protocols.obex import generate_all_obex_fuzz_cases
-    from bt_tap.fuzz.protocols.at_commands import ATCorpus
-    from bt_tap.fuzz.protocols.att import generate_all_att_fuzz_cases
-    from bt_tap.fuzz.protocols.smp import generate_all_smp_fuzz_cases
-    from bt_tap.fuzz.protocols.bnep import generate_all_bnep_fuzz_cases
-    from bt_tap.fuzz.protocols.rfcomm import generate_all_rfcomm_fuzz_cases
-
-    return {
-        "sdp": generate_all_sdp_fuzz_cases,
-        "obex-pbap": lambda: generate_all_obex_fuzz_cases(profile="pbap"),
-        "obex-map": lambda: generate_all_obex_fuzz_cases(profile="map"),
-        "obex-opp": lambda: generate_all_obex_fuzz_cases(profile="opp"),
-        "at-hfp": ATCorpus.generate_hfp_slc_corpus,
-        "at-phonebook": ATCorpus.generate_phonebook_corpus,
-        "at-sms": ATCorpus.generate_sms_corpus,
-        "ble-att": generate_all_att_fuzz_cases,
-        "ble-smp": generate_all_smp_fuzz_cases,
-        "bnep": generate_all_bnep_fuzz_cases,
-        "rfcomm": generate_all_rfcomm_fuzz_cases,
-    }
-
-
-# Singleton — built once per process.
-_REGISTRY: dict[str, Callable[[], list]] | None = None
-
-
-def _registry() -> dict[str, Callable[[], list]]:
-    global _REGISTRY
-    if _REGISTRY is None:
-        _REGISTRY = _get_protocol_registry()
-    return _REGISTRY
+from bt_tap.fuzz.strategies._registry import get_registry, PROTOCOLS as _SHARED_PROTOCOLS
 
 
 # ---------------------------------------------------------------------------
@@ -82,6 +34,12 @@ _TEMPLATE_WEIGHT = 0.70
 
 # Maximum retries when generate() produces a duplicate.
 _MAX_DEDUP_RETRIES = 8
+
+# Maximum size of the _seen dedup set.  When exceeded, the set is cleared
+# entirely.  This prevents unbounded memory growth during long campaigns.
+# Re-generating a previously seen payload is acceptable — the set only
+# prevents *immediate* duplicates within a window.
+_MAX_SEEN = 500_000
 
 
 class RandomWalkStrategy:
@@ -95,19 +53,7 @@ class RandomWalkStrategy:
     """
 
     # Expose the full protocol list so callers can iterate or validate.
-    PROTOCOLS: frozenset[str] = frozenset({
-        "sdp",
-        "obex-pbap",
-        "obex-map",
-        "obex-opp",
-        "at-hfp",
-        "at-phonebook",
-        "at-sms",
-        "ble-att",
-        "ble-smp",
-        "bnep",
-        "rfcomm",
-    })
+    PROTOCOLS: frozenset[str] = _SHARED_PROTOCOLS
 
     def __init__(self, corpus: Corpus | None = None) -> None:
         self.corpus = corpus
@@ -131,12 +77,13 @@ class RandomWalkStrategy:
 
         Raises ``ValueError`` if *protocol* is not in :attr:`PROTOCOLS`.
         """
-        if protocol not in _registry():
+        if protocol not in get_registry():
             raise ValueError(
                 f"Unknown protocol {protocol!r}. "
                 f"Valid: {', '.join(sorted(self.PROTOCOLS))}"
             )
 
+        last_mode_corpus = False
         for _ in range(_MAX_DEDUP_RETRIES):
             use_corpus = (
                 self.corpus is not None
@@ -148,6 +95,7 @@ class RandomWalkStrategy:
                 data, log = self._generate_from_corpus(protocol)
             else:
                 data, log = self._generate_from_template(protocol)
+            last_mode_corpus = use_corpus
 
             if self._is_novel(data):
                 self._generated_total += 1
@@ -162,7 +110,10 @@ class RandomWalkStrategy:
         # After retries, accept the last one even if it is a duplicate
         # to guarantee forward progress.
         self._generated_total += 1
-        self._generated_template += 1
+        if last_mode_corpus:
+            self._generated_corpus += 1
+        else:
+            self._generated_template += 1
         return data, log  # type: ignore[possibly-undefined]
 
     def stats(self) -> dict:
@@ -234,7 +185,7 @@ class RandomWalkStrategy:
         if cached is not None:
             return cached
 
-        generator = _registry().get(protocol)
+        generator = get_registry().get(protocol)
         if generator is None:
             self._template_cache[protocol] = []
             return []
@@ -264,7 +215,13 @@ class RandomWalkStrategy:
         Uses SHA-256 truncated to 16 hex chars (64 bits) for the hash
         set — collision probability is negligible at campaign scale
         (<10M cases) and saves memory vs full 64-char digests.
+
+        When the dedup set exceeds ``_MAX_SEEN``, it is cleared entirely
+        to bound memory usage during long campaigns.
         """
+        if len(self._seen) >= _MAX_SEEN:
+            self._seen.clear()
+
         h = hashlib.sha256(data).hexdigest()[:16]
         if h in self._seen:
             return False
