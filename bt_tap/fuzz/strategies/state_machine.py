@@ -30,9 +30,8 @@ import random
 import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Optional
 
-from bt_tap.fuzz.mutators import CorpusMutator, FieldMutator
+from bt_tap.fuzz.mutators import CorpusMutator
 
 # ---------------------------------------------------------------------------
 # Core abstractions
@@ -793,7 +792,6 @@ class SMPStateMachine(StateMachineModel):
 
     def _build_invalid_transitions(self) -> list[tuple[list[bytes], list[str]]]:
         """Build all pre-defined invalid SMP state transitions."""
-        smp = self._smp
         sequences: list[tuple[list[bytes], list[str]]] = []
 
         # 1. Confirm without feature exchange (idle -> confirm)
@@ -1171,7 +1169,6 @@ class StateMachineStrategy:
         Raises:
             ValueError: If *protocol* is not a supported model.
         """
-        model = self._get_model(protocol)
         roll = random.random()
 
         if roll < 0.30:

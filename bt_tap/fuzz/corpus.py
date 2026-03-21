@@ -9,7 +9,6 @@ discovered during fuzzing are saved separately for triage.
 from __future__ import annotations
 
 import hashlib
-import os
 import random
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -311,7 +310,7 @@ def generate_full_corpus(
     if show_progress:
         try:
             from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, MofNCompleteColumn
-            from bt_tap.utils.output import console, CYAN, GREEN, YELLOW
+            from bt_tap.utils.output import console, CYAN, GREEN
 
             with Progress(
                 SpinnerColumn(style=CYAN),
@@ -335,7 +334,7 @@ def generate_full_corpus(
                     except KeyboardInterrupt:
                         progress.update(task, current="[interrupted]")
                         break
-                    except Exception as exc:
+                    except Exception:
                         results[proto] = 0
                     progress.advance(task)
 

@@ -19,9 +19,9 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Optional, TYPE_CHECKING
+from typing import Callable, TYPE_CHECKING
 
-from bt_tap.utils.output import info, warning, error
+from bt_tap.utils.output import info, warning
 
 if TYPE_CHECKING:
     from bt_tap.fuzz.crash_db import CrashDB
@@ -378,7 +378,6 @@ class DeltaDebugReducer:
 
         while n <= len(current) and iteration < max_iterations:
             iteration += 1
-            chunk_size = max(len(current) // n, 1)
             chunks = self._split(current, n)
 
             reduced = False

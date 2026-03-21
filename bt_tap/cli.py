@@ -3,22 +3,130 @@
 import json
 import os
 import re
+import time
 
 import click
 from rich.table import Table
 from rich.panel import Panel
 
 from bt_tap.utils.output import (
-    banner, info, success, error, warning, verbose, debug,
-    device_table, service_table, channel_table,
-    console, target, summary_panel,
-    phase, step, result_box,
+    banner, info, success, error, warning, verbose, device_table, service_table, channel_table,
+    console, summary_panel,
 )
-from bt_tap.utils.bt_helpers import run_cmd
 from bt_tap.utils.interactive import resolve_address, pick_two_devices
 
 
-@click.group()
+_SESSION_SKIP_COMMANDS = {"bt-tap", "bt-tap run"}
+
+
+def _normalize_command_path(ctx: click.Context) -> str:
+    """Normalize Click command path into bt-tap subcommand form."""
+    parts = ctx.command_path.split()
+    if "bt-tap" in parts:
+        return " ".join(parts[parts.index("bt-tap"):])
+
+    # Fallback when invoked as `python -m bt_tap.cli ...`
+    names = []
+    node = ctx
+    while node is not None:
+        cmd = getattr(node, "command", None)
+        name = getattr(cmd, "name", "")
+        if name and name != "main":
+            names.append(name)
+        node = node.parent
+    names.reverse()
+    if not names:
+        return "bt-tap"
+    return f"bt-tap {' '.join(names)}"
+
+
+def _extract_target_param(params: dict) -> str:
+    """Best-effort target extraction for session metadata."""
+    candidate_keys = (
+        "address", "ivi_address", "phone_address", "target", "target_mac",
+        "ivi_mac", "mac", "remote_mac",
+    )
+    for key in candidate_keys:
+        value = params.get(key, "")
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
+def _infer_category(command_path: str) -> str:
+    """Infer a report category from click command path."""
+    parts = command_path.split()
+    if len(parts) < 2:
+        return "general"
+    root = parts[1]
+    if root == "scan":
+        return "scan"
+    if root == "recon":
+        return "recon"
+    if root in {"pbap", "map", "at", "opp"}:
+        return "data"
+    if root in {"hfp", "audio"}:
+        return "audio"
+    if root == "vulnscan":
+        return "vuln"
+    if root == "fuzz":
+        return "fuzz"
+    if root == "dos":
+        return "dos"
+    if root in {"hijack", "auto", "bias", "avrcp", "spoof"}:
+        return "attack"
+    return "general"
+
+
+class LoggedCommand(click.Command):
+    """Click command with automatic session logging for every invocation."""
+
+    def invoke(self, ctx):
+        from bt_tap.utils.session import log_command
+
+        status = "success"
+        err = ""
+        started = time.time()
+        command_path = _normalize_command_path(ctx)
+        try:
+            return super().invoke(ctx)
+        except KeyboardInterrupt:
+            status = "interrupted"
+            raise
+        except Exception as exc:
+            status = "error"
+            err = str(exc)
+            raise
+        finally:
+            if command_path in _SESSION_SKIP_COMMANDS:
+                return
+            payload = {
+                "command_path": command_path,
+                "status": status,
+                "duration_s": round(time.time() - started, 3),
+                "params": dict(ctx.params),
+            }
+            if err:
+                payload["error"] = err
+            log_command(
+                command=command_path.replace(" ", "_"),
+                data=payload,
+                category=_infer_category(command_path),
+                target=_extract_target_param(ctx.params),
+            )
+
+
+class LoggedGroup(click.Group):
+    """Click group that propagates logged command/group classes."""
+
+    command_class = LoggedCommand
+    group_class = None
+
+
+LoggedGroup.group_class = LoggedGroup
+
+
+@click.group(cls=LoggedGroup)
 @click.version_option(version="1.5.0")
 @click.option("-v", "--verbose", count=True, help="Verbosity: -v verbose, -vv debug")
 @click.option("-s", "--session", "session_name", default=None,
@@ -1733,14 +1841,16 @@ def dos_name_flood(address, length):
 
 @dos.command("rate-test")
 @click.argument("address", required=False, default=None)
-def dos_rate_test(address):
+@click.option("--attempts", default=10, type=int, help="Number of pairing attempts")
+@click.option("--pair-timeout", default=5.0, type=float, help="Timeout per pairing attempt (seconds)")
+def dos_rate_test(address, attempts, pair_timeout):
     """Detect rate limiting on pairing attempts."""
     address = resolve_address(address)
     if not address:
         return
     from bt_tap.attack.dos import PairingFlood
     flood = PairingFlood(address)
-    result = flood.detect_rate_limiting()
+    result = flood.detect_rate_limiting(attempts=attempts, pair_timeout=pair_timeout)
 
     if result.get("rate_limited"):
         warning("Rate limiting detected!")
@@ -1923,8 +2033,8 @@ def fuzz_bss(address):
 try:
     from bt_tap.fuzz.cli_commands import register_fuzz_commands
     register_fuzz_commands(fuzz)
-except ImportError:
-    pass  # fuzz module dependencies not installed
+except ImportError as exc:
+    warning(f"Extended fuzz commands unavailable: {exc}")
 
 
 # ============================================================================
@@ -2003,6 +2113,19 @@ def report_cmd(dump_dir, fmt, output):
                 data.get("description", ""),
             )
 
+        # Add generic command execution evidence from all categories.
+        for category_name, entries in session_data.items():
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                data = entry.get("data", {})
+                if isinstance(data, dict) and data.get("command_path"):
+                    status = data.get("status", "unknown")
+                    report.add_note(
+                        f"Command: {data['command_path']} | "
+                        f"Category: {category_name} | Status: {status}"
+                    )
+
         # Add session metadata as a note
         meta = session.metadata
         report.add_note(
@@ -2076,7 +2199,7 @@ def auto_cmd(ivi_mac, duration, output, hci):
 # ============================================================================
 @main.command("run")
 @click.argument("commands", nargs=-1)
-@click.option("--playbook", default=None, help="YAML playbook file with command list")
+@click.option("--playbook", default=None, help="Playbook text file (one command per line)")
 def run_cmd_seq(commands, playbook):
     """Execute multiple bt-tap commands in sequence.
 
@@ -2086,11 +2209,11 @@ def run_cmd_seq(commands, playbook):
 
     Use TARGET as a placeholder — you'll be prompted to select a device.
 
-    Or use a playbook file:
-      bt-tap -s mytest run --playbook quick-recon.yml
+    Or use a playbook file (plain text, one command per line):
+      bt-tap -s mytest run --playbook quick-recon.txt
     """
     import shlex
-    import sys
+    from bt_tap.utils.session import get_session
 
     if playbook:
         if not os.path.exists(playbook):
@@ -2120,6 +2243,11 @@ def run_cmd_seq(commands, playbook):
     console.print()
 
     results = []
+    active_session = get_session()
+    session_prefix = []
+    if active_session:
+        # Force subcommands to use the current session instead of spawning auto sessions.
+        session_prefix = ["-s", active_session.name]
     for i, cmd_str in enumerate(commands, 1):
         # Replace TARGET placeholder
         if target_addr:
@@ -2131,10 +2259,23 @@ def run_cmd_seq(commands, playbook):
         try:
             # Parse the command string and invoke via Click
             args = shlex.split(cmd_str)
-            ctx = main.make_context("bt-tap", list(args), parent=click.get_current_context())
+            if args and args[0] == "run":
+                error("Nested 'run' command is not supported inside workflows")
+                results.append({
+                    "step": i,
+                    "command": cmd_str,
+                    "status": "error",
+                    "error": "nested_run_not_supported",
+                })
+                continue
+            ctx = main.make_context("bt-tap", session_prefix + list(args), parent=click.get_current_context())
             with ctx:
                 main.invoke(ctx)
             results.append({"step": i, "command": cmd_str, "status": "success"})
+        except KeyboardInterrupt:
+            warning("Workflow interrupted by user")
+            results.append({"step": i, "command": cmd_str, "status": "interrupted"})
+            break
         except SystemExit as e:
             status = "success" if e.code in (None, 0) else "error"
             results.append({"step": i, "command": cmd_str, "status": status})
@@ -2149,6 +2290,17 @@ def run_cmd_seq(commands, playbook):
     succeeded = sum(1 for r in results if r["status"] == "success")
     failed = sum(1 for r in results if r["status"] == "error")
     info(f"Results: {succeeded} succeeded, {failed} failed out of {len(results)}")
+    from bt_tap.utils.session import log_command
+    log_command(
+        "workflow_run",
+        {
+            "commands": list(commands),
+            "results": results,
+            "succeeded": succeeded,
+            "failed": failed,
+        },
+        category="general",
+    )
 
 
 # ============================================================================

@@ -3,7 +3,7 @@
 import os
 import re
 
-from bt_tap.utils.bt_helpers import run_cmd, get_hci_adapters, get_adapter_address
+from bt_tap.utils.bt_helpers import run_cmd, get_hci_adapters
 from bt_tap.utils.output import info, success, error, warning
 
 

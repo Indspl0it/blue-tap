@@ -1,6 +1,5 @@
 """Interactive device picker — scan and select Bluetooth devices by number."""
 
-import click
 
 from bt_tap.utils.output import (
     console, info, success, warning, error,

@@ -703,7 +703,7 @@ def diagnose_bt_audio(mac: str):
                 console.print(f"  {line}")
 
     # Mute status
-    console.print(f"\n[bold]Source mute status:[/bold]")
+    console.print("\n[bold]Source mute status:[/bold]")
     result = run_cmd(["pactl", "get-source-mute", source])
     console.print(f"  {result.stdout.strip()}" if result.returncode == 0 else "  (unavailable)")
 

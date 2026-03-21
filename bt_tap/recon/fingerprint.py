@@ -24,7 +24,7 @@ import re
 
 from bt_tap.utils.bt_helpers import run_cmd
 from bt_tap.recon.sdp import browse_services
-from bt_tap.utils.output import info, success, warning
+from bt_tap.utils.output import info, success
 
 
 # Bluetooth profiles typically found on automotive IVIs

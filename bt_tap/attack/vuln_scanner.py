@@ -18,6 +18,7 @@ from bt_tap.recon.rfcomm_scan import RFCOMMScanner
 from bt_tap.utils.bt_helpers import run_cmd, check_tool
 from bt_tap.utils.output import (
     console,
+    error,
     info,
     section,
     success,
@@ -299,10 +300,10 @@ def _check_perfektblue(address: str, services: list[dict],
         _finding(
             severity,
             "PerfektBlue: OpenSynergy BlueSDK Vulnerability Chain",
-            f"Target matches OpenSynergy BlueSDK indicators. PerfektBlue is a chain of "
-            f"4 CVEs (CVSS 3.5-8.0) enabling 1-click RCE on IVI after pairing. "
-            f"Affects 350M+ vehicles. CVE-2024-45434 (AVRCP UAF, CVSS 8.0) is the "
-            f"most critical. Patches released Sept 2024 but supply chain delays apply.",
+            "Target matches OpenSynergy BlueSDK indicators. PerfektBlue is a chain of "
+            "4 CVEs (CVSS 3.5-8.0) enabling 1-click RCE on IVI after pairing. "
+            "Affects 350M+ vehicles. CVE-2024-45434 (AVRCP UAF, CVSS 8.0) is the "
+            "most critical. Patches released Sept 2024 but supply chain delays apply.",
             cve="CVE-2024-45434",
             impact="Remote code execution on IVI. Access GPS, microphone, contacts. "
                    "Lateral movement to other vehicle systems possible.",

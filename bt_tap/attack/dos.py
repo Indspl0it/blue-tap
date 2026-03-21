@@ -11,7 +11,6 @@ Attack variants:
   - Rate limit detection: time successive attempts to detect backoff
 """
 
-import random
 import subprocess
 import time
 
@@ -168,7 +167,7 @@ class PairingFlood:
             "output": output.strip()[:500],
         }
 
-    def detect_rate_limiting(self, attempts: int = 10) -> dict:
+    def detect_rate_limiting(self, attempts: int = 10, pair_timeout: float = 15.0) -> dict:
         """Time successive pairing attempts to detect rate limiting.
 
         Sends pairing requests back-to-back and measures the time each one
@@ -181,12 +180,16 @@ class PairingFlood:
         Returns:
             Dict with per-attempt timings and rate limiting verdict.
         """
-        info(f"Detecting rate limiting on {self.address} ({attempts} attempts)")
+        info(
+            f"Detecting rate limiting on {self.address} "
+            f"({attempts} attempts, timeout {pair_timeout:.1f}s)"
+        )
 
         timings = []
+        remove_timeout = max(0.5, min(2.0, float(pair_timeout)))
 
         for i in range(attempts):
-            run_cmd(["bluetoothctl", "remove", self.address], timeout=5)
+            run_cmd(["bluetoothctl", "remove", self.address], timeout=remove_timeout)
             time.sleep(0.1)
 
             bt_commands = f"pair {self.address}\nquit\n"
@@ -197,7 +200,7 @@ class PairingFlood:
                     input=bt_commands,
                     capture_output=True,
                     text=True,
-                    timeout=15,
+                    timeout=max(0.5, float(pair_timeout)),
                     errors="replace",
                 )
             except subprocess.TimeoutExpired:
@@ -219,7 +222,7 @@ class PairingFlood:
                 info("No obvious rate limiting detected")
 
         # Clean up pairing state
-        run_cmd(["bluetoothctl", "remove", self.address], timeout=5)
+        run_cmd(["bluetoothctl", "remove", self.address], timeout=remove_timeout)
 
         return {
             "target": self.address,

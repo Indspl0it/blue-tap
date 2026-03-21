@@ -2,7 +2,7 @@
 
 import asyncio
 
-from bt_tap.utils.output import info, success, error, warning
+from bt_tap.utils.output import info, success, error
 
 
 # Standard GATT Service UUIDs (Bluetooth SIG assigned)

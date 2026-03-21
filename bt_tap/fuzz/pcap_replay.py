@@ -15,7 +15,7 @@ import hashlib
 import logging
 import struct
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable
 
 from bt_tap.fuzz.corpus import Corpus
@@ -443,7 +443,6 @@ def classify_protocol(frame: L2CAPFrame) -> str:
     if len(payload) >= 3:
         addr_byte = first_byte
         if addr_byte & 0x01:  # EA bit set
-            dlci = (addr_byte >> 2) & 0x3F
             ctrl = payload[1]
             # RFCOMM frame types (control field values):
             #   0x2F = SABM (Set Asynchronous Balanced Mode)

@@ -19,18 +19,17 @@ Note on link keys:
 
 import time
 
-from bt_tap.core.scanner import scan_classic, resolve_name
-from bt_tap.core.spoofer import spoof_address, clone_device_identity
+from bt_tap.core.scanner import resolve_name
+from bt_tap.core.spoofer import clone_device_identity
 from bt_tap.core.adapter import (
-    adapter_reset, enable_page_scan, set_device_class,
-    set_device_name, enable_ssp, disable_ssp,
+    adapter_reset, enable_page_scan,
 )
 from bt_tap.recon.sdp import browse_services, find_service_channel
 from bt_tap.recon.fingerprint import fingerprint_device
 from bt_tap.attack.pbap import PBAPClient
 from bt_tap.attack.map_client import MAPClient
 from bt_tap.attack.hfp import HFPClient
-from bt_tap.utils.bt_helpers import validate_mac, normalize_mac
+from bt_tap.utils.bt_helpers import normalize_mac
 from bt_tap.utils.output import info, success, error, warning, verbose, console, phase, step, substep, summary_panel, target
 
 
@@ -267,7 +266,7 @@ class HijackSession:
 
             try:
                 results = self.map_client.dump_all_messages(out)
-                success(f"MAP dump complete")
+                success("MAP dump complete")
                 return results
             finally:
                 self.map_client.disconnect()
@@ -433,7 +432,6 @@ class HijackSession:
         """
         console.rule("[bold]Auto-Reconnect Test")
 
-        from bt_tap.core.adapter import enable_page_scan
         from bt_tap.utils.bt_helpers import run_cmd
 
         results = {"auto_connected": False, "wait_time": wait_time}

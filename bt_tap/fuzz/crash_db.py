@@ -15,7 +15,7 @@ import time
 from enum import Enum
 from typing import TYPE_CHECKING, Optional
 
-from bt_tap.utils.output import info, warning, error
+from bt_tap.utils.output import info, warning
 
 if TYPE_CHECKING:
     from bt_tap.fuzz.transport import BluetoothTransport

@@ -74,6 +74,11 @@ class AVRCPController:
         Scans BlueZ managed objects for a MediaPlayer1 matching the
         target device MAC address.
         """
+        from bt_tap.utils.bt_helpers import ensure_adapter_ready
+        if not ensure_adapter_ready(self.hci, timeout=3, auto_up=False):
+            error(f"Adapter {self.hci} not ready for AVRCP control")
+            return False
+
         try:
             import dbus
         except ImportError:
@@ -127,6 +132,12 @@ class AVRCPController:
 
     def _find_transport(self, objects: dict, dev_prefix: str):
         """Locate the MediaTransport1 interface for volume control."""
+        try:
+            import dbus
+        except ImportError:
+            warning("python-dbus not installed; transport controls unavailable")
+            return
+
         for path, interfaces in objects.items():
             if str(path).startswith(dev_prefix) and BLUEZ_MEDIA_TRANSPORT in interfaces:
                 try:
@@ -361,8 +372,13 @@ class AVRCPController:
             duration: Monitoring duration in seconds
             callback: Optional callable(track_dict) for each change
         """
-        from dbus.mainloop.glib import DBusGMainLoop
-        from gi.repository import GLib
+        try:
+            import dbus
+            from dbus.mainloop.glib import DBusGMainLoop
+            from gi.repository import GLib
+        except ImportError:
+            error("python-dbus / PyGObject not installed; cannot monitor metadata")
+            return
 
         info(f"Monitoring metadata for {duration}s...")
         DBusGMainLoop(set_as_default=True)
@@ -408,4 +424,4 @@ class AVRCPController:
             pass
         finally:
             timer.cancel()
-            success(f"Metadata monitoring stopped")
+            success("Metadata monitoring stopped")

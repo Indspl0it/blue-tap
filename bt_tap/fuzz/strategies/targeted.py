@@ -26,14 +26,8 @@ import os
 import struct
 from collections.abc import Generator
 
-from bt_tap.fuzz.mutators import CorpusMutator, FieldMutator, IntegerMutator
+from bt_tap.fuzz.mutators import CorpusMutator, FieldMutator
 from bt_tap.fuzz.protocols.att import (
-    ATT_EXCHANGE_MTU_REQ,
-    ATT_EXECUTE_WRITE_REQ,
-    ATT_FIND_INFO_REQ,
-    ATT_PREPARE_WRITE_REQ,
-    ATT_READ_BY_TYPE_REQ,
-    ATT_READ_REQ,
     UUID_CHARACTERISTIC,
     build_exchange_mtu_req,
     build_execute_write_req,

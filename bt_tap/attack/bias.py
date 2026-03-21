@@ -38,8 +38,8 @@ References:
 import time
 import re
 
-from bt_tap.utils.bt_helpers import run_cmd, check_tool
-from bt_tap.core.spoofer import spoof_address, clone_device_identity
+from bt_tap.utils.bt_helpers import run_cmd
+from bt_tap.core.spoofer import clone_device_identity
 from bt_tap.core.adapter import adapter_reset, disable_ssp, enable_page_scan
 from bt_tap.utils.output import (
     info, success, error, warning, verbose,

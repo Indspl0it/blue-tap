@@ -35,7 +35,6 @@ def parse_sdp_output(output: str) -> list[dict]:
     services = []
     current = None
     last_protocol = None
-    in_profile_desc = False
 
     for line in output.splitlines():
         line = line.strip()
@@ -45,7 +44,6 @@ def parse_sdp_output(output: str) -> list[dict]:
                 services.append(current)
             current = {"name": line.split(":", 1)[1].strip()}
             last_protocol = None
-            in_profile_desc = False
 
         elif line.startswith("Service RecHandle:"):
             if current is None:
@@ -63,14 +61,11 @@ def parse_sdp_output(output: str) -> list[dict]:
 
         elif line.startswith("Service Class ID List:"):
             last_protocol = None
-            in_profile_desc = False
 
         elif line.startswith("Profile Descriptor List:"):
-            in_profile_desc = True
             last_protocol = None
 
         elif line.startswith("Protocol Descriptor List:"):
-            in_profile_desc = False
             last_protocol = None
 
         elif line.startswith('"') and current:

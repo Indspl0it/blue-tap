@@ -4,8 +4,8 @@ import json
 import os
 
 from bt_tap.utils.bt_helpers import (
-    run_cmd, validate_mac, normalize_mac, check_tool,
-    check_root, get_adapter_address,
+    run_cmd, normalize_mac, check_tool,
+    get_adapter_address,
 )
 from bt_tap.utils.output import info, success, error, warning
 
@@ -199,7 +199,7 @@ def spoof_btmgmt(hci: str, target_mac: str) -> bool:
     run_cmd(["sudo", "btmgmt", "--index", idx, "power", "on"])
 
     if public_failed:
-        warning(f"btmgmt method not supported on this adapter")
+        warning("btmgmt method not supported on this adapter")
         return False
 
     # Verify address actually changed

@@ -21,9 +21,7 @@ Session directory structure:
 
 import json
 import os
-import time
 from datetime import datetime
-from pathlib import Path
 
 
 # Module-level active session (set by CLI --session flag)

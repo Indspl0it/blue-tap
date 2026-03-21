@@ -58,7 +58,6 @@ from bt_tap.utils.session import log_command
 
 try:
     from bt_tap.fuzz.transport import (
-        BluetoothTransport,
         L2CAPTransport,
         RFCOMMTransport,
         BLETransport,
@@ -68,7 +67,7 @@ except ImportError:
     _HAS_TRANSPORT = False
 
 try:
-    from bt_tap.fuzz.crash_db import CrashDB, CrashSeverity
+    from bt_tap.fuzz.crash_db import CrashDB
     _HAS_CRASH_DB = True
 except ImportError:
     _HAS_CRASH_DB = False

@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import hashlib
 import random
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from bt_tap.fuzz.corpus import Corpus
 from bt_tap.fuzz.mutators import CorpusMutator

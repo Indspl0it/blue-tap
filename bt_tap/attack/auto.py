@@ -5,7 +5,6 @@ hijack chain automatically: scan -> identify phone -> hijack -> dump -> report.
 """
 
 import os
-import time
 
 from bt_tap.core.scanner import scan_classic
 from bt_tap.utils.bt_helpers import normalize_mac

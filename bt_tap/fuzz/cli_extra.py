@@ -331,7 +331,8 @@ def register_extra_commands(fuzz_group):
             info(f"Generated {len(flat_cases)} OBEX fuzz cases for {profile}")
 
             rfcomm_channel = channel if channel else 19  # PBAP commonly on 19
-            transport_factory = lambda addr, ch=rfcomm_channel: RFCOMMTransport(addr, ch)
+            def transport_factory(addr):
+                return RFCOMMTransport(addr, rfcomm_channel)
 
             result = _run_fuzz_cases(
                 address, "obex", flat_cases, transport_factory,
@@ -398,7 +399,8 @@ def register_extra_commands(fuzz_group):
 
             info(f"Generated {len(cases)} ATT fuzz cases")
 
-            transport_factory = lambda addr: BLETransport(addr)
+            def transport_factory(addr):
+                return BLETransport(addr)
 
             result = _run_fuzz_cases(
                 address, "ble-att", cases, transport_factory,
@@ -464,7 +466,8 @@ def register_extra_commands(fuzz_group):
 
             info(f"Generated {len(cases)} SMP fuzz cases")
 
-            transport_factory = lambda addr: BLETransport(addr)
+            def transport_factory(addr):
+                return BLETransport(addr)
 
             result = _run_fuzz_cases(
                 address, "ble-smp", cases, transport_factory,
@@ -527,7 +530,8 @@ def register_extra_commands(fuzz_group):
             info(f"Generated {len(cases)} BNEP fuzz cases")
 
             # BNEP runs on L2CAP PSM 15
-            transport_factory = lambda addr: L2CAPTransport(addr, psm=15)
+            def transport_factory(addr):
+                return L2CAPTransport(addr, psm=15)
 
             result = _run_fuzz_cases(
                 address, "bnep", cases, transport_factory,
@@ -591,7 +595,8 @@ def register_extra_commands(fuzz_group):
             info(f"Generated {len(cases)} RFCOMM fuzz cases")
 
             # Raw RFCOMM via L2CAP PSM 3
-            transport_factory = lambda addr: L2CAPTransport(addr, psm=3)
+            def transport_factory(addr):
+                return L2CAPTransport(addr, psm=3)
 
             result = _run_fuzz_cases(
                 address, "rfcomm", cases, transport_factory,
@@ -669,7 +674,8 @@ def register_extra_commands(fuzz_group):
             info(f"Generated {len(cases)} SDP fuzz cases")
 
             # SDP runs on L2CAP PSM 1
-            transport_factory = lambda addr: L2CAPTransport(addr, psm=1)
+            def transport_factory(addr):
+                return L2CAPTransport(addr, psm=1)
 
             result = _run_fuzz_cases(
                 address, "sdp", cases, transport_factory,
@@ -745,7 +751,8 @@ def register_extra_commands(fuzz_group):
                     f"Device={stats.get('device_info', 0)}"
                 )
 
-            transport_factory = lambda addr, ch=channel: RFCOMMTransport(addr, ch)
+            def transport_factory(addr):
+                return RFCOMMTransport(addr, channel)
 
             result = _run_fuzz_cases(
                 address, "at", cases, transport_factory,
@@ -864,13 +871,16 @@ def register_extra_commands(fuzz_group):
             ttype = spec["type"]
             if ttype == "rfcomm":
                 ch = spec.get("channel", 1)
-                transport_factory = lambda addr, _ch=ch: RFCOMMTransport(addr, _ch)
+                def transport_factory(addr):
+                    return RFCOMMTransport(addr, ch)
             elif ttype == "ble":
                 cid = spec.get("cid", 4)
-                transport_factory = lambda addr, _cid=cid: BLETransport(addr, cid=_cid)
+                def transport_factory(addr):
+                    return BLETransport(addr, cid=cid)
             else:
                 psm = spec.get("psm", 1)
-                transport_factory = lambda addr, _psm=psm: L2CAPTransport(addr, psm=_psm)
+                def transport_factory(addr):
+                    return L2CAPTransport(addr, psm=psm)
 
             cases = [p for p, _ in payloads]
             result = _run_fuzz_cases(
@@ -908,7 +918,7 @@ def register_extra_commands(fuzz_group):
           bt-tap fuzz replay capture.btsnoop -t AA:BB:CC:DD:EE:FF -p sdp
           bt-tap fuzz replay capture.btsnoop -t AA:BB:CC:DD:EE:FF --mutate
         """
-        from bt_tap.fuzz.pcap_replay import CaptureReplayer, classify_protocol
+        from bt_tap.fuzz.pcap_replay import CaptureReplayer
 
         target = resolve_address(target)
         if not target:
@@ -982,7 +992,8 @@ def register_extra_commands(fuzz_group):
 
             # Replay mode
             from bt_tap.fuzz.transport import L2CAPTransport
-            transport_factory = lambda addr: L2CAPTransport(addr, psm=1)
+            def transport_factory(addr):
+                return L2CAPTransport(addr, psm=1)
 
             if mutate:
                 info(f"Replaying with mutations against {style_target(target)}")
@@ -1138,21 +1149,26 @@ def register_extra_commands(fuzz_group):
                 ttype = spec["type"]
                 if ttype == "rfcomm":
                     _ch = spec.get("channel", 1)
-                    transport_factory = lambda _c=_ch: RFCOMMTransport(target, _c)
+                    def transport_factory():
+                        return RFCOMMTransport(target, _ch)
                 elif ttype == "ble":
                     from bt_tap.fuzz.transport import BLETransport
                     _cid = spec.get("cid", 4)
-                    transport_factory = lambda _ci=_cid: BLETransport(target, cid=_ci)
+                    def transport_factory():
+                        return BLETransport(target, cid=_cid)
                 else:
                     _psm = spec.get("psm", 1)
-                    transport_factory = lambda _p=_psm: L2CAPTransport(target, psm=_p)
+                    def transport_factory():
+                        return L2CAPTransport(target, psm=_psm)
             else:
                 # Fallback: guess from protocol name
                 protocol_lower = protocol.lower()
                 if protocol_lower in ("rfcomm", "at", "obex") or protocol_lower.startswith("at-") or protocol_lower.startswith("obex-"):
-                    transport_factory = lambda: RFCOMMTransport(target, 1)
+                    def transport_factory():
+                        return RFCOMMTransport(target, 1)
                 else:
-                    transport_factory = lambda: L2CAPTransport(target, psm=1)
+                    def transport_factory():
+                        return L2CAPTransport(target, psm=1)
 
             minimizer = CrashMinimizer(
                 target=target,
@@ -1262,7 +1278,8 @@ def register_extra_commands(fuzz_group):
                 info("Scapy available -- using raw L2CAP injection")
                 # Note: Scapy transport requires root and direct HCI access.
                 # Fall back to kernel transport if connection fails.
-                transport_factory = lambda addr: L2CAPTransport(addr, psm=1)
+                def transport_factory(addr):
+                    return L2CAPTransport(addr, psm=1)
                 warning(
                     "Raw Scapy injection requires root privileges. "
                     "Using kernel L2CAP transport as primary sender."
@@ -1272,7 +1289,8 @@ def register_extra_commands(fuzz_group):
                     "Scapy not installed -- using kernel L2CAP transport. "
                     "Install for raw injection: pip install 'bt-tap[fuzz]'"
                 )
-                transport_factory = lambda addr: L2CAPTransport(addr, psm=1)
+                def transport_factory(addr):
+                    return L2CAPTransport(addr, psm=1)
 
             result = _run_fuzz_cases(
                 address, "l2cap-sig", cases, transport_factory,
@@ -1366,7 +1384,7 @@ def register_extra_commands(fuzz_group):
 
             table.add_section()
             table.add_row(
-                f"[bold]TOTAL[/bold]",
+                "[bold]TOTAL[/bold]",
                 f"[bold {GREEN}]{total_seeds}[/bold {GREEN}]",
                 f"[bold]{_format_bytes(total_bytes)}[/bold]",
             )
@@ -1425,7 +1443,7 @@ def register_extra_commands(fuzz_group):
                         found = True
                         break
                 if not found:
-                    warning(f"No corpus found. It will be auto-generated on the next fuzz command.")
+                    warning("No corpus found. It will be auto-generated on the next fuzz command.")
                     return
             else:
                 warning(f"No corpus found at {corpus_dir}")
@@ -1463,7 +1481,7 @@ def register_extra_commands(fuzz_group):
 
         table.add_section()
         table.add_row(
-            f"[bold]TOTAL[/bold]",
+            "[bold]TOTAL[/bold]",
             f"[bold {GREEN}]{stats.total_seeds}[/bold {GREEN}]",
             f"[bold {PURPLE}]{stats.interesting_count}[/bold {PURPLE}]",
         )
@@ -1558,7 +1576,7 @@ def register_extra_commands(fuzz_group):
 
             table.add_section()
             table.add_row(
-                f"[bold]TOTAL[/bold]",
+                "[bold]TOTAL[/bold]",
                 f"[bold]{before_count}[/bold]",
                 f"[bold {GREEN}]{total_after}[/bold {GREEN}]",
                 f"[bold {RED}]{total_removed}[/bold {RED}]",

@@ -24,7 +24,6 @@ try:
     _HAS_TERMIOS = True
 except ImportError:
     _HAS_TERMIOS = False
-from typing import Any
 
 import click
 from rich.live import Live
@@ -40,7 +39,6 @@ from bt_tap.utils.output import (
     error,
     warning,
     section,
-    summary_panel,
     CYAN,
     GREEN,
     YELLOW,
@@ -345,7 +343,7 @@ def _build_dashboard(
         payload_hex = last_crash.get("payload_hex", "")
         mutation = last_crash.get("mutation_log", "")
 
-        crash_text.append(f"  Last Crash: ", style="bold white")
+        crash_text.append("  Last Crash: ", style="bold white")
         crash_text.append(f"[{ts_short}] ", style=DIM)
         crash_text.append(f"{proto} ", style=PURPLE)
         crash_text.append(f"{ctype} ", style=YELLOW)
@@ -504,7 +502,6 @@ def _campaign_command(fuzz_group):
           bt-tap fuzz campaign --strategy targeted --capture
           bt-tap fuzz campaign --resume
         """
-        import signal
 
         # ── Session directory ─────────────────────────────────────────
         sess = get_session()
@@ -597,7 +594,7 @@ def _campaign_command(fuzz_group):
 
         # Generate full fuzzing corpus with Rich progress
         section("Generating Fuzzing Corpus")
-        results = generate_full_corpus(cam.corpus, protocols=cam.protocols, show_progress=True)
+        generate_full_corpus(cam.corpus, protocols=cam.protocols, show_progress=True)
         # Fall back to engine's builtin seeds for any protocol not covered
         for proto in cam.protocols:
             if cam.corpus.seed_count(proto) == 0:
@@ -1003,24 +1000,24 @@ def _crash_commands(fuzz_group):
         sev_style = sev_styles.get(sev, DIM)
 
         detail = Text()
-        detail.append(f"  Crash ID:      ", style="bold white")
+        detail.append("  Crash ID:      ", style="bold white")
         detail.append(f"{crash_id}\n", style=CYAN)
-        detail.append(f"  Timestamp:     ", style="bold white")
+        detail.append("  Timestamp:     ", style="bold white")
         detail.append(f"{crash.get('timestamp', 'N/A')}\n", style=DIM)
-        detail.append(f"  Target:        ", style="bold white")
+        detail.append("  Target:        ", style="bold white")
         detail.append(f"{crash.get('target_addr', 'N/A')}\n", style=PURPLE)
-        detail.append(f"  Protocol:      ", style="bold white")
+        detail.append("  Protocol:      ", style="bold white")
         detail.append(f"{crash.get('protocol', 'N/A')}\n", style=CYAN)
-        detail.append(f"  Crash Type:    ", style="bold white")
+        detail.append("  Crash Type:    ", style="bold white")
         detail.append(f"{crash.get('crash_type', 'N/A')}\n", style=YELLOW)
-        detail.append(f"  Severity:      ", style="bold white")
+        detail.append("  Severity:      ", style="bold white")
         detail.append(f"{sev}\n", style=sev_style)
-        detail.append(f"  Payload Size:  ", style="bold white")
+        detail.append("  Payload Size:  ", style="bold white")
         detail.append(f"{crash.get('payload_len', 0)} bytes\n", style="white")
         reproduced = crash.get("reproduced", 0)
         repro_label = "Yes" if reproduced else "No"
         repro_color = GREEN if reproduced else DIM
-        detail.append(f"  Reproduced:    ", style="bold white")
+        detail.append("  Reproduced:    ", style="bold white")
         detail.append(f"{repro_label}\n", style=repro_color)
 
         console.print(Panel(

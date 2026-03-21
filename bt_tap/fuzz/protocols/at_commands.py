@@ -568,7 +568,7 @@ class ATCorpus:
             corpus.append(at_cmd(f"AT+CPBR={fmt}"))
             corpus.append(at_cmd(f"AT+BRSF={fmt}"))
         # Format strings in phonebook search
-        corpus.append(at_cmd(f'AT+CPBF="%s%s%s%s%s"'))
+        corpus.append(at_cmd('AT+CPBF="%s%s%s%s%s"'))
         # Format strings in command name position
         corpus.append(at_cmd("AT+CIND%n%n%n%n"))
         corpus.append(at_cmd("AT+VGS=%x%x%x%x"))

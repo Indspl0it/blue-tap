@@ -4,7 +4,6 @@ import time
 from contextlib import contextmanager
 from datetime import datetime
 
-from rich.align import Align
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import (
@@ -92,7 +91,7 @@ def banner():
     )
     console.print(tagline, highlight=False)
     console.print(
-        "  [bt.dim]v1.5.0 │ github.com/bt-tap[/bt.dim]",
+        "  [bt.dim]v1.5.0 │ by Indspl0it[/bt.dim]",
         highlight=False,
     )
     console.print()
