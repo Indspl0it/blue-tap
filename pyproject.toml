@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "blue-tap"
-version = "1.5.0"
+version = "2.0.0"
 description = "Bluetooth/BLE Penetration Testing Toolkit for Automotive IVI Systems"
 requires-python = ">=3.10"
 dependencies = [
@@ -21,7 +21,7 @@ audio = ["pulsectl>=23.5"]
 fuzz = ["scapy>=2.5"]
 
 [project.scripts]
-blue-tap = "blue_tap.cli:main"
+blue-tap = "blue_tap.cli:cli"
 
 [tool.setuptools.packages.find]
 include = ["blue_tap*"]

@@ -65,13 +65,13 @@ def get_verbosity() -> int:
 
 # ── Banner ─────────────────────────────────────────────────────────────────
 
-_LOGO = r"""
-  [#00d4ff]██████[/#00d4ff] [#00bbee]██[/#00bbee]      [#00aadd]██[/#00aadd]   [#0099cc]██[/#0099cc] [#0088bb]██████[/#0088bb]        [#9966ff]████████[/#9966ff] [#bf5af2]█████[/#bf5af2]  [#ff3366]██████[/#ff3366]
-  [#00d4ff]██[/#00d4ff]   [#00d4ff]██[/#00d4ff] [#00bbee]██[/#00bbee]      [#00aadd]██[/#00aadd]   [#0099cc]██[/#0099cc] [#0088bb]██[/#0088bb]              [#9966ff]██[/#9966ff]    [#bf5af2]██[/#bf5af2]   [#bf5af2]██[/#bf5af2] [#ff3366]██[/#ff3366]   [#ff3366]██[/#ff3366]
-  [#00ccee]██████[/#00ccee]  [#00bbee]██[/#00bbee]      [#00aadd]██[/#00aadd]   [#0099cc]██[/#0099cc] [#0088bb]████[/#0088bb]    [#7744dd]██████[/#7744dd]    [#aa55ee]██[/#aa55ee]    [#cc44ee]███████[/#cc44ee] [#ff3366]██████[/#ff3366]
-  [#00bbdd]██[/#00bbdd]   [#00bbdd]██[/#00bbdd] [#00bbee]██[/#00bbee]      [#00aadd]██[/#00aadd]   [#0099cc]██[/#0099cc] [#0088bb]██[/#0088bb]              [#9944dd]██[/#9944dd]    [#bb44ee]██[/#bb44ee]   [#bb44ee]██[/#bb44ee] [#ff4477]██[/#ff4477]
-  [#00aacc]██████[/#00aacc]  [#00bbee]██████[/#00bbee]  [#00aadd]█████[/#00aadd]  [#0088bb]██████[/#0088bb]        [#8833cc]██[/#8833cc]    [#aa33dd]██[/#aa33dd]   [#aa33dd]██[/#aa33dd] [#ff5588]██[/#ff5588]
-"""
+_LOGO = """\
+  [bold #00d4ff]██████╗ ██╗     ██╗   ██╗███████╗[/bold #00d4ff] [bold #bf5af2]████████╗ █████╗ ██████╗[/bold #bf5af2]
+  [bold #00d4ff]██╔══██╗██║     ██║   ██║██╔════╝[/bold #00d4ff] [bold #bf5af2]╚══██╔══╝██╔══██╗██╔══██╗[/bold #bf5af2]
+  [#00ccee]██████╔╝██║     ██║   ██║█████╗[/#00ccee]   [#ff3366]   ██║   ███████║██████╔╝[/#ff3366]
+  [#00bbdd]██╔══██╗██║     ██║   ██║██╔══╝[/#00bbdd]   [#ff4477]   ██║   ██╔══██║██╔═══╝[/#ff4477]
+  [#00aacc]██████╔╝███████╗╚██████╔╝███████╗[/#00aacc] [#ff5588]   ██║   ██║  ██║██║[/#ff5588]
+  [dim]╚═════╝ ╚══════╝ ╚═════╝ ╚══════╝    ╚═╝   ╚═╝  ╚═╝╚═╝[/dim]"""
 
 _BANNER_SHOWN = False
 
@@ -81,17 +81,18 @@ def banner():
     if _BANNER_SHOWN:
         return
     _BANNER_SHOWN = True
+    console.print()
     console.print(_LOGO, highlight=False)
     tagline = (
-        "  [bt.dim]───────── [/bt.dim]"
+        "  [bt.dim]─────── [/bt.dim]"
         "[bt.cyan]Bluetooth/BLE[/bt.cyan] "
         "[bt.purple]Automotive IVI[/bt.purple] "
         "[bt.red]Pentest Toolkit[/bt.red]"
-        "[bt.dim] ─────────[/bt.dim]"
+        "[bt.dim] ───────[/bt.dim]"
     )
     console.print(tagline, highlight=False)
     console.print(
-        "  [bt.dim]v1.5.0 │ by Indspl0it[/bt.dim]",
+        "  [bt.dim]v2.0.0 │ by Indspl0it[/bt.dim]",
         highlight=False,
     )
     console.print()

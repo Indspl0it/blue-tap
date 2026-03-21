@@ -127,7 +127,7 @@ LoggedGroup.group_class = LoggedGroup
 
 
 @click.group(cls=LoggedGroup)
-@click.version_option(version="1.5.0")
+@click.version_option(version="2.0.0")
 @click.option("-v", "--verbose", count=True, help="Verbosity: -v verbose, -vv debug")
 @click.option("-s", "--session", "session_name", default=None,
               help="Session name (default: auto-generated from date/time). "
@@ -139,7 +139,7 @@ def main(verbose, session_name):
     Quick start:
       blue-tap adapter list                        # check adapters
       blue-tap scan classic                        # discover devices
-      blue-tap vulnscan AA:BB:CC:DD:EE:FF          # 16-check vuln scan
+      blue-tap vulnscan AA:BB:CC:DD:EE:FF          # vulnerability scan
       blue-tap hijack IVI_MAC PHONE_MAC            # full attack chain
 
     \b
@@ -150,9 +150,13 @@ def main(verbose, session_name):
       blue-tap session list                        # see all sessions
       blue-tap report                              # report from latest session
     """
+    import sys
     from blue_tap.utils.output import set_verbosity
     set_verbosity(verbose)
-    banner()
+
+    # Skip session creation when user is just asking for help
+    if '--help' in sys.argv or '-h' in sys.argv:
+        return
 
     # Always create a session — auto-generate name if not provided
     from blue_tap.utils.session import Session, set_session
@@ -2392,5 +2396,11 @@ def _save_json(data, filepath):
     success(f"Saved: {filepath}")
 
 
-if __name__ == "__main__":
+def cli():
+    """Entry point that shows the banner before any Click processing."""
+    banner()
     main()
+
+
+if __name__ == "__main__":
+    cli()
