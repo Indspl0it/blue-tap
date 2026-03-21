@@ -1,10 +1,10 @@
-# BT-Tap Fuzzing
+# Blue-Tap Fuzzing
 
-This document describes the current fuzzing subsystem as implemented in the repository. It is not a speculative build plan. The source of truth remains the code under `bt_tap/fuzz/`, the CLI help output, and the regression tests.
+This document describes the current fuzzing subsystem as implemented in the repository. It is not a speculative build plan. The source of truth remains the code under `blue_tap/fuzz/`, the CLI help output, and the regression tests.
 
 ## Role in the project
 
-The fuzzing subsystem exists to support practical Bluetooth protocol testing inside the same session and reporting model as the rest of BT-Tap. That means fuzzing artifacts are treated as first-class assessment evidence rather than as one-off scripts.
+The fuzzing subsystem exists to support practical Bluetooth protocol testing inside the same session and reporting model as the rest of Blue-Tap. That means fuzzing artifacts are treated as first-class assessment evidence rather than as one-off scripts.
 
 In practical terms, the fuzzing stack is designed around:
 
@@ -16,7 +16,7 @@ In practical terms, the fuzzing stack is designed around:
 
 ## Current command surface
 
-`bt-tap fuzz` currently exposes:
+`blue-tap fuzz` currently exposes:
 
 - campaign and orchestration:
   - `campaign`
@@ -45,7 +45,7 @@ The command surface is intentionally mixed. Some commands are legacy single-prot
 
 ## Implemented architecture
 
-The active fuzzing code lives under `bt_tap/fuzz/` and is split into a few distinct layers:
+The active fuzzing code lives under `blue_tap/fuzz/` and is split into a few distinct layers:
 
 - transport and execution:
   - transport helpers
@@ -102,7 +102,7 @@ The fuzzing subsystem is intentionally pragmatic and inherits the realities of L
 - adapter behavior differs by chipset and firmware
 - optional third-party tooling is not guaranteed to exist on the host
 
-This is why the project separates protocol theory from implementation reality. The protocol reference in [lessons-from-bluetooth-specifications.md](/mnt/c/Users/santh/Desktop/Projects/personal/BT-Tap/lessons-from-bluetooth-specifications.md) should be read together with the fuzzing code, not instead of it.
+This is why the project separates protocol theory from implementation reality. The protocol reference in [lessons-from-bluetooth-specifications.md](/mnt/c/Users/santh/Desktop/Projects/personal/Blue-Tap/lessons-from-bluetooth-specifications.md) should be read together with the fuzzing code, not instead of it.
 
 ## Practical expectations
 
@@ -134,10 +134,10 @@ When updating the fuzzing subsystem:
 Useful checks when touching the fuzzing stack:
 
 ```bash
-python3 -m bt_tap.cli fuzz --help
-python3 -m bt_tap.cli fuzz campaign --help
-python3 -m bt_tap.cli fuzz crashes --help
-python3 -m bt_tap.cli fuzz corpus --help
+python3 -m blue_tap.cli fuzz --help
+python3 -m blue_tap.cli fuzz campaign --help
+python3 -m blue_tap.cli fuzz crashes --help
+python3 -m blue_tap.cli fuzz corpus --help
 pytest -q
-ruff check bt_tap target
+ruff check blue_tap target
 ```

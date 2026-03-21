@@ -1,0 +1,6 @@
+<?xml version="1.0"?>
+<MAP-msg-listing version="1.0">
+  <msg handle="0016" subject="Pick up my prescription please" datetime="20260314T034315" sender_name="Tariq Thomas" sender_addressing="+15109580255" type="SMS_GSM" size="46" reception_status="complete" read="yes"/>
+  <msg handle="0017" subject="Board meeting pushed to next w" datetime="20260314T214315" sender_name="Kevin Williams" sender_addressing="+18316007072" type="SMS_GSM" size="33" reception_status="complete" read="yes"/>
+  <msg handle="0018" subject="Kids have soccer practice at 4" datetime="20260314T024315" sender_name="Kevin Williams" sender_addressing="+18316007072" type="SMS_GSM" size="30" reception_status="complete" read="yes"/>
+</MAP-msg-listing>

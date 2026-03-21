@@ -1,0 +1,5 @@
+<?xml version="1.0"?>
+<MAP-msg-listing version="1.0">
+  <msg handle="0019" subject="Oil change reminder - 3000 mil" datetime="20260309T014315" sender_name="Ananya Davis" sender_addressing="+17076440561" type="SMS_GSM" size="40" reception_status="complete" read="yes"/>
+  <msg handle="0020" subject="Love you, drive safe" datetime="20260306T014315" sender_name="Elena Clark" sender_addressing="+16501666754" type="SMS_GSM" size="20" reception_status="complete" read="yes"/>
+</MAP-msg-listing>

@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<MAP-msg-listing version="1.0">
+  <msg handle="0001" subject="Hey, are you picking up the ki" datetime="20260312T032715" sender_name="Olga Nakamura" sender_addressing="+19252065818" type="SMS_GSM" size="39" reception_status="complete" read="yes"/>
+  <msg handle="0002" subject="Running 10 min late, sorry!" datetime="20260314T060515" sender_name="Wei Martinez" sender_addressing="+16505186414" type="SMS_GSM" size="27" reception_status="complete" read="yes"/>
+  <msg handle="0003" subject="Can you grab milk on the way h" datetime="20260310T215415" sender_name="Aisha Kim" sender_addressing="+17078106422" type="SMS_GSM" size="34" reception_status="complete" read="yes"/>
+  <msg handle="0004" subject="Meeting moved to 3pm" datetime="20260313T220615" sender_name="Kevin Williams" sender_addressing="+18316007072" type="SMS_GSM" size="20" reception_status="complete" read="yes"/>
+  <msg handle="0005" subject="Happy birthday! Hope you have " datetime="20260313T070015" sender_name="Emma Johnson" sender_addressing="+17076539837" type="SMS_GSM" size="41" reception_status="complete" read="yes"/>
+  <msg handle="0006" subject="The car is making that noise a" datetime="20260312T033115" sender_name="Sarah Johnson" sender_addressing="+16506279418" type="SMS_GSM" size="34" reception_status="complete" read="yes"/>
+  <msg handle="0007" subject="Dinner reservation at 7 tonigh" datetime="20260311T025015" sender_name="Sofia Das" sender_addressing="+15101533224" type="SMS_GSM" size="31" reception_status="complete" read="yes"/>
+  <msg handle="0008" subject="Did you see the game last nigh" datetime="20260314T215915" sender_name="Nathan Jones" sender_addressing="+19255107245" type="SMS_GSM" size="32" reception_status="complete" read="no"/>
+  <msg handle="0009" subject="Flight lands at 6:45pm gate B1" datetime="20260310T055215" sender_name="Ryan White" sender_addressing="+14087751158" type="SMS_GSM" size="31" reception_status="complete" read="no"/>
+  <msg handle="0010" subject="Don't forget the dentist appoi" datetime="20260312T002115" sender_name="Sofia Das" sender_addressing="+15101533224" type="SMS_GSM" size="45" reception_status="complete" read="no"/>
+</MAP-msg-listing>

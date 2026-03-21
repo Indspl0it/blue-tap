@@ -12,10 +12,10 @@ This checklist is intentionally preserved for historical context, but it is not 
 
 ## Current Source of Truth
 
-For current BT-Tap behavior and UX/workflow expectations, use:
+For current Blue-Tap behavior and UX/workflow expectations, use:
 - root `README.md`
 - live CLI help output
-- implementation in `bt_tap/`
+- implementation in `blue_tap/`
 - tests in `tests/`
 
 If active IVI simulator work resumes, create a new status-driven document and link it from this file.

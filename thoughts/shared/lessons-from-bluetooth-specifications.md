@@ -4,15 +4,15 @@ This shared note mirrors the intent of the root `lessons-from-bluetooth-specific
 
 ## Purpose
 
-- Keep concise protocol insights useful for BT-Tap development discussions.
+- Keep concise protocol insights useful for Blue-Tap development discussions.
 - Avoid duplicating long, stale implementation claims.
 
 ## Source of Truth
 
 For actual tool capabilities and workflows, use:
 - `README.md`
-- live CLI help (`python -m bt_tap.cli --help`)
-- code/tests in `bt_tap/` and `tests/`
+- live CLI help (`python -m blue_tap.cli --help`)
+- code/tests in `blue_tap/` and `tests/`
 
 ## Rule
 

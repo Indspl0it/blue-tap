@@ -1,0 +1,40 @@
++CMGL: 1,"REC READ","+19252065818",,"26/03/12,03:27:15+00"
+Hey, are you picking up the kids today?
++CMGL: 2,"REC READ","+16505186414",,"26/03/14,06:05:15+00"
+Running 10 min late, sorry!
++CMGL: 3,"REC READ","+17078106422",,"26/03/10,21:54:15+00"
+Can you grab milk on the way home?
++CMGL: 4,"REC READ","+18316007072",,"26/03/13,22:06:15+00"
+Meeting moved to 3pm
++CMGL: 5,"REC READ","+17076539837",,"26/03/13,07:00:15+00"
+Happy birthday! Hope you have a great day
++CMGL: 6,"REC READ","+16506279418",,"26/03/12,03:31:15+00"
+The car is making that noise again
++CMGL: 7,"REC READ","+15101533224",,"26/03/11,02:50:15+00"
+Dinner reservation at 7 tonight
++CMGL: 8,"REC UNREAD","+19255107245",,"26/03/14,21:59:15+00"
+Did you see the game last night?
++CMGL: 9,"REC UNREAD","+14087751158",,"26/03/10,05:52:15+00"
+Flight lands at 6:45pm gate B12
++CMGL: 10,"REC UNREAD","+15101533224",,"26/03/12,00:21:15+00"
+Don't forget the dentist appointment tomorrow
++CMGL: 11,"REC READ","+17076440561",,"26/03/12,15:43:15+00"
+Just left the office, be there in 20
++CMGL: 12,"REC READ","+16505186414",,"26/03/15,17:43:15+00"
+Can we reschedule to Thursday?
++CMGL: 13,"REC READ","+19255107245",,"26/03/14,01:43:15+00"
+Package delivered - left at front door
++CMGL: 14,"REC READ","+16506279418",,"26/03/13,00:43:15+00"
+Thanks for lunch, it was great catching up
++CMGL: 15,"REC READ","+16506279418",,"26/03/13,15:43:15+00"
+The wifi password is BlueTooth2026
++CMGL: 16,"REC READ","+15109580255",,"26/03/14,03:43:15+00"
+Pick up my prescription please? CVS on Main St
++CMGL: 17,"REC READ","+18316007072",,"26/03/14,21:43:15+00"
+Board meeting pushed to next week
++CMGL: 18,"REC READ","+18316007072",,"26/03/14,02:43:15+00"
+Kids have soccer practice at 4
++CMGL: 19,"REC READ","+17076440561",,"26/03/09,01:43:15+00"
+Oil change reminder - 3000 miles overdue
++CMGL: 20,"REC READ","+16501666754",,"26/03/06,01:43:15+00"
+Love you, drive safe

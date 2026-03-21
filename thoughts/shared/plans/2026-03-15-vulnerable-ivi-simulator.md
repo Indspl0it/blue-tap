@@ -3,7 +3,7 @@
 Status: historical planning document.
 Date: 2026-03-15.
 
-This file is retained for planning history only and is not the source of truth for current BT-Tap functionality.
+This file is retained for planning history only and is not the source of truth for current Blue-Tap functionality.
 
 ## Why Archived
 
@@ -15,7 +15,7 @@ This file is retained for planning history only and is not the source of truth f
 
 Use these instead:
 - `README.md`
-- `python -m bt_tap.cli --help`
+- `python -m blue_tap.cli --help`
 - module code and tests
 
 If this plan is reactivated, convert it into a tracked status doc with explicit `implemented / partial / pending` markers.

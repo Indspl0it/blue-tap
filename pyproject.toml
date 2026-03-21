@@ -3,7 +3,7 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "bt-tap"
+name = "blue-tap"
 version = "1.5.0"
 description = "Bluetooth/BLE Penetration Testing Toolkit for Automotive IVI Systems"
 requires-python = ">=3.10"
@@ -21,10 +21,10 @@ audio = ["pulsectl>=23.5"]
 fuzz = ["scapy>=2.5"]
 
 [project.scripts]
-bt-tap = "bt_tap.cli:main"
+blue-tap = "blue_tap.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["bt_tap*"]
+include = ["blue_tap*"]
 
 [tool.ruff]
 line-length = 120

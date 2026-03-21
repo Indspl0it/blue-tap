@@ -1,0 +1,8 @@
+<?xml version="1.0"?>
+<MAP-msg-listing version="1.0">
+  <msg handle="0011" subject="Just left the office, be there" datetime="20260312T154315" sender_name="Ananya Davis" sender_addressing="+17076440561" type="SMS_GSM" size="36" reception_status="complete" read="yes"/>
+  <msg handle="0012" subject="Can we reschedule to Thursday?" datetime="20260315T174315" sender_name="Wei Martinez" sender_addressing="+16505186414" type="SMS_GSM" size="30" reception_status="complete" read="yes"/>
+  <msg handle="0013" subject="Package delivered - left at fr" datetime="20260314T014315" sender_name="Nathan Jones" sender_addressing="+19255107245" type="SMS_GSM" size="38" reception_status="complete" read="yes"/>
+  <msg handle="0014" subject="Thanks for lunch, it was great" datetime="20260313T004315" sender_name="Sarah Johnson" sender_addressing="+16506279418" type="SMS_GSM" size="42" reception_status="complete" read="yes"/>
+  <msg handle="0015" subject="The wifi password is BlueTooth" datetime="20260313T154315" sender_name="Sarah Johnson" sender_addressing="+16506279418" type="SMS_GSM" size="34" reception_status="complete" read="yes"/>
+</MAP-msg-listing>

@@ -1,4 +1,4 @@
-# Bluetooth Protocol Lessons for BT-Tap Fuzzing
+# Bluetooth Protocol Lessons for Blue-Tap Fuzzing
 
 This file exists as a protocol reference for the fuzzing subsystem. Its job is to capture byte-level and framing-level lessons that are useful when building or reviewing protocol-aware mutations. It is not a changelog, not a release note, and not a substitute for reading the implementation.
 
@@ -20,13 +20,13 @@ Do not use this file as the source of truth for:
 - session or workflow behavior
 - report output behavior
 - optional dependency support
-- whether a given protocol vector is fully implemented in BT-Tap today
+- whether a given protocol vector is fully implemented in Blue-Tap today
 
 Those questions belong to:
 
-- [README.md](/mnt/c/Users/santh/Desktop/Projects/personal/BT-Tap/README.md)
-- [fuzzer-implementation-plan.md](/mnt/c/Users/santh/Desktop/Projects/personal/BT-Tap/fuzzer-implementation-plan.md)
-- the code under `bt_tap/`
+- [README.md](/mnt/c/Users/santh/Desktop/Projects/personal/Blue-Tap/README.md)
+- [fuzzer-implementation-plan.md](/mnt/c/Users/santh/Desktop/Projects/personal/Blue-Tap/fuzzer-implementation-plan.md)
+- the code under `blue_tap/`
 - the live CLI help output
 
 ## Implementation boundary
@@ -39,7 +39,7 @@ In particular, not every mutation that is valid at the specification level is re
 - raw HCI access
 - external tooling
 - firmware assistance
-- or an explicit unsupported-path decision in BT-Tap
+- or an explicit unsupported-path decision in Blue-Tap
 
 That boundary should be documented honestly. If implementation diverges from protocol theory, the code and tests win.
 
