@@ -1,10 +1,11 @@
-# Blue-Tap
+<p align="center">
+  <img src="assets/banner.svg" alt="Blue-Tap Banner" width="100%"/>
+</p>
 
-**Bluetooth/BLE Penetration Testing Toolkit for Automotive IVI Systems**
-
-**Author:** Santhosh Ballikonda ([@Indspl0it](https://github.com/Indspl0it))
-**Version:** 2.0.0 | **Python:** 3.10+ | **Platform:** Linux (Kali, Ubuntu, Raspberry Pi)
-**License:** [GNU General Public License v3.0](LICENSE)
+<p align="center">
+  <b>Bluetooth/BLE Penetration Testing Toolkit for Automotive IVI Systems</b><br/>
+  <sub>by <a href="https://github.com/Indspl0it">Santhosh Ballikonda</a> · v2.0.0 · Python 3.10+ · Linux · <a href="LICENSE">GPLv3</a></sub>
+</p>
 
 ---
 
