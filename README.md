@@ -2,7 +2,9 @@
 
 **Bluetooth/BLE Penetration Testing Toolkit for Automotive IVI Systems**
 
-Version 2.0.0 | Python 3.10+ | Linux (Kali, Ubuntu, Raspberry Pi)
+**Author:** Santhosh Ballikonda ([@Indspl0it](https://github.com/Indspl0it))
+**Version:** 2.0.0 | **Python:** 3.10+ | **Platform:** Linux (Kali, Ubuntu, Raspberry Pi)
+**License:** [GNU General Public License v3.0](LICENSE)
 
 ---
 
@@ -1270,6 +1272,18 @@ sudo apt install -y bluez bluez-tools python3-pip python3-dev \
 
 ---
 
+## License
+
+Blue-Tap is licensed under the **GNU General Public License v3.0** — see the [LICENSE](LICENSE) file for details.
+
+Copyright (C) 2026 Santhosh Ballikonda
+
+This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+---
+
 ## Legal Disclaimer
 
 Blue-Tap is provided for **authorized security testing and research purposes only**.
@@ -1281,3 +1295,9 @@ Blue-Tap is provided for **authorized security testing and research purposes onl
 - Report vulnerabilities responsibly to the affected manufacturer
 
 **Responsible disclosure:** If you discover vulnerabilities in production IVI systems using Blue-Tap, follow coordinated disclosure practices. Contact the vehicle manufacturer's PSIRT (Product Security Incident Response Team) before public disclosure.
+
+---
+
+## Author
+
+**Santhosh Ballikonda** — [@Indspl0it](https://github.com/Indspl0it)
