@@ -98,23 +98,15 @@
       <path d="M-18,-35 Q-40,0 -18,35" fill="none" stroke="#00d4ff" stroke-width="1.5"/>
     </g>
 
-    <!-- Main title: BLUE -->
-    <text x="360" y="145" font-family="'Segoe UI', 'SF Pro Display', 'Helvetica Neue', Arial, sans-serif"
-          font-size="80" font-weight="800" letter-spacing="-2" fill="url(#blueGrad)" filter="url(#glow)">
-      BLUE
-    </text>
-
-    <!-- Separator dash -->
-    <text x="628" y="145" font-family="'Segoe UI', 'SF Pro Display', 'Helvetica Neue', Arial, sans-serif"
-          font-size="80" font-weight="300" fill="#444466">
-      -
-    </text>
-
-    <!-- Main title: TAP -->
-    <text x="665" y="145" font-family="'Segoe UI', 'SF Pro Display', 'Helvetica Neue', Arial, sans-serif"
-          font-size="80" font-weight="800" letter-spacing="-2" fill="url(#tapGrad)" filter="url(#glow)">
-      TAP
-    </text>
+    <!-- Main title: BLUE-TAP as single text group, centered -->
+    <g text-anchor="middle" transform="translate(600, 145)">
+      <text x="-135" font-family="'Segoe UI', 'SF Pro Display', 'Helvetica Neue', Arial, sans-serif"
+            font-size="80" font-weight="800" letter-spacing="-2" fill="url(#blueGrad)" filter="url(#glow)">BLUE</text>
+      <text x="28" font-family="'Segoe UI', 'SF Pro Display', 'Helvetica Neue', Arial, sans-serif"
+            font-size="80" font-weight="300" fill="#444466" text-anchor="middle">-</text>
+      <text x="135" font-family="'Segoe UI', 'SF Pro Display', 'Helvetica Neue', Arial, sans-serif"
+            font-size="80" font-weight="800" letter-spacing="-2" fill="url(#tapGrad)" filter="url(#glow)" text-anchor="end">TAP</text>
+    </g>
 
     <!-- Tagline -->
     <text x="600" y="185" font-family="'Segoe UI', 'SF Pro Display', 'Helvetica Neue', Arial, sans-serif"

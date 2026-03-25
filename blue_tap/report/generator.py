@@ -1,83 +1,150 @@
 """Pentest report generation for Blue-Tap.
 
-Generates HTML or JSON reports from attack session data including scan results,
-vulnerability findings, PBAP/MAP dumps, fuzzing campaigns, and analysis notes.
+Generates professional HTML or JSON reports from attack session data including
+scan results, vulnerability findings, PBAP/MAP dumps, fuzzing campaigns, and
+analysis notes.  All charts use inline SVG (no JS dependencies).
 """
 
+import hashlib
+import html as _html_mod
 import json
+import math
 import os
 import shutil
 from datetime import datetime
 
 from blue_tap.utils.output import info, success, error
 
+try:
+    from blue_tap import __version__
+except ImportError:
+    __version__ = "unknown"
 
-# Inline HTML template (avoids Jinja2 dependency)
-_HTML_TEMPLATE = """<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Blue-Tap Pentest Report</title>
-<style>
-  body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-         max-width: 900px; margin: 0 auto; padding: 20px; background: #1a1a2e; color: #e0e0e0; }}
-  h1 {{ color: #00d4ff; border-bottom: 2px solid #00d4ff; padding-bottom: 10px; }}
-  h2 {{ color: #ff6b6b; margin-top: 30px; }}
-  h3 {{ color: #ffd93d; }}
-  .meta {{ color: #888; font-size: 0.9em; }}
-  table {{ border-collapse: collapse; width: 100%; margin: 10px 0; }}
-  th, td {{ border: 1px solid #333; padding: 8px; text-align: left; }}
-  th {{ background: #16213e; color: #00d4ff; }}
-  tr:nth-child(even) {{ background: #16213e; }}
-  .vuln-high {{ color: #ff4444; font-weight: bold; }}
-  .vuln-medium {{ color: #ffaa00; }}
-  .vuln-low {{ color: #88cc00; }}
-  .vuln-info {{ color: #4488ff; }}
-  h4 {{ color: #ccc; margin-top: 15px; }}
-  pre {{ background: #16213e; padding: 10px; border-radius: 4px; overflow-x: auto; }}
-  .section {{ margin: 20px 0; padding: 15px; border: 1px solid #333; border-radius: 8px; }}
-  .summary {{ background: #16213e; padding: 15px; border-radius: 8px; margin: 20px 0; }}
-  .crash-card {{ border-left: 4px solid #ff4444; padding: 10px; margin: 15px 0; background: #1a1a30; }}
-  .crash-card.high {{ border-left-color: #ff6b35; }}
-  .crash-card.medium {{ border-left-color: #ffaa00; }}
-  .hexdump {{ font-family: 'Courier New', monospace; font-size: 12px; line-height: 1.4; }}
-  .evidence-list {{ list-style: none; padding: 0; }}
-  .evidence-list li::before {{ content: "\\01F4CE "; }}
-  .reproduced-yes {{ color: #00ff9f; }}
-  .reproduced-no {{ color: #ff4444; }}
-  .crash-rate {{ font-size: 0.85em; color: #888; }}
-  .severity-critical {{ background: #ff4444; color: #fff; padding: 2px 6px; border-radius: 3px; font-weight: bold; }}
-  .severity-high {{ background: #ff6b35; color: #fff; padding: 2px 6px; border-radius: 3px; font-weight: bold; }}
-  .severity-medium {{ background: #ffaa00; color: #000; padding: 2px 6px; border-radius: 3px; }}
-  .severity-low {{ background: #88cc00; color: #000; padding: 2px 6px; border-radius: 3px; }}
-  .severity-info {{ background: #4488ff; color: #fff; padding: 2px 6px; border-radius: 3px; }}
-  .fuzz-stat {{ display: inline-block; margin: 5px 15px 5px 0; }}
-  .fuzz-stat .value {{ font-size: 1.4em; font-weight: bold; color: #00d4ff; }}
-  .fuzz-stat .label {{ font-size: 0.85em; color: #888; }}
-  .mono {{ font-family: 'Courier New', monospace; }}
-</style>
-</head>
-<body>
-<h1>Blue-Tap Pentest Report</h1>
-<p class="meta">Generated: {generated} | Tool: Blue-Tap {version}</p>
 
-{content}
+# ---------------------------------------------------------------------------
+# SVG chart helpers (pure SVG, no JS)
+# ---------------------------------------------------------------------------
 
-</body>
-</html>"""
+_SEVERITY_COLORS = {
+    "CRITICAL": "#ff4444",
+    "HIGH": "#ff6b35",
+    "MEDIUM": "#ffaa00",
+    "LOW": "#88cc00",
+    "INFO": "#4488ff",
+    "UNKNOWN": "#666",
+}
 
+
+def _svg_donut_chart(data: dict[str, int], colors: dict[str, str],
+                     size: int = 180, hole: float = 0.6) -> str:
+    """Render an SVG donut chart.  *data* maps label -> count."""
+    total = sum(data.values())
+    if total == 0:
+        return ""
+
+    cx = cy = size / 2
+    r = (size / 2) * 0.85
+    circumference = 2 * math.pi * r
+    segments: list[str] = []
+    offset = 0.0
+
+    for label, count in data.items():
+        if count == 0:
+            continue
+        pct = count / total
+        dash = pct * circumference
+        gap = circumference - dash
+        color = colors.get(label, "#666")
+        segments.append(
+            f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="none" '
+            f'stroke="{color}" stroke-width="{r * (1 - hole)}" '
+            f'stroke-dasharray="{dash:.2f} {gap:.2f}" '
+            f'stroke-dashoffset="{-offset:.2f}" />'
+        )
+        offset += dash
+
+    # center label
+    segments.append(
+        f'<text x="{cx}" y="{cy - 6}" text-anchor="middle" '
+        f'fill="#e0e0e0" font-size="22" font-weight="bold">{total}</text>'
+    )
+    segments.append(
+        f'<text x="{cx}" y="{cy + 14}" text-anchor="middle" '
+        f'fill="#888" font-size="11">TOTAL</text>'
+    )
+
+    # legend
+    legend_y = size + 8
+    legend_items: list[str] = []
+    lx = 4
+    for label, count in data.items():
+        if count == 0:
+            continue
+        color = colors.get(label, "#666")
+        legend_items.append(
+            f'<rect x="{lx}" y="{legend_y}" width="10" height="10" '
+            f'rx="2" fill="{color}"/>'
+            f'<text x="{lx + 14}" y="{legend_y + 9}" fill="#ccc" '
+            f'font-size="10">{_esc(label)} ({count})</text>'
+        )
+        lx += len(label) * 7 + 46
+
+    svg_h = size + 28
+    lines = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" '
+        f'width="{max(size, lx + 10)}" height="{svg_h}" '
+        f'viewBox="0 0 {max(size, lx + 10)} {svg_h}">',
+        *segments,
+        *legend_items,
+        "</svg>",
+    ]
+    return "\n".join(lines)
+
+
+def _svg_bar_chart(data: dict[str, int], color: str = "#00d4ff",
+                   width: int = 420, bar_height: int = 26) -> str:
+    """Render an SVG horizontal bar chart."""
+    if not data:
+        return ""
+
+    max_val = max(data.values()) or 1
+    label_width = max(len(k) for k in data) * 8 + 10
+    chart_w = width - label_width - 50
+    total_h = len(data) * (bar_height + 6) + 4
+
+    bars: list[str] = []
+    y = 4
+    for label, val in data.items():
+        bw = max(2, (val / max_val) * chart_w)
+        bars.append(
+            f'<text x="{label_width - 4}" y="{y + bar_height * 0.7}" '
+            f'text-anchor="end" fill="#ccc" font-size="11">{_esc(label)}</text>'
+        )
+        bars.append(
+            f'<rect x="{label_width}" y="{y}" width="{bw:.1f}" '
+            f'height="{bar_height}" rx="3" fill="{color}" opacity="0.85"/>'
+        )
+        bars.append(
+            f'<text x="{label_width + bw + 6}" y="{y + bar_height * 0.7}" '
+            f'fill="#e0e0e0" font-size="11" font-weight="bold">{val}</text>'
+        )
+        y += bar_height + 6
+
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" '
+        f'width="{width}" height="{total_h}" '
+        f'viewBox="0 0 {width} {total_h}">\n'
+        + "\n".join(bars)
+        + "\n</svg>"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Hex dump formatter
+# ---------------------------------------------------------------------------
 
 def _format_hexdump(data_hex: str, bytes_per_line: int = 16) -> str:
-    """Format a hex string as a traditional hexdump with offset, hex, and ASCII columns.
-
-    Args:
-        data_hex: Hex-encoded data string (e.g. "80001a10...").
-        bytes_per_line: Number of bytes per line (default 16).
-
-    Returns:
-        Formatted hexdump string.
-    """
+    """Format a hex string as a traditional hexdump with offset, hex, and ASCII."""
     try:
         raw = bytes.fromhex(data_hex)
     except (ValueError, TypeError):
@@ -89,36 +156,169 @@ def _format_hexdump(data_hex: str, bytes_per_line: int = 16) -> str:
     lines = ["Offset  Hex                                              ASCII"]
     for offset in range(0, len(raw), bytes_per_line):
         chunk = raw[offset:offset + bytes_per_line]
-        hex_part = " ".join(f"{b:02x}" for b in chunk)
-        # Pad hex part to fixed width
-        hex_part = hex_part.ljust(bytes_per_line * 3 - 1)
+        hex_part = " ".join(f"{b:02x}" for b in chunk).ljust(bytes_per_line * 3 - 1)
         ascii_part = "".join(chr(b) if 32 <= b < 127 else "." for b in chunk)
         lines.append(f"{offset:04x}    {hex_part}  {ascii_part}")
     return "\n".join(lines)
 
 
+def _esc(text: str) -> str:
+    """Escape HTML special characters including single quotes."""
+    return _html_mod.escape(str(text), quote=True)
+
+
+def _risk_rating(vuln_findings: list[dict], fuzz_crashes: list[dict]) -> str:
+    """Compute overall risk rating from findings and crashes."""
+    all_sevs = [f.get("severity", "").upper() for f in vuln_findings]
+    all_sevs += [c.get("severity", "").upper() for c in fuzz_crashes]
+    for level in ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"):
+        if level in all_sevs:
+            return level
+    return "INFO"
+
+
+# ---------------------------------------------------------------------------
+# HTML Template
+# ---------------------------------------------------------------------------
+
+_CSS = """
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+       max-width: 960px; margin: 0 auto; padding: 24px; background: #0f0f1a; color: #d8d8e8; line-height: 1.6; }
+h1 { color: #00d4ff; font-size: 1.8em; border-bottom: 2px solid #00d4ff; padding-bottom: 10px; margin-top: 0; }
+h2 { color: #ff6b6b; margin-top: 36px; font-size: 1.35em; border-bottom: 1px solid #333; padding-bottom: 6px; }
+h3 { color: #ffd93d; font-size: 1.1em; }
+h4 { color: #ccc; font-size: 1em; margin-top: 14px; }
+h5 { color: #aaa; font-size: 0.95em; margin-bottom: 4px; }
+a { color: #00d4ff; text-decoration: none; }
+a:hover { text-decoration: underline; }
+p { margin: 6px 0; }
+pre { background: #16213e; padding: 12px; border-radius: 6px; overflow-x: auto; font-size: 12px; line-height: 1.5; }
+code { background: #16213e; padding: 2px 5px; border-radius: 3px; font-size: 0.9em; }
+table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 0.9em; }
+th, td { border: 1px solid #2a2a40; padding: 8px 10px; text-align: left; }
+th { background: #16213e; color: #00d4ff; font-weight: 600; }
+tr:nth-child(even) { background: #12122a; }
+tr:hover { background: #1a1a3a; }
+.header { text-align: center; margin-bottom: 30px; }
+.header .version { color: #888; font-size: 0.85em; }
+.header .classification { color: #ff6b6b; font-weight: bold; font-size: 0.85em;
+    border: 1px solid #ff6b6b; padding: 3px 12px; display: inline-block; margin-top: 8px; border-radius: 4px; }
+.meta { color: #888; font-size: 0.85em; margin: 4px 0; }
+.section { margin: 24px 0; padding: 18px; border: 1px solid #2a2a40; border-radius: 10px; background: #111122; }
+.summary { background: #16213e; padding: 18px; border-radius: 10px; margin: 20px 0; }
+.toc { background: #111122; border: 1px solid #2a2a40; padding: 16px 24px; border-radius: 10px; margin: 20px 0; }
+.toc ol { padding-left: 20px; }
+.toc li { margin: 4px 0; }
+.toc a { color: #00d4ff; }
+.risk-badge { display: inline-block; padding: 8px 24px; border-radius: 6px; font-size: 1.3em;
+    font-weight: bold; text-transform: uppercase; letter-spacing: 1px; }
+.risk-CRITICAL { background: #ff4444; color: #fff; }
+.risk-HIGH { background: #ff6b35; color: #fff; }
+.risk-MEDIUM { background: #ffaa00; color: #000; }
+.risk-LOW { background: #88cc00; color: #000; }
+.risk-INFO { background: #4488ff; color: #fff; }
+.metric-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 14px; margin: 16px 0; }
+.metric-card { background: #111122; border: 1px solid #2a2a40; border-radius: 8px; padding: 14px; text-align: center; }
+.metric-card .value { font-size: 1.8em; font-weight: bold; color: #00d4ff; }
+.metric-card .label { font-size: 0.8em; color: #888; margin-top: 4px; }
+.chart-row { display: flex; gap: 24px; flex-wrap: wrap; align-items: flex-start; margin: 16px 0; }
+.finding-card { border-left: 4px solid #2a2a40; padding: 14px; margin: 14px 0; background: #111128; border-radius: 0 8px 8px 0; }
+.finding-card.sev-CRITICAL { border-left-color: #ff4444; }
+.finding-card.sev-HIGH { border-left-color: #ff6b35; }
+.finding-card.sev-MEDIUM { border-left-color: #ffaa00; }
+.finding-card.sev-LOW { border-left-color: #88cc00; }
+.finding-card.sev-INFO { border-left-color: #4488ff; }
+.evidence-block { background: #0d0d1a; border: 1px solid #333; border-radius: 6px; padding: 10px 14px; margin: 8px 0; }
+.evidence-block .ev-label { color: #ffd93d; font-size: 0.85em; font-weight: 600; margin-bottom: 4px; }
+.crash-card { border-left: 4px solid #ff4444; padding: 12px; margin: 14px 0; background: #1a1a30; border-radius: 0 8px 8px 0; }
+.crash-card.high { border-left-color: #ff6b35; }
+.crash-card.medium { border-left-color: #ffaa00; }
+.hexdump { font-family: 'Courier New', monospace; font-size: 11px; line-height: 1.4; }
+.severity-badge { padding: 2px 8px; border-radius: 4px; font-weight: bold; font-size: 0.85em; display: inline-block; }
+.severity-CRITICAL { background: #ff4444; color: #fff; }
+.severity-HIGH { background: #ff6b35; color: #fff; }
+.severity-MEDIUM { background: #ffaa00; color: #000; }
+.severity-LOW { background: #88cc00; color: #000; }
+.severity-INFO { background: #4488ff; color: #fff; }
+.status-confirmed { color: #ff4444; }
+.status-potential { color: #ffaa00; }
+.status-unverified { color: #4488ff; }
+.reproduced-yes { color: #00ff9f; font-weight: bold; }
+.reproduced-no { color: #ff4444; }
+.tag { display: inline-block; background: #1a1a3a; border: 1px solid #333; padding: 1px 8px;
+    border-radius: 12px; font-size: 0.8em; color: #aaa; margin: 2px; }
+.timeline-table td:first-child { white-space: nowrap; color: #888; font-family: monospace; font-size: 0.85em; }
+.fuzz-stat { display: inline-block; margin: 5px 15px 5px 0; }
+.fuzz-stat .value { font-size: 1.4em; font-weight: bold; color: #00d4ff; }
+.fuzz-stat .label { font-size: 0.85em; color: #888; }
+.mono { font-family: 'Courier New', monospace; }
+.evidence-list { list-style: none; padding: 0; }
+.evidence-list li { padding: 3px 0; }
+.evidence-list li::before { content: "\\1F4CE "; }
+.footer { text-align: center; color: #555; font-size: 0.8em; margin-top: 40px; padding-top: 16px; border-top: 1px solid #222; }
+@media print {
+    body { background: #fff; color: #222; max-width: 100%; }
+    .section, .summary, .toc { border-color: #ccc; background: #fafafa; }
+    h1 { color: #003366; border-bottom-color: #003366; }
+    h2 { color: #cc0000; }
+    th { background: #eee; color: #003366; }
+    tr:nth-child(even) { background: #f5f5f5; }
+    .metric-card { border-color: #ccc; background: #f9f9f9; }
+    .metric-card .value { color: #003366; }
+    .header .classification { color: #cc0000; border-color: #cc0000; }
+    pre { background: #f5f5f5; border: 1px solid #ccc; }
+}
+"""
+
+_HTML_TEMPLATE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Blue-Tap Pentest Report</title>
+<style>
+{css}
+</style>
+</head>
+<body>
+{content}
+</body>
+</html>"""
+
+
+# ---------------------------------------------------------------------------
+# Report Generator
+# ---------------------------------------------------------------------------
+
 class ReportGenerator:
     """Generates pentest reports from Blue-Tap session data."""
 
     def __init__(self):
-        self.scan_results = []
-        self.vuln_findings = []
-        self.pbap_results = {}
-        self.map_results = {}
-        self.attack_results = {}
-        self.recon_results = []
-        self.fuzz_results = []
-        self.dos_results = []
-        self.fingerprint_results = {}
-        self.audio_captures = []
-        self.other_data = {}
-        self.notes = []
+        self.scan_results: list[dict] = []
+        self.vuln_findings: list[dict] = []
+        self.pbap_results: dict = {}
+        self.map_results: dict = {}
+        self.attack_results: dict = {}
+        self.recon_results: list[dict] = []
+        self.fuzz_results: list = []
+        self.dos_results: list = []
+        self.fingerprint_results: dict = {}
+        self.audio_captures: list[dict] = []
+        self.other_data: dict = {}
+        self.notes: list[str] = []
         # Structured fuzz campaign data
-        self._fuzz_campaign_stats = {}
-        self._fuzz_crashes = []
-        self._fuzz_evidence_dir = ""
-        self._fuzz_corpus_stats = {}
-        self._fuzz_evidence_files = []
+        self._fuzz_campaign_stats: dict = {}
+        self._fuzz_crashes: list[dict] = []
+        self._fuzz_evidence_dir: str = ""
+        self._fuzz_corpus_stats: dict = {}
+        self._fuzz_evidence_files: list[tuple] = []
+        # Session metadata for timeline/scope
+        self._session_metadata: dict = {}
+
+    # ------------------------------------------------------------------
+    # Data intake (public API — signatures must not change)
+    # ------------------------------------------------------------------
 
     def add_scan_results(self, devices: list[dict]):
         self.scan_results.extend(devices)
@@ -155,31 +355,23 @@ class ReportGenerator:
     def add_note(self, note: str):
         self.notes.append(note)
 
+    def add_session_metadata(self, metadata: dict) -> None:
+        """Store session metadata for timeline, scope, and methodology sections."""
+        self._session_metadata = metadata
+
     def add_fuzz_campaign_results(self, campaign_stats: dict, crashes: list[dict],
                                    evidence_dir: str = "") -> None:
-        """Add detailed fuzzing campaign results with evidence.
-
-        Args:
-            campaign_stats: Dict with runtime, packets_sent, crashes, protocols, strategy, etc.
-            crashes: List of crash dicts from CrashDB (each has payload_hex, protocol,
-                     crash_type, severity, mutation_log, response_hex, timestamp, reproduced)
-            evidence_dir: Path to evidence directory (pcaps, crash payloads)
-        """
+        """Add detailed fuzzing campaign results with evidence."""
         self._fuzz_campaign_stats = campaign_stats
         self._fuzz_crashes = crashes
         self._fuzz_evidence_dir = evidence_dir
 
-    def load_fuzz_from_session(self, session_dir: str) -> None:
-        """Auto-load fuzzing data from a session's fuzz/ subdirectory.
+    # ------------------------------------------------------------------
+    # Session / fuzz data loaders
+    # ------------------------------------------------------------------
 
-        Looks for:
-        - fuzz/crashes.db -- loads all crashes
-        - fuzz/campaign_state.json -- loads campaign stats
-        - fuzz/campaign_stats.json -- loads final stats
-        - fuzz/corpus/ -- counts seeds per protocol
-        - fuzz/capture.btsnoop -- notes pcap location
-        - fuzz/<protocol>_crashes.db -- per-protocol crash DBs from targeted commands
-        """
+    def load_fuzz_from_session(self, session_dir: str) -> None:
+        """Auto-load fuzzing data from a session's fuzz/ subdirectory."""
         fuzz_dir = os.path.join(session_dir, "fuzz")
         if not os.path.isdir(fuzz_dir):
             return
@@ -207,7 +399,7 @@ class ReportGenerator:
                     self._fuzz_crashes = db.get_crashes()
                 info(f"Loaded {len(self._fuzz_crashes)} crashes from crashes.db")
             except ImportError:
-                error("blue_tap.fuzz.crash_db not available — fuzzing module not installed")
+                error("blue_tap.fuzz.crash_db not available")
             except (OSError, ValueError) as exc:
                 info(f"Could not load crashes.db: {exc}")
 
@@ -219,7 +411,6 @@ class ReportGenerator:
                     from blue_tap.fuzz.crash_db import CrashDB
                     with CrashDB(proto_db_path) as db:
                         proto_crashes = db.get_crashes()
-                        # Deduplicate by payload_hash (skip None hashes to avoid dropping data)
                         existing_hashes = {c.get("payload_hash") for c in self._fuzz_crashes
                                            if c.get("payload_hash") is not None}
                         for crash in proto_crashes:
@@ -242,7 +433,6 @@ class ReportGenerator:
                                  if os.path.isfile(os.path.join(proto_corpus, f))])
                     self._fuzz_corpus_stats[entry] = count
                 elif os.path.isfile(proto_corpus):
-                    # Seeds directly in corpus dir
                     self._fuzz_corpus_stats.setdefault("_root", 0)
                     self._fuzz_corpus_stats["_root"] += 1
 
@@ -262,25 +452,12 @@ class ReportGenerator:
 
         self._fuzz_evidence_files = evidence_files
 
+    # ------------------------------------------------------------------
+    # Evidence package
+    # ------------------------------------------------------------------
+
     def generate_evidence_package(self, session_dir: str, output_dir: str) -> str:
-        """Generate an evidence package directory with all fuzz artifacts.
-
-        Creates:
-        output_dir/
-          evidence_manifest.json      -- index of all evidence files
-          crashes/
-            crash_001_<protocol>.bin  -- raw crash payload bytes
-            crash_001_<protocol>.txt  -- human-readable description
-          pcaps/
-            campaign_capture.btsnoop  -- full campaign pcap (copied)
-            replay_001.btsnoop        -- individual crash replay pcaps
-          corpus/
-            protocol_seed_counts.json -- corpus statistics
-          stats/
-            campaign_stats.json       -- campaign statistics
-
-        Returns path to evidence_manifest.json
-        """
+        """Generate an evidence package directory with all fuzz artifacts."""
         os.makedirs(output_dir, exist_ok=True)
         crashes_dir = os.path.join(output_dir, "crashes")
         pcaps_dir = os.path.join(output_dir, "pcaps")
@@ -292,7 +469,6 @@ class ReportGenerator:
         fuzz_dir = os.path.join(session_dir, "fuzz")
         manifest_crashes = []
 
-        # If we haven't loaded yet, do so now
         if not self._fuzz_crashes and not self._fuzz_campaign_stats:
             self.load_fuzz_from_session(session_dir)
 
@@ -302,21 +478,14 @@ class ReportGenerator:
             bin_name = f"crash_{i:03d}_{protocol}.bin"
             txt_name = f"crash_{i:03d}_{protocol}.txt"
 
-            # Write binary payload
             payload_hex = crash.get("payload_hex", "")
-            if not payload_hex:
-                info(f"Crash #{i}: empty payload, skipping .bin export")
-            else:
+            if payload_hex:
                 try:
-                    payload_bytes = bytes.fromhex(payload_hex)
                     with open(os.path.join(crashes_dir, bin_name), "wb") as f:
-                        f.write(payload_bytes)
-                except ValueError:
-                    error(f"Crash #{i}: invalid hex in payload, skipping .bin export")
-                except OSError as exc:
+                        f.write(bytes.fromhex(payload_hex))
+                except (ValueError, OSError) as exc:
                     error(f"Crash #{i}: could not write {bin_name}: {exc}")
 
-            # Write human-readable description
             desc_lines = [
                 f"Crash #{i}",
                 f"Severity: {crash.get('severity', 'UNKNOWN')}",
@@ -326,12 +495,9 @@ class ReportGenerator:
                 f"Payload Size: {crash.get('payload_len', len(payload_hex) // 2)} bytes",
                 f"Reproduced: {'Yes' if crash.get('reproduced') else 'No'}",
                 f"Target: {crash.get('target_addr', 'N/A')}",
-                "",
-                "Mutation Log:",
+                "", "Mutation Log:",
                 crash.get("mutation_log", "(none)") or "(none)",
-                "",
-                "Payload Hexdump:",
-                _format_hexdump(payload_hex),
+                "", "Payload Hexdump:", _format_hexdump(payload_hex),
             ]
             response_hex = crash.get("response_hex", "")
             if response_hex:
@@ -339,7 +505,6 @@ class ReportGenerator:
             notes = crash.get("notes", "")
             if notes:
                 desc_lines.extend(["", "Notes:", notes])
-
             try:
                 with open(os.path.join(crashes_dir, txt_name), "w") as f:
                     f.write("\n".join(desc_lines))
@@ -347,13 +512,11 @@ class ReportGenerator:
                 pass
 
             manifest_crashes.append({
-                "id": i,
-                "severity": crash.get("severity", "UNKNOWN"),
+                "id": i, "severity": crash.get("severity", "UNKNOWN"),
                 "protocol": crash.get("protocol", "unknown"),
                 "crash_type": crash.get("crash_type", "unknown"),
                 "payload_file": f"crashes/{bin_name}",
                 "description_file": f"crashes/{txt_name}",
-                "payload_hex": payload_hex[:64] + ("..." if len(payload_hex) > 64 else ""),
                 "reproduced": bool(crash.get("reproduced")),
                 "timestamp": crash.get("timestamp", ""),
             })
@@ -369,32 +532,25 @@ class ReportGenerator:
             except OSError:
                 pass
 
-        # Copy replay pcaps if they exist
         evidence_subdir = os.path.join(fuzz_dir, "evidence")
         if os.path.isdir(evidence_subdir):
             for fname in sorted(os.listdir(evidence_subdir)):
                 if fname.endswith(".btsnoop"):
-                    src = os.path.join(evidence_subdir, fname)
-                    dst = os.path.join(pcaps_dir, fname)
                     try:
-                        shutil.copy2(src, dst)
+                        shutil.copy2(os.path.join(evidence_subdir, fname),
+                                     os.path.join(pcaps_dir, fname))
                         pcap_files.append(f"pcaps/{fname}")
                     except OSError:
                         pass
 
-        # Write corpus statistics
-        corpus_stats = self._fuzz_corpus_stats or {}
-        if not corpus_stats:
-            # Derive from campaign stats protocol_breakdown
-            breakdown = self._fuzz_campaign_stats.get("protocol_breakdown", {})
-            corpus_stats = breakdown
+        # Corpus stats
+        corpus_stats = self._fuzz_corpus_stats or self._fuzz_campaign_stats.get("protocol_breakdown", {})
         try:
             with open(os.path.join(corpus_dir, "protocol_seed_counts.json"), "w") as f:
                 json.dump(corpus_stats, f, indent=2)
         except OSError:
             pass
 
-        # Write campaign stats
         if self._fuzz_campaign_stats:
             try:
                 with open(os.path.join(stats_dir, "campaign_stats.json"), "w") as f:
@@ -402,10 +558,9 @@ class ReportGenerator:
             except OSError:
                 pass
 
-        # Build manifest
         manifest = {
             "generated": datetime.now().isoformat(),
-            "tool": "Blue-Tap Fuzzer",
+            "tool": f"Blue-Tap v{__version__}",
             "target": self._fuzz_campaign_stats.get("target", ""),
             "campaign": {
                 "duration_seconds": self._fuzz_campaign_stats.get("runtime_seconds", 0),
@@ -413,9 +568,7 @@ class ReportGenerator:
                 "strategy": self._fuzz_campaign_stats.get("strategy", "unknown"),
                 "protocols": self._fuzz_campaign_stats.get("protocols", []),
             },
-            "crashes": manifest_crashes,
-            "pcaps": pcap_files,
-            "corpus_stats": corpus_stats,
+            "crashes": manifest_crashes, "pcaps": pcap_files, "corpus_stats": corpus_stats,
         }
 
         manifest_path = os.path.join(output_dir, "evidence_manifest.json")
@@ -425,8 +578,11 @@ class ReportGenerator:
             success(f"Evidence package generated: {output_dir}")
         except OSError as exc:
             error(f"Could not write evidence manifest: {exc}")
-
         return manifest_path
+
+    # ------------------------------------------------------------------
+    # Load from directory (generic)
+    # ------------------------------------------------------------------
 
     def load_from_directory(self, dump_dir: str):
         """Load all available data from a Blue-Tap output directory."""
@@ -434,7 +590,6 @@ class ReportGenerator:
             error(f"Directory not found: {dump_dir}")
             return
 
-        # Load attack_results.json
         results_file = os.path.join(dump_dir, "attack_results.json")
         if os.path.exists(results_file):
             try:
@@ -444,23 +599,19 @@ class ReportGenerator:
             except (json.JSONDecodeError, OSError) as exc:
                 error(f"Could not load attack_results.json: {exc}")
 
-        # Auto-detect fuzz/ subdirectory and load structured fuzz data
         fuzz_dir = os.path.join(dump_dir, "fuzz")
         if os.path.isdir(fuzz_dir):
             self.load_fuzz_from_session(dump_dir)
 
-        # Load any JSON files in subdirectories
         for root, dirs, files in os.walk(dump_dir):
             for fname in files:
                 fpath = os.path.join(root, fname)
                 rel = os.path.relpath(fpath, dump_dir)
+                rel_lower = rel.lower()
 
                 if fname.endswith(".json") and fname != "attack_results.json":
-                    # Skip fuzz files already loaded via load_fuzz_from_session
-                    rel_lower = rel.lower()
                     if rel_lower.startswith("fuzz/") or rel_lower.startswith("fuzz\\"):
                         continue
-
                     try:
                         with open(fpath) as f:
                             data = json.load(f)
@@ -483,41 +634,377 @@ class ReportGenerator:
                             else:
                                 self.recon_results.append(data)
                         else:
-                            # AT dumps, device info, etc.
                             self.other_data[rel] = data
                     except (json.JSONDecodeError, OSError):
                         pass
 
                 elif fname.endswith(".vcf"):
-                    # Count vCard entries
                     try:
                         with open(fpath) as f:
                             content = f.read()
                         count = content.count("BEGIN:VCARD")
                         self.pbap_results[rel] = {
-                            "file": rel, "entries": count,
-                            "size": os.path.getsize(fpath),
+                            "file": rel, "entries": count, "size": os.path.getsize(fpath),
                         }
                     except OSError:
                         pass
 
+    # ===================================================================
+    # HTML Section Builders
+    # ===================================================================
+
+    def _build_header_html(self) -> str:
+        meta = self._session_metadata
+        created = meta.get("created", "")
+        updated = meta.get("last_updated", "")
+        period = ""
+        if created:
+            period = f"Assessment Period: {created[:10]}"
+            if updated and updated[:10] != created[:10]:
+                period += f" to {updated[:10]}"
+
+        return (
+            '<div class="header">'
+            f'<h1>Blue-Tap Pentest Report</h1>'
+            f'<p class="version">Blue-Tap v{_esc(__version__)} '
+            f'| Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</p>'
+            f'{"<p class=meta>" + _esc(period) + "</p>" if period else ""}'
+            '<p class="classification">CONFIDENTIAL - Authorized Personnel Only</p>'
+            '</div>'
+        )
+
+    def _build_toc_html(self, sections_present: list[tuple[str, str]]) -> str:
+        """Build table of contents from list of (anchor, title) tuples."""
+        items = []
+        for i, (anchor, title) in enumerate(sections_present, 1):
+            items.append(f'<li><a href="#{anchor}">{i}. {_esc(title)}</a></li>')
+        return (
+            '<div class="toc">'
+            '<h2 style="margin-top:0">Table of Contents</h2>'
+            f'<ol>{"".join(items)}</ol>'
+            '</div>'
+        )
+
+    def _build_executive_summary_html(self) -> str:
+        s = []
+        s.append('<div class="section" id="sec-executive-summary">')
+        s.append('<h2>Executive Summary</h2>')
+
+        # Risk rating
+        rating = _risk_rating(self.vuln_findings, self._fuzz_crashes)
+        s.append(f'<div style="text-align:center;margin:16px 0">'
+                 f'<span class="risk-badge risk-{rating}">Overall Risk: {rating}</span></div>')
+
+        # Metric cards
+        confirmed = sum(1 for f in self.vuln_findings if f.get("status") == "confirmed")
+        potential = sum(1 for f in self.vuln_findings if f.get("status") == "potential")
+        crash_count = len(self._fuzz_crashes)
+        data_exfil = len(self.pbap_results) + len(self.map_results)
+        packets = self._fuzz_campaign_stats.get("packets_sent", 0)
+
+        s.append('<div class="metric-grid">')
+        for val, label in [
+            (len(self.scan_results), "Devices Scanned"),
+            (f"{confirmed}C / {potential}P", "Vulnerabilities"),
+            (f"{crash_count}", "Fuzz Crashes"),
+            (f"{packets:,}", "Fuzz Test Cases"),
+            (f"{data_exfil}", "Data Sets Exfiltrated"),
+            (f"{len(self.dos_results)}", "DoS Tests"),
+        ]:
+            s.append(f'<div class="metric-card">'
+                     f'<div class="value">{val}</div>'
+                     f'<div class="label">{label}</div></div>')
+        s.append('</div>')
+
+        # Findings breakdown table
+        if self.vuln_findings:
+            sev_counts: dict[str, int] = {}
+            for f in self.vuln_findings:
+                sv = f.get("severity", "INFO").upper()
+                sev_counts[sv] = sev_counts.get(sv, 0) + 1
+            s.append('<p><strong>Vulnerability Breakdown:</strong> ')
+            parts = []
+            for sv in ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"):
+                c = sev_counts.get(sv, 0)
+                if c:
+                    parts.append(f'<span class="severity-badge severity-{sv}">{c} {sv}</span>')
+            s.append(" ".join(parts) + '</p>')
+
+        # Charts row
+        charts = []
+
+        # Vuln severity donut
+        if self.vuln_findings:
+            vuln_by_sev = {}
+            for f in self.vuln_findings:
+                sv = f.get("severity", "INFO").upper()
+                vuln_by_sev[sv] = vuln_by_sev.get(sv, 0) + 1
+            chart = _svg_donut_chart(vuln_by_sev, _SEVERITY_COLORS)
+            if chart:
+                charts.append(f'<div><h4>Vulnerability Severity</h4>{chart}</div>')
+
+        # Crash severity donut
+        if self._fuzz_crashes:
+            crash_by_sev = {}
+            for c in self._fuzz_crashes:
+                sv = c.get("severity", "UNKNOWN").upper()
+                crash_by_sev[sv] = crash_by_sev.get(sv, 0) + 1
+            chart = _svg_donut_chart(crash_by_sev, _SEVERITY_COLORS)
+            if chart:
+                charts.append(f'<div><h4>Crash Severity</h4>{chart}</div>')
+
+        # Protocol crash bar chart
+        if self._fuzz_crashes:
+            crash_by_proto: dict[str, int] = {}
+            for c in self._fuzz_crashes:
+                p = c.get("protocol", "unknown")
+                crash_by_proto[p] = crash_by_proto.get(p, 0) + 1
+            chart = _svg_bar_chart(crash_by_proto, "#ff6b35")
+            if chart:
+                charts.append(f'<div><h4>Crashes by Protocol</h4>{chart}</div>')
+
+        if charts:
+            s.append('<div class="chart-row">' + "".join(charts) + '</div>')
+
+        s.append('</div>')
+        return "\n".join(s)
+
+    def _build_scope_html(self) -> str:
+        meta = self._session_metadata
+        if not meta:
+            return ""
+
+        s = []
+        s.append('<div class="section" id="sec-scope">')
+        s.append('<h2>Scope and Methodology</h2>')
+
+        s.append(f'<p><strong>Tool:</strong> Blue-Tap v{_esc(__version__)}</p>')
+
+        targets = meta.get("targets", [])
+        if targets:
+            s.append('<h3>Target Devices</h3><table><tr><th>MAC Address</th></tr>')
+            for t in targets:
+                s.append(f'<tr><td class="mono">{_esc(t)}</td></tr>')
+            s.append('</table>')
+
+        # Methodology from commands executed
+        commands = meta.get("commands", [])
+        if commands:
+            categories = sorted(set(c.get("category", "general") for c in commands))
+            category_labels = {
+                "scan": "Device Discovery", "recon": "Reconnaissance",
+                "vuln": "Vulnerability Assessment", "attack": "Exploitation",
+                "fuzz": "Fuzz Testing", "dos": "Denial of Service Testing",
+                "data": "Data Extraction", "audio": "Audio Capture",
+            }
+            s.append('<h3>Assessment Modules Executed</h3><table>'
+                     '<tr><th>Phase</th><th>Module</th><th>Commands Run</th></tr>')
+            for cat in categories:
+                label = category_labels.get(cat, cat.title())
+                count = sum(1 for c in commands if c.get("category") == cat)
+                s.append(f'<tr><td>{_esc(label)}</td><td>{_esc(cat)}</td><td>{count}</td></tr>')
+            s.append('</table>')
+
+        s.append('</div>')
+        return "\n".join(s)
+
+    def _build_timeline_html(self) -> str:
+        meta = self._session_metadata
+        commands = meta.get("commands", []) if meta else []
+        if not commands:
+            return ""
+
+        s = []
+        s.append('<div class="section" id="sec-timeline">')
+        s.append('<h2>Assessment Timeline</h2>')
+        s.append('<table class="timeline-table"><tr><th>Time</th><th>Command</th>'
+                 '<th>Category</th><th>Target</th></tr>')
+        for cmd in commands:
+            ts = cmd.get("timestamp", "")
+            if ts:
+                ts = ts[11:19] if len(ts) >= 19 else ts  # HH:MM:SS
+            s.append(
+                f'<tr><td>{_esc(ts)}</td>'
+                f'<td><code>{_esc(cmd.get("command", ""))}</code></td>'
+                f'<td><span class="tag">{_esc(cmd.get("category", ""))}</span></td>'
+                f'<td class="mono">{_esc(cmd.get("target", ""))}</td></tr>'
+            )
+        s.append('</table></div>')
+        return "\n".join(s)
+
+    def _build_fingerprint_html(self) -> str:
+        fp = self.fingerprint_results
+        if not fp:
+            return ""
+
+        s = []
+        s.append('<div class="section" id="sec-fingerprint">')
+        s.append('<h2>Device Fingerprint</h2>')
+
+        # Identity table
+        s.append('<h3>Identity</h3>')
+        s.append('<table><tr><th>Property</th><th>Value</th></tr>')
+        for key in ("address", "name", "manufacturer", "device_class", "ivi_likely"):
+            val = fp.get(key)
+            if val is not None:
+                s.append(f'<tr><td>{_esc(key.replace("_", " ").title())}</td><td>{_esc(str(val))}</td></tr>')
+        s.append('</table>')
+
+        # Protocol support
+        proto_keys = ("bt_version", "lmp_version", "lmp_subversion")
+        has_proto = any(fp.get(k) is not None for k in proto_keys)
+        if has_proto:
+            s.append('<h3>Protocol Support</h3>')
+            s.append('<table><tr><th>Property</th><th>Value</th></tr>')
+            for key in proto_keys:
+                val = fp.get(key)
+                if val is not None:
+                    s.append(f'<tr><td>{_esc(key.replace("_", " ").title())}</td><td>{_esc(str(val))}</td></tr>')
+            s.append('</table>')
+
+        # Attack surface
+        surface = fp.get("attack_surface", [])
+        if surface:
+            s.append('<h3>Attack Surface</h3>')
+            for item in surface:
+                s.append(f'<span class="tag">{_esc(item)}</span> ')
+
+        # Vuln hints
+        hints = fp.get("vuln_hints", [])
+        if hints:
+            s.append('<h3>Vulnerability Indicators</h3><ul>')
+            for hint in hints:
+                s.append(f'<li><span class="severity-badge severity-MEDIUM">INDICATOR</span> {_esc(hint)}</li>')
+            s.append('</ul>')
+
+        s.append('</div>')
+        return "\n".join(s)
+
+    def _build_scan_html(self) -> str:
+        if not self.scan_results:
+            return ""
+        s = []
+        s.append('<div class="section" id="sec-devices">')
+        s.append('<h2>Discovered Devices</h2>')
+        s.append(f'<p>{len(self.scan_results)} device(s) discovered during scanning.</p>')
+        s.append('<table><tr><th>Address</th><th>Name</th><th>RSSI</th><th>Type</th></tr>')
+        for d in self.scan_results:
+            s.append(
+                f'<tr><td class="mono">{_esc(d.get("address", ""))}</td>'
+                f'<td>{_esc(d.get("name", "Unknown"))}</td>'
+                f'<td>{_esc(str(d.get("rssi", "")))}</td>'
+                f'<td>{_esc(d.get("type", "Classic"))}</td></tr>'
+            )
+        s.append('</table></div>')
+        return "\n".join(s)
+
+    def _build_vuln_html(self) -> str:
+        if not self.vuln_findings:
+            return ""
+        s = []
+        s.append('<div class="section" id="sec-vulnerabilities">')
+        s.append('<h2>Vulnerability Findings</h2>')
+
+        # Summary table
+        s.append('<table><tr><th>ID</th><th>Severity</th><th>Status</th>'
+                 '<th>Finding</th><th>CVE</th></tr>')
+        for i, v in enumerate(self.vuln_findings, 1):
+            sev = v.get("severity", "INFO").upper()
+            status = v.get("status", "potential")
+            confidence = v.get("confidence", "")
+            status_display = f'{status} ({confidence})' if confidence else status
+            cve = v.get("cve", "N/A")
+            s.append(
+                f'<tr><td>VULN-{i:03d}</td>'
+                f'<td><span class="severity-badge severity-{sev}">{_esc(sev)}</span></td>'
+                f'<td class="status-{_esc(status)}">{_esc(status_display)}</td>'
+                f'<td>{_esc(v.get("name", ""))}</td>'
+                f'<td>{_esc(cve)}</td></tr>'
+            )
+        s.append('</table>')
+
+        # Individual finding cards
+        s.append('<h3>Finding Details</h3>')
+        for i, v in enumerate(self.vuln_findings, 1):
+            sev = v.get("severity", "INFO").upper()
+            status = v.get("status", "potential")
+            confidence = v.get("confidence", "")
+            cve = v.get("cve", "N/A")
+            desc = v.get("description", "")
+            impact = v.get("impact", "")
+            evidence = v.get("evidence", "")
+            remediation = v.get("remediation", "")
+            category = v.get("category", "")
+
+            s.append(f'<div class="finding-card sev-{sev}">')
+            s.append(f'<h4>VULN-{i:03d}: {_esc(v.get("name", "Unknown Finding"))}</h4>')
+            s.append(f'<p><span class="severity-badge severity-{sev}">{_esc(sev)}</span> '
+                     f'<span class="status-{_esc(status)}">{_esc(status)}</span>'
+                     f'{" / " + _esc(confidence) + " confidence" if confidence else ""}'
+                     f'{" | CVE: " + _esc(cve) if cve and cve != "N/A" else ""}'
+                     f'{" | " if category else ""}'
+                     f'{"<span class=tag>" + _esc(category) + "</span>" if category else ""}'
+                     f'</p>')
+
+            if desc:
+                s.append(f'<p><strong>Description:</strong> {_esc(desc)}</p>')
+            if impact:
+                s.append(f'<p><strong>Impact:</strong> {_esc(impact)}</p>')
+
+            if evidence:
+                s.append('<div class="evidence-block">'
+                         '<div class="ev-label">Evidence</div>'
+                         f'<pre>{_esc(evidence)}</pre></div>')
+
+            if remediation:
+                s.append(f'<p><strong>Remediation:</strong> {_esc(remediation)}</p>')
+
+            s.append('</div>')
+
+        s.append('</div>')
+        return "\n".join(s)
+
+    def _build_attack_html(self) -> str:
+        if not self.attack_results:
+            return ""
+        s = []
+        s.append('<div class="section" id="sec-attack">')
+        s.append('<h2>Attack Chain Results</h2>')
+
+        phases = self.attack_results.get("phases", {})
+        if phases:
+            s.append('<table><tr><th>Phase</th><th>Status</th><th>Details</th></tr>')
+            for phase, result in phases.items():
+                status = result.get("status", "unknown")
+                details = result.get("error", result.get("details", ""))
+                if status == "success":
+                    css = "severity-badge severity-LOW"
+                elif status == "failed":
+                    css = "severity-badge severity-HIGH"
+                else:
+                    css = "severity-badge severity-MEDIUM"
+                s.append(f'<tr><td>{_esc(phase)}</td>'
+                         f'<td><span class="{css}">{_esc(status.upper())}</span></td>'
+                         f'<td>{_esc(str(details))}</td></tr>')
+            s.append('</table>')
+        else:
+            s.append(f'<pre>{_esc(json.dumps(self.attack_results, indent=2, default=str)[:3000])}</pre>')
+        s.append('</div>')
+        return "\n".join(s)
+
     def _build_fuzz_html(self) -> list[str]:
-        """Build the detailed fuzzing campaign HTML section.
-
-        Returns a list of HTML strings to be joined into the report.
-        """
-        sections = []
-
+        """Build the detailed fuzzing campaign HTML section."""
+        sections: list[str] = []
         has_campaign = bool(self._fuzz_campaign_stats)
         has_crashes = bool(self._fuzz_crashes)
 
         if not has_campaign and not has_crashes and not self.fuzz_results:
             return sections
 
-        sections.append('<div class="section">')
+        sections.append('<div class="section" id="sec-fuzzing">')
         sections.append("<h2>Fuzzing Campaign Results</h2>")
 
-        # ---- Executive Summary ----
+        # Campaign overview
         if has_campaign:
             stats = self._fuzz_campaign_stats
             runtime = stats.get("runtime_seconds", 0)
@@ -528,30 +1015,21 @@ class ReportGenerator:
             total_crashes = stats.get("crashes", len(self._fuzz_crashes))
             result_status = stats.get("result", "unknown")
 
-            # Format runtime
             hours = int(runtime // 3600)
             minutes = int((runtime % 3600) // 60)
             secs = int(runtime % 60)
             runtime_str = f"{hours}h {minutes}m {secs}s" if hours else f"{minutes}m {secs}s"
 
-            sections.append("<h3>Executive Summary</h3>")
+            sections.append('<h3>Campaign Overview</h3>')
             sections.append('<div class="summary">')
-            sections.append(
-                f'<div class="fuzz-stat"><span class="value">{runtime_str}</span>'
-                f'<br><span class="label">Duration</span></div>'
-            )
-            sections.append(
-                f'<div class="fuzz-stat"><span class="value">{packets:,}</span>'
-                f'<br><span class="label">Test Cases Sent</span></div>'
-            )
-            sections.append(
-                f'<div class="fuzz-stat"><span class="value">{pps:.1f}/s</span>'
-                f'<br><span class="label">Send Rate</span></div>'
-            )
-            sections.append(
-                f'<div class="fuzz-stat"><span class="value">{total_crashes}</span>'
-                f'<br><span class="label">Crashes Found</span></div>'
-            )
+            for val, label in [
+                (runtime_str, "Duration"), (f"{packets:,}", "Test Cases"),
+                (f"{pps:.1f}/s", "Send Rate"), (str(total_crashes), "Crashes"),
+            ]:
+                sections.append(
+                    f'<div class="fuzz-stat"><span class="value">{val}</span>'
+                    f'<br><span class="label">{label}</span></div>'
+                )
             sections.append("</div>")
 
             sections.append(f"<p><strong>Strategy:</strong> {_esc(strategy)}</p>")
@@ -561,9 +1039,9 @@ class ReportGenerator:
             )
             sections.append(f"<p><strong>Campaign Result:</strong> {_esc(result_status)}</p>")
 
-            # Crash severity breakdown
+            # Severity breakdown with chart
             if has_crashes:
-                sev_counts = {}
+                sev_counts: dict[str, int] = {}
                 reproduced_count = 0
                 for crash in self._fuzz_crashes:
                     sev = crash.get("severity", "UNKNOWN")
@@ -571,18 +1049,13 @@ class ReportGenerator:
                     if crash.get("reproduced"):
                         reproduced_count += 1
 
-                breakdown_parts = []
-                for sev_level in ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"):
-                    count = sev_counts.get(sev_level, 0)
-                    if count > 0:
-                        css = f"severity-{sev_level.lower()}"
-                        breakdown_parts.append(
-                            f'<span class="{css}">{count} {sev_level}</span>'
-                        )
-                if breakdown_parts:
-                    sections.append(
-                        f"<p><strong>Crash Breakdown:</strong> {' &nbsp; '.join(breakdown_parts)}</p>"
-                    )
+                parts = []
+                for sl in ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"):
+                    c = sev_counts.get(sl, 0)
+                    if c:
+                        parts.append(f'<span class="severity-badge severity-{sl}">{c} {sl}</span>')
+                if parts:
+                    sections.append(f"<p><strong>Crash Breakdown:</strong> {' '.join(parts)}</p>")
 
                 total = len(self._fuzz_crashes)
                 repro_rate = (reproduced_count / total * 100) if total > 0 else 0
@@ -591,61 +1064,48 @@ class ReportGenerator:
                     f"{reproduced_count}/{total} ({repro_rate:.0f}%)</p>"
                 )
 
-        # ---- Crash Findings Table ----
+        # Crash findings table
         if has_crashes:
             sections.append("<h3>Crash Findings</h3>")
             sections.append(
-                "<table>"
-                "<tr><th>#</th><th>Severity</th><th>Protocol</th>"
+                "<table><tr><th>#</th><th>Severity</th><th>Protocol</th>"
                 "<th>Crash Type</th><th>Payload Size</th>"
                 "<th>Payload Preview</th><th>Mutation</th>"
-                "<th>Reproduced?</th><th>Timestamp</th></tr>"
+                "<th>Reproduced</th><th>Timestamp</th></tr>"
             )
             for i, crash in enumerate(self._fuzz_crashes, 1):
                 sev = crash.get("severity", "UNKNOWN")
-                css = f"severity-{sev.lower()}"
                 protocol = crash.get("protocol", "unknown")
                 crash_type = crash.get("crash_type", "unknown")
                 payload_len = crash.get("payload_len", 0)
                 payload_hex = crash.get("payload_hex", "")
-                # Show first 24 bytes (48 hex chars)
-                preview = payload_hex[:48]
-                if len(payload_hex) > 48:
-                    preview += "..."
+                preview = payload_hex[:48] + ("..." if len(payload_hex) > 48 else "")
                 mutation = crash.get("mutation_log", "") or ""
-                # Truncate mutation for table display
                 if len(mutation) > 40:
                     mutation = mutation[:37] + "..."
                 reproduced = crash.get("reproduced", 0)
-                repro_display = (
-                    '<span class="reproduced-yes">Yes</span>'
-                    if reproduced
-                    else '<span class="reproduced-no">No</span>'
-                )
+                repro = ('<span class="reproduced-yes">Yes</span>' if reproduced
+                         else '<span class="reproduced-no">No</span>')
                 timestamp = crash.get("timestamp", "")
 
                 sections.append(
-                    f"<tr>"
-                    f"<td>{i}</td>"
-                    f'<td><span class="{css}">{_esc(sev)}</span></td>'
-                    f"<td>{_esc(protocol)}</td>"
-                    f"<td>{_esc(crash_type)}</td>"
+                    f"<tr><td>{i}</td>"
+                    f'<td><span class="severity-badge severity-{sev}">{_esc(sev)}</span></td>'
+                    f"<td>{_esc(protocol)}</td><td>{_esc(crash_type)}</td>"
                     f"<td>{payload_len} bytes</td>"
                     f'<td class="mono">{_esc(preview)}</td>'
-                    f"<td>{_esc(mutation)}</td>"
-                    f"<td>{repro_display}</td>"
-                    f"<td>{_esc(timestamp)}</td>"
-                    f"</tr>"
+                    f"<td>{_esc(mutation)}</td><td>{repro}</td>"
+                    f"<td>{_esc(timestamp)}</td></tr>"
                 )
             sections.append("</table>")
 
-            # ---- Crash Detail Cards (CRITICAL and HIGH only) ----
+            # Crash detail cards (CRITICAL and HIGH)
             critical_high = [
                 (i, c) for i, c in enumerate(self._fuzz_crashes, 1)
                 if c.get("severity", "").upper() in ("CRITICAL", "HIGH")
             ]
             if critical_high:
-                sections.append("<h3>Crash Details</h3>")
+                sections.append("<h3>Crash Details (Critical/High)</h3>")
                 for idx, crash in critical_high:
                     sev = crash.get("severity", "UNKNOWN").upper()
                     protocol = crash.get("protocol", "unknown")
@@ -656,57 +1116,58 @@ class ReportGenerator:
                     mutation = crash.get("mutation_log", "") or "(none)"
                     response_hex = crash.get("response_hex", "")
                     reproduced = crash.get("reproduced", 0)
+                    target_addr = crash.get("target_addr", "N/A")
 
-                    card_class = "crash-card"
-                    if sev == "HIGH":
-                        card_class += " high"
+                    card_css = "crash-card" + (" high" if sev == "HIGH" else "")
 
-                    repro_str = (
-                        '<span class="reproduced-yes">Yes</span>'
-                        if reproduced
-                        else '<span class="reproduced-no">No</span>'
-                    )
+                    repro_str = ('<span class="reproduced-yes">Yes</span>' if reproduced
+                                 else '<span class="reproduced-no">No</span>')
 
-                    sections.append(f'<div class="{card_class}">')
+                    sections.append(f'<div class="{card_css}">')
                     sections.append(
-                        f"<h4>Crash #{idx} &mdash; {_esc(sev)} &mdash; "
-                        f"{_esc(protocol)} &mdash; {_esc(crash_type)}</h4>"
+                        f'<h4>Crash #{idx} '
+                        f'<span class="severity-badge severity-{sev}">{_esc(sev)}</span> '
+                        f'{_esc(protocol)} / {_esc(crash_type)}</h4>'
                     )
-                    sections.append(f"<p><strong>Timestamp:</strong> {_esc(timestamp)}</p>")
-                    sections.append(f"<p><strong>Protocol:</strong> {_esc(protocol)}</p>")
-                    sections.append(
-                        f"<p><strong>Crash Type:</strong> {_esc(crash_type)}</p>"
-                    )
-                    sections.append(f"<p><strong>Reproduced:</strong> {repro_str}</p>")
+                    sections.append(f'<p><strong>Timestamp:</strong> {_esc(timestamp)} '
+                                    f'| <strong>Target:</strong> <code>{_esc(target_addr)}</code> '
+                                    f'| <strong>Reproduced:</strong> {repro_str}</p>')
 
-                    sections.append(f"<h5>Payload ({payload_len} bytes)</h5>")
-                    sections.append(
-                        f'<pre class="hexdump">{_esc(_format_hexdump(payload_hex))}</pre>'
-                    )
+                    # Reproduction steps
+                    sections.append('<div class="evidence-block">'
+                                    '<div class="ev-label">Reproduction Steps</div>'
+                                    '<pre>'
+                                    f'1. Connect to target: {_esc(target_addr)}\n'
+                                    f'2. Select protocol: {_esc(protocol)}\n'
+                                    f'3. Send payload ({payload_len} bytes):\n'
+                                    f'   blue-tap fuzz replay --payload-hex {_esc(payload_hex[:80])}'
+                                    f'{"..." if len(payload_hex) > 80 else ""}\n'
+                                    f'4. Observe: {_esc(crash_type)}'
+                                    '</pre></div>')
+
+                    sections.append(f'<h5>Payload ({payload_len} bytes)</h5>')
+                    sections.append(f'<pre class="hexdump">{_esc(_format_hexdump(payload_hex))}</pre>')
 
                     sections.append("<h5>Mutation Log</h5>")
                     sections.append(f"<pre>{_esc(mutation)}</pre>")
 
-                    sections.append("<h5>Response</h5>")
+                    sections.append("<h5>Device Response</h5>")
                     if response_hex:
-                        sections.append(
-                            f'<pre class="hexdump">{_esc(_format_hexdump(response_hex))}</pre>'
-                        )
+                        sections.append(f'<pre class="hexdump">{_esc(_format_hexdump(response_hex))}</pre>')
                     else:
                         sections.append("<pre>No response (connection dropped immediately)</pre>")
 
-                    # Evidence references
+                    # Evidence file references
                     if self._fuzz_evidence_dir:
-                        sections.append("<h5>Evidence</h5>")
                         proto_safe = protocol.replace("/", "-").replace(" ", "_")
-                        sections.append(
-                            f"<p>Crash payload saved: crashes/crash_{idx:03d}_{_esc(proto_safe)}.bin</p>"
-                        )
+                        sections.append('<div class="evidence-block">'
+                                        '<div class="ev-label">Evidence Files</div>'
+                                        f'<p>Crash payload: <code>crashes/crash_{idx:03d}_{_esc(proto_safe)}.bin</code></p>')
                         capture_path = os.path.join(self._fuzz_evidence_dir, "capture.btsnoop")
                         if os.path.exists(capture_path):
-                            sections.append(
-                                f"<p>Pcap capture: fuzz/capture.btsnoop (frame at {_esc(timestamp)})</p>"
-                            )
+                            sections.append(f'<p>Pcap capture: <code>fuzz/capture.btsnoop</code> '
+                                            f'(frame at {_esc(timestamp)})</p>')
+                        sections.append('</div>')
 
                     notes = crash.get("notes", "")
                     if notes:
@@ -714,16 +1175,14 @@ class ReportGenerator:
 
                     sections.append("</div>")
 
-        # ---- Protocol Coverage Table ----
+        # Protocol coverage table
         if has_campaign and has_crashes:
-            stats = self._fuzz_campaign_stats
-            breakdown = stats.get("protocol_breakdown", {})
+            breakdown = self._fuzz_campaign_stats.get("protocol_breakdown", {})
             if breakdown:
-                # Count crashes per protocol
-                crash_by_proto = {}
+                crash_by_proto: dict[str, int] = {}
                 for crash in self._fuzz_crashes:
-                    proto = crash.get("protocol", "unknown")
-                    crash_by_proto[proto] = crash_by_proto.get(proto, 0) + 1
+                    p = crash.get("protocol", "unknown")
+                    crash_by_proto[p] = crash_by_proto.get(p, 0) + 1
 
                 sections.append("<h3>Protocol Coverage</h3>")
                 sections.append(
@@ -731,23 +1190,21 @@ class ReportGenerator:
                     "<th>Crashes</th><th>Crash Rate</th></tr>"
                 )
                 for proto, sent in sorted(breakdown.items()):
-                    crashes_for_proto = crash_by_proto.get(proto, 0)
-                    rate = (crashes_for_proto / sent * 100) if sent > 0 else 0
+                    crashes_for = crash_by_proto.get(proto, 0)
+                    rate = (crashes_for / sent * 100) if sent > 0 else 0
                     sections.append(
-                        f"<tr><td>{_esc(proto)}</td>"
-                        f"<td>{sent:,}</td>"
-                        f"<td>{crashes_for_proto}</td>"
-                        f'<td class="crash-rate">{rate:.2f}%</td></tr>'
+                        f"<tr><td>{_esc(proto)}</td><td>{sent:,}</td>"
+                        f"<td>{crashes_for}</td><td>{rate:.2f}%</td></tr>"
                     )
                 sections.append("</table>")
 
-        # ---- Evidence Package Summary ----
+        # Evidence package
         if self._fuzz_evidence_files:
             sections.append("<h3>Evidence Package</h3>")
             sections.append('<ul class="evidence-list">')
             for desc, path in self._fuzz_evidence_files:
-                rel_path = os.path.relpath(path, self._fuzz_evidence_dir) if self._fuzz_evidence_dir else desc
-                sections.append(f"<li>{_esc(desc)} &mdash; <code>{_esc(rel_path)}</code></li>")
+                rel = os.path.relpath(path, self._fuzz_evidence_dir) if self._fuzz_evidence_dir else desc
+                sections.append(f"<li>{_esc(desc)} -- <code>{_esc(rel)}</code></li>")
             sections.append("</ul>")
 
         if self._fuzz_corpus_stats:
@@ -757,270 +1214,273 @@ class ReportGenerator:
                 sections.append(f"<tr><td>{_esc(proto)}</td><td>{count}</td></tr>")
             sections.append("</table>")
 
-        if self._fuzz_evidence_dir:
-            sections.append(
-                f"<p>Full evidence directory: <code>{_esc(self._fuzz_evidence_dir)}</code></p>"
-            )
-
-        # ---- Fallback: raw fuzz_results (from non-campaign JSON files) ----
+        # Fallback: raw fuzz_results
         if self.fuzz_results and not has_campaign and not has_crashes:
             for entry in self.fuzz_results:
                 src = entry.get("source", "fuzz")
                 sections.append(f"<h3>{_esc(src)}</h3>")
-                sections.append(
-                    f"<pre>{_esc(json.dumps(entry.get('data', entry), indent=2, default=str)[:2000])}</pre>"
-                )
+                sections.append(f"<pre>{_esc(json.dumps(entry.get('data', entry), indent=2, default=str)[:2000])}</pre>")
 
         sections.append("</div>")
         return sections
 
-    def generate_html(self, output: str = "report.html") -> str:
-        """Generate a styled HTML pentest report."""
-        sections = []
+    def _build_recon_html(self) -> str:
+        if not self.recon_results:
+            return ""
+        s = []
+        s.append('<div class="section" id="sec-recon">')
+        s.append('<h2>Reconnaissance Results</h2>')
 
-        # Summary
-        sections.append('<div class="summary">')
-        sections.append("<h2>Executive Summary</h2>")
-        sections.append(f"<p>Devices scanned: {len(self.scan_results)}</p>")
+        # Try to categorize recon data
+        sdp_services = []
+        gatt_services = []
+        channel_scans = []
+        other_recon = []
 
-        # Break down vuln findings by evidence quality
-        confirmed = sum(1 for f in self.vuln_findings if f.get("status") == "confirmed")
-        potential = sum(1 for f in self.vuln_findings if f.get("status") == "potential")
-        unverified = sum(1 for f in self.vuln_findings if f.get("status") == "unverified")
-        high_sev = sum(1 for f in self.vuln_findings
-                       if f.get("severity", "").lower() in ("high", "critical"))
-        sections.append(f"<p>Findings: {len(self.vuln_findings)} total "
-                        f"(<span class='vuln-high'>{confirmed} confirmed</span>, "
-                        f"<span class='vuln-medium'>{potential} potential</span>, "
-                        f"<span class='vuln-info'>{unverified} unverified</span>)</p>")
-        if high_sev:
-            sections.append(f"<p class='vuln-high'>Critical/High severity: {high_sev}</p>")
-
-        sections.append(f"<p>PBAP data sets: {len(self.pbap_results)}</p>")
-        sections.append(f"<p>MAP data sets: {len(self.map_results)}</p>")
-
-        # Fuzz summary in executive section
-        has_fuzz_campaign = bool(self._fuzz_campaign_stats)
-        has_fuzz_crashes = bool(self._fuzz_crashes)
-        if has_fuzz_campaign or has_fuzz_crashes or self.fuzz_results:
-            crash_count = len(self._fuzz_crashes) if has_fuzz_crashes else len(self.fuzz_results)
-            packets = self._fuzz_campaign_stats.get("packets_sent", 0) if has_fuzz_campaign else 0
-            sections.append(
-                f"<p>Fuzzing: {packets:,} test cases, {crash_count} crashes</p>"
-            )
-        if self.dos_results:
-            sections.append(f"<p>DoS/pairing tests: {len(self.dos_results)}</p>")
-        if self.recon_results:
-            sections.append(f"<p>Channel scan results: {len(self.recon_results)}</p>")
-        sections.append("</div>")
-
-        # Attack Results
-        if self.attack_results:
-            sections.append('<div class="section">')
-            sections.append("<h2>Attack Chain Results</h2>")
-            phases = self.attack_results.get("phases", {})
-            if phases:
-                sections.append("<table><tr><th>Phase</th><th>Status</th><th>Details</th></tr>")
-                for phase, result in phases.items():
-                    status = result.get("status", "unknown")
-                    details = result.get("error", "")
-                    css = "vuln-high" if status == "failed" else "vuln-low" if status == "success" else "vuln-medium"
-                    sections.append(f'<tr><td>{_esc(phase)}</td>'
-                                    f'<td class="{css}">{_esc(status)}</td>'
-                                    f'<td>{_esc(details)}</td></tr>')
-                sections.append("</table>")
-            else:
-                sections.append(f"<pre>{_esc(json.dumps(self.attack_results, indent=2))}</pre>")
-            sections.append("</div>")
-
-        # Vulnerability Findings
-        if self.vuln_findings:
-            sections.append('<div class="section">')
-            sections.append("<h2>Vulnerability &amp; Attack-Surface Findings</h2>")
-            sections.append("<table><tr><th>#</th><th>Severity</th><th>Status</th>"
-                            "<th>Name</th><th>CVE</th><th>Description</th></tr>")
-            for i, v in enumerate(self.vuln_findings, 1):
-                sev = v.get("severity", "info").lower()
-                css = {"high": "vuln-high", "critical": "vuln-high",
-                       "medium": "vuln-medium", "low": "vuln-low"}.get(sev, "vuln-info")
-                status = v.get("status", "potential")
-                confidence = v.get("confidence", "")
-                status_display = f"{status} ({confidence})" if confidence else status
-                sections.append(
-                    f'<tr><td>{i}</td>'
-                    f'<td class="{css}">{_esc(sev.upper())}</td>'
-                    f'<td>{_esc(status_display)}</td>'
-                    f'<td>{_esc(v.get("name", ""))}</td>'
-                    f'<td>{_esc(v.get("cve", "N/A"))}</td>'
-                    f'<td>{_esc(v.get("description", ""))}</td></tr>'
-                )
-            sections.append("</table>")
-
-            # Detailed findings with impact/remediation/evidence
-            sections.append("<h3>Finding Details</h3>")
-            for i, v in enumerate(self.vuln_findings, 1):
-                impact = v.get("impact", "")
-                remediation = v.get("remediation", "")
-                evidence = v.get("evidence", "")
-                if impact or remediation or evidence:
-                    sections.append(f"<h4>#{i}: {_esc(v.get('name', ''))}</h4>")
-                    if impact:
-                        sections.append(f"<p><strong>Impact:</strong> {_esc(impact)}</p>")
-                    if evidence:
-                        sections.append(f"<p><strong>Evidence:</strong> {_esc(evidence)}</p>")
-                    if remediation:
-                        sections.append(f"<p><strong>Remediation:</strong> {_esc(remediation)}</p>")
-
-            sections.append("</div>")
-
-        # Fingerprint Results
-        if self.fingerprint_results:
-            sections.append('<div class="section">')
-            sections.append("<h2>Device Fingerprint</h2>")
-            sections.append("<table><tr><th>Property</th><th>Value</th></tr>")
-            display_keys = ["address", "name", "manufacturer", "ivi_likely",
-                           "device_class", "bt_version", "lmp_version"]
-            for key in display_keys:
-                val = self.fingerprint_results.get(key)
-                if val is not None:
-                    sections.append(f"<tr><td>{_esc(key)}</td><td>{_esc(str(val))}</td></tr>")
-            sections.append("</table>")
-            # Attack surface
-            surface = self.fingerprint_results.get("attack_surface", [])
-            if surface:
-                sections.append("<h3>Attack Surface</h3><ul>")
-                for item in surface:
-                    sections.append(f"<li>{_esc(item)}</li>")
-                sections.append("</ul>")
-            # Vuln hints
-            hints = self.fingerprint_results.get("vuln_hints", [])
-            if hints:
-                sections.append("<h3>Vulnerability Indicators</h3><ul>")
-                for hint in hints:
-                    sections.append(f'<li class="vuln-medium">{_esc(hint)}</li>')
-                sections.append("</ul>")
-            sections.append("</div>")
-
-        # Scan Results
-        if self.scan_results:
-            sections.append('<div class="section">')
-            sections.append("<h2>Discovered Devices</h2>")
-            sections.append("<table><tr><th>Address</th><th>Name</th>"
-                            "<th>RSSI</th><th>Type</th></tr>")
-            for d in self.scan_results:
-                sections.append(
-                    f'<tr><td>{_esc(d.get("address", ""))}</td>'
-                    f'<td>{_esc(d.get("name", "Unknown"))}</td>'
-                    f'<td>{_esc(str(d.get("rssi", "")))}</td>'
-                    f'<td>{_esc(d.get("type", "Classic"))}</td></tr>'
-                )
-            sections.append("</table>")
-            sections.append("</div>")
-
-        # PBAP Results
-        if self.pbap_results:
-            sections.append('<div class="section">')
-            sections.append("<h2>PBAP Data (Phonebook)</h2>")
-            sections.append("<table><tr><th>Source</th><th>Entries</th><th>Size</th></tr>")
-            for path, data in self.pbap_results.items():
-                entries = data.get("entries", "N/A") if isinstance(data, dict) else "N/A"
-                size = data.get("size", "N/A") if isinstance(data, dict) else "N/A"
-                sections.append(f"<tr><td>{_esc(path)}</td>"
-                                f"<td>{entries}</td><td>{size}</td></tr>")
-            sections.append("</table>")
-            sections.append("</div>")
-
-        # MAP Results
-        if self.map_results:
-            sections.append('<div class="section">')
-            sections.append("<h2>MAP Data (Messages)</h2>")
-            sections.append(f"<p>Message data sets collected: {len(self.map_results)}</p>")
-            for path, data in self.map_results.items():
-                sections.append(f"<h3>{_esc(path)}</h3>")
-                if isinstance(data, dict):
-                    listing = data.get("listing_file", "")
-                    messages = data.get("messages", [])
-                    if listing:
-                        sections.append(f"<p>Listing file: {_esc(listing)}</p>")
-                    if messages:
-                        sections.append(f"<p>Messages fetched: {len(messages)}</p>")
-                        sections.append("<table><tr><th>Handle</th><th>File</th></tr>")
-                        for msg in messages[:50]:  # Cap at 50 in report
-                            sections.append(
-                                f'<tr><td>{_esc(msg.get("handle", ""))}</td>'
-                                f'<td>{_esc(msg.get("file", ""))}</td></tr>')
-                        sections.append("</table>")
-                        if len(messages) > 50:
-                            sections.append(f"<p>... and {len(messages) - 50} more</p>")
-                    elif not listing:
-                        sections.append(f"<pre>{_esc(json.dumps(data, indent=2, default=str)[:2000])}</pre>")
+        for entry in self.recon_results:
+            if isinstance(entry, dict):
+                if entry.get("uuid") or entry.get("service_name") or entry.get("service_id"):
+                    sdp_services.append(entry)
+                elif entry.get("handle") or entry.get("characteristic"):
+                    gatt_services.append(entry)
+                elif entry.get("channel") or entry.get("psm"):
+                    channel_scans.append(entry)
                 else:
-                    sections.append(f"<pre>{_esc(json.dumps(data, indent=2, default=str)[:2000])}</pre>")
-            sections.append("</div>")
+                    other_recon.append(entry)
+            else:
+                other_recon.append(entry)
 
-        # Recon Results (RFCOMM/L2CAP scans)
-        if self.recon_results:
-            sections.append('<div class="section">')
-            sections.append("<h2>Recon / Channel Scan Results</h2>")
-            sections.append(f"<pre>{_esc(json.dumps(self.recon_results, indent=2, default=str)[:3000])}</pre>")
-            sections.append("</div>")
-
-        # Fuzz Results (detailed campaign section)
-        sections.extend(self._build_fuzz_html())
-
-        # DoS Results
-        if self.dos_results:
-            sections.append('<div class="section">')
-            sections.append("<h2>DoS / Pairing Attack Results</h2>")
-            for entry in self.dos_results:
-                src = entry.get("source", "dos")
-                sections.append(f"<h3>{_esc(src)}</h3>")
-                sections.append(f"<pre>{_esc(json.dumps(entry.get('data', entry), indent=2, default=str)[:2000])}</pre>")
-            sections.append("</div>")
-
-        # Other Data (AT dumps, etc.)
-        if self.other_data:
-            sections.append('<div class="section">')
-            sections.append("<h2>Additional Data</h2>")
-            for path, data in self.other_data.items():
-                sections.append(f"<h3>{_esc(path)}</h3>")
-                sections.append(f"<pre>{_esc(json.dumps(data, indent=2, default=str)[:2000])}</pre>")
-            sections.append("</div>")
-
-        # Audio Captures
-        if self.audio_captures:
-            sections.append('<div class="section">')
-            sections.append("<h2>Audio Captures</h2>")
-            sections.append("<table><tr><th>File</th><th>Duration</th><th>Description</th></tr>")
-            for cap in self.audio_captures:
-                dur = f"{cap.get('duration', 0):.1f}s" if cap.get("duration") else "N/A"
-                sections.append(
-                    f"<tr><td>{_esc(cap.get('file', ''))}</td>"
-                    f"<td>{dur}</td>"
-                    f"<td>{_esc(cap.get('description', ''))}</td></tr>"
+        if sdp_services:
+            s.append('<h3>SDP Services</h3>')
+            s.append('<table><tr><th>UUID</th><th>Service Name</th><th>Description</th><th>Channel</th></tr>')
+            for svc in sdp_services:
+                s.append(
+                    f'<tr><td class="mono">{_esc(str(svc.get("uuid", svc.get("service_id", ""))))}</td>'
+                    f'<td>{_esc(str(svc.get("service_name", svc.get("name", ""))))}</td>'
+                    f'<td>{_esc(str(svc.get("description", "")))}</td>'
+                    f'<td>{_esc(str(svc.get("channel", svc.get("port", ""))))}</td></tr>'
                 )
-            sections.append("</table>")
-            sections.append("</div>")
+            s.append('</table>')
 
-        # Notes
+        if gatt_services:
+            s.append('<h3>GATT Services</h3>')
+            s.append('<table><tr><th>Handle</th><th>UUID</th><th>Name</th><th>Properties</th></tr>')
+            for svc in gatt_services:
+                s.append(
+                    f'<tr><td>{_esc(str(svc.get("handle", "")))}</td>'
+                    f'<td class="mono">{_esc(str(svc.get("uuid", "")))}</td>'
+                    f'<td>{_esc(str(svc.get("name", svc.get("characteristic", ""))))}</td>'
+                    f'<td>{_esc(str(svc.get("properties", "")))}</td></tr>'
+                )
+            s.append('</table>')
+
+        if channel_scans:
+            s.append('<h3>Channel Scan Results</h3>')
+            s.append('<table><tr><th>Channel/PSM</th><th>Status</th><th>Service</th></tr>')
+            for ch in channel_scans:
+                chan = ch.get("channel", ch.get("psm", ""))
+                s.append(
+                    f'<tr><td>{_esc(str(chan))}</td>'
+                    f'<td>{_esc(str(ch.get("status", ch.get("state", ""))))}</td>'
+                    f'<td>{_esc(str(ch.get("service", ch.get("description", ""))))}</td></tr>'
+                )
+            s.append('</table>')
+
+        if other_recon:
+            s.append('<h3>Additional Recon Data</h3>')
+            s.append(f'<pre>{_esc(json.dumps(other_recon, indent=2, default=str)[:3000])}</pre>')
+
+        s.append('</div>')
+        return "\n".join(s)
+
+    def _build_dos_html(self) -> str:
+        if not self.dos_results:
+            return ""
+        s = []
+        s.append('<div class="section" id="sec-dos">')
+        s.append('<h2>Denial of Service Test Results</h2>')
+        s.append('<table><tr><th>Test</th><th>Target</th><th>Duration</th>'
+                 '<th>Packets Sent</th><th>Result</th><th>Impact</th></tr>')
+        for entry in self.dos_results:
+            data = entry.get("data", entry) if isinstance(entry, dict) else entry
+            if isinstance(data, dict):
+                s.append(
+                    f'<tr><td>{_esc(str(data.get("test", data.get("command", entry.get("source", "dos")))))}</td>'
+                    f'<td class="mono">{_esc(str(data.get("target", "")))}</td>'
+                    f'<td>{_esc(str(data.get("duration", data.get("duration_seconds", "N/A"))))}</td>'
+                    f'<td>{_esc(str(data.get("packets_sent", data.get("packets", "N/A"))))}</td>'
+                    f'<td>{_esc(str(data.get("result", data.get("status", "unknown"))))}</td>'
+                    f'<td>{_esc(str(data.get("impact", data.get("effect", ""))))}</td></tr>'
+                )
+            else:
+                s.append(f'<tr><td colspan="6"><pre>{_esc(json.dumps(data, indent=2, default=str)[:500])}</pre></td></tr>')
+        s.append('</table></div>')
+        return "\n".join(s)
+
+    def _build_pbap_html(self) -> str:
+        if not self.pbap_results:
+            return ""
+        s = []
+        s.append('<div class="section" id="sec-data-exfil">')
+        s.append('<h2>Data Exfiltration: PBAP (Phonebook)</h2>')
+        s.append('<p>The following phonebook data was successfully extracted from the target device.</p>')
+        s.append('<table><tr><th>Source</th><th>Entries</th><th>Size</th><th>Category</th></tr>')
+        for path, data in self.pbap_results.items():
+            entries = data.get("entries", "N/A") if isinstance(data, dict) else "N/A"
+            size = data.get("size", "N/A") if isinstance(data, dict) else "N/A"
+            # Derive category from filename
+            cat = "Contacts"
+            path_lower = path.lower()
+            if "ch" in path_lower:
+                cat = "Call History"
+            elif "fav" in path_lower:
+                cat = "Favorites"
+            elif "ich" in path_lower:
+                cat = "Incoming Calls"
+            elif "och" in path_lower:
+                cat = "Outgoing Calls"
+            elif "mch" in path_lower:
+                cat = "Missed Calls"
+            s.append(f'<tr><td><code>{_esc(path)}</code></td>'
+                     f'<td>{entries}</td><td>{size}</td><td>{_esc(cat)}</td></tr>')
+        s.append('</table></div>')
+        return "\n".join(s)
+
+    def _build_map_html(self) -> str:
+        if not self.map_results:
+            return ""
+        s = []
+        s.append('<div class="section" id="sec-map">')
+        s.append('<h2>Data Exfiltration: MAP (Messages)</h2>')
+        s.append(f'<p>{len(self.map_results)} message data set(s) collected.</p>')
+        for path, data in self.map_results.items():
+            s.append(f'<h3>{_esc(path)}</h3>')
+            if isinstance(data, dict):
+                listing = data.get("listing_file", "")
+                messages = data.get("messages", [])
+                if listing:
+                    s.append(f'<p>Listing file: <code>{_esc(listing)}</code></p>')
+                if messages:
+                    s.append(f'<p>Messages fetched: {len(messages)}</p>')
+                    s.append('<table><tr><th>Handle</th><th>File</th></tr>')
+                    for msg in messages[:50]:
+                        s.append(f'<tr><td>{_esc(msg.get("handle", ""))}</td>'
+                                 f'<td><code>{_esc(msg.get("file", ""))}</code></td></tr>')
+                    s.append('</table>')
+                    if len(messages) > 50:
+                        s.append(f'<p>... and {len(messages) - 50} more</p>')
+                elif not listing:
+                    s.append(f'<pre>{_esc(json.dumps(data, indent=2, default=str)[:2000])}</pre>')
+            else:
+                s.append(f'<pre>{_esc(json.dumps(data, indent=2, default=str)[:2000])}</pre>')
+        s.append('</div>')
+        return "\n".join(s)
+
+    def _build_audio_html(self) -> str:
+        if not self.audio_captures:
+            return ""
+        s = []
+        s.append('<div class="section" id="sec-audio">')
+        s.append('<h2>Audio Captures</h2>')
+        s.append('<table><tr><th>File</th><th>Duration</th><th>Description</th></tr>')
+        for cap in self.audio_captures:
+            dur = f"{cap.get('duration', 0):.1f}s" if cap.get("duration") else "N/A"
+            s.append(f'<tr><td><code>{_esc(cap.get("file", ""))}</code></td>'
+                     f'<td>{dur}</td><td>{_esc(cap.get("description", ""))}</td></tr>')
+        s.append('</table></div>')
+        return "\n".join(s)
+
+    def _build_appendix_html(self) -> str:
+        parts = []
+
+        if self.other_data:
+            parts.append('<div class="section" id="sec-appendix">')
+            parts.append('<h2>Appendix: Additional Data</h2>')
+            for path, data in self.other_data.items():
+                parts.append(f'<h3>{_esc(path)}</h3>')
+                parts.append(f'<pre>{_esc(json.dumps(data, indent=2, default=str)[:2000])}</pre>')
+            parts.append('</div>')
+
         if self.notes:
-            sections.append('<div class="section">')
-            sections.append("<h2>Analyst Notes</h2>")
+            if not parts:
+                parts.append('<div class="section" id="sec-appendix">')
+                parts.append('<h2>Appendix</h2>')
+            else:
+                # Already in an appendix section
+                pass
+            parts.append('<h3>Analyst Notes</h3>')
             for note in self.notes:
-                sections.append(f"<p>{_esc(note)}</p>")
-            sections.append("</div>")
+                parts.append(f'<p>{_esc(note)}</p>')
+            if not self.other_data:
+                parts.append('</div>')
 
-        content = "\n".join(sections)
-        # Use .replace() instead of .format() to avoid KeyError from JSON
-        # curly braces in content (json.dumps output contains { and })
-        try:
-            from blue_tap import __version__
-        except ImportError:
-            __version__ = "unknown"
-        html = (_HTML_TEMPLATE
-                .replace("{generated}", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-                .replace("{version}", f"v{__version__}")
-                .replace("{content}", content))
+        return "\n".join(parts)
+
+    # ===================================================================
+    # Public output generators
+    # ===================================================================
+
+    def generate_html(self, output: str = "report.html") -> str:
+        """Generate a professional styled HTML pentest report."""
+        # Determine which sections exist
+        toc_entries: list[tuple[str, str]] = []
+        toc_entries.append(("sec-executive-summary", "Executive Summary"))
+
+        if self._session_metadata:
+            toc_entries.append(("sec-scope", "Scope and Methodology"))
+            if self._session_metadata.get("commands"):
+                toc_entries.append(("sec-timeline", "Assessment Timeline"))
+
+        if self.fingerprint_results:
+            toc_entries.append(("sec-fingerprint", "Device Fingerprint"))
+        if self.scan_results:
+            toc_entries.append(("sec-devices", "Discovered Devices"))
+        if self.vuln_findings:
+            toc_entries.append(("sec-vulnerabilities", "Vulnerability Findings"))
+        if self.attack_results:
+            toc_entries.append(("sec-attack", "Attack Chain Results"))
+        if self._fuzz_campaign_stats or self._fuzz_crashes or self.fuzz_results:
+            toc_entries.append(("sec-fuzzing", "Fuzzing Campaign Results"))
+        if self.recon_results:
+            toc_entries.append(("sec-recon", "Reconnaissance Results"))
+        if self.dos_results:
+            toc_entries.append(("sec-dos", "Denial of Service Tests"))
+        if self.pbap_results:
+            toc_entries.append(("sec-data-exfil", "Data Exfiltration: PBAP"))
+        if self.map_results:
+            toc_entries.append(("sec-map", "Data Exfiltration: MAP"))
+        if self.audio_captures:
+            toc_entries.append(("sec-audio", "Audio Captures"))
+        if self.other_data or self.notes:
+            toc_entries.append(("sec-appendix", "Appendix"))
+
+        # Build all sections
+        body_parts = [
+            self._build_header_html(),
+            self._build_toc_html(toc_entries),
+            self._build_executive_summary_html(),
+            self._build_scope_html(),
+            self._build_timeline_html(),
+            self._build_fingerprint_html(),
+            self._build_scan_html(),
+            self._build_vuln_html(),
+            self._build_attack_html(),
+        ]
+        body_parts.extend(self._build_fuzz_html())
+        body_parts.extend([
+            self._build_recon_html(),
+            self._build_dos_html(),
+            self._build_pbap_html(),
+            self._build_map_html(),
+            self._build_audio_html(),
+            self._build_appendix_html(),
+            f'<div class="footer">Blue-Tap v{_esc(__version__)} | '
+            f'Report generated {datetime.now().strftime("%Y-%m-%d %H:%M:%S")} | '
+            f'CONFIDENTIAL</div>',
+        ])
+
+        content = "\n".join(p for p in body_parts if p)
+        html = _HTML_TEMPLATE.replace("{css}", _CSS).replace("{content}", content)
 
         outdir = os.path.dirname(output)
         if outdir:
@@ -1032,7 +1492,7 @@ class ReportGenerator:
 
     def generate_json(self, output: str = "report.json") -> str:
         """Generate a machine-readable JSON report."""
-        # Build detailed fuzz section for JSON
+        # Fuzz section
         fuzz_data = {}
         if self._fuzz_campaign_stats or self._fuzz_crashes:
             fuzz_data = {
@@ -1048,24 +1508,47 @@ class ReportGenerator:
                     "reproduced": sum(1 for c in self._fuzz_crashes if c.get("reproduced")),
                 },
             }
-            # Aggregate crash stats
             for crash in self._fuzz_crashes:
                 sev = crash.get("severity", "UNKNOWN")
                 proto = crash.get("protocol", "unknown")
                 ctype = crash.get("crash_type", "unknown")
                 fuzz_data["crash_summary"]["by_severity"][sev] = (
-                    fuzz_data["crash_summary"]["by_severity"].get(sev, 0) + 1
-                )
+                    fuzz_data["crash_summary"]["by_severity"].get(sev, 0) + 1)
                 fuzz_data["crash_summary"]["by_protocol"][proto] = (
-                    fuzz_data["crash_summary"]["by_protocol"].get(proto, 0) + 1
-                )
+                    fuzz_data["crash_summary"]["by_protocol"].get(proto, 0) + 1)
                 fuzz_data["crash_summary"]["by_type"][ctype] = (
-                    fuzz_data["crash_summary"]["by_type"].get(ctype, 0) + 1
-                )
+                    fuzz_data["crash_summary"]["by_type"].get(ctype, 0) + 1)
+
+        # Scope
+        scope = {}
+        if self._session_metadata:
+            scope = {
+                "targets": self._session_metadata.get("targets", []),
+                "session_name": self._session_metadata.get("name", ""),
+                "created": self._session_metadata.get("created", ""),
+                "last_updated": self._session_metadata.get("last_updated", ""),
+                "commands_executed": len(self._session_metadata.get("commands", [])),
+                "categories": list(set(
+                    c.get("category", "") for c in self._session_metadata.get("commands", [])
+                )),
+            }
+
+        # Timeline
+        timeline = []
+        for cmd in self._session_metadata.get("commands", []):
+            timeline.append({
+                "timestamp": cmd.get("timestamp", ""),
+                "command": cmd.get("command", ""),
+                "category": cmd.get("category", ""),
+                "target": cmd.get("target", ""),
+            })
 
         report = {
             "generated": datetime.now().isoformat(),
             "tool": "Blue-Tap",
+            "tool_version": __version__,
+            "risk_rating": _risk_rating(self.vuln_findings, self._fuzz_crashes),
+            "scope": scope,
             "summary": {
                 "devices_scanned": len(self.scan_results),
                 "total_findings": len(self.vuln_findings),
@@ -1076,7 +1559,9 @@ class ReportGenerator:
                                      if f.get("severity", "").lower() in ("high", "critical")),
                 "fuzz_test_cases": self._fuzz_campaign_stats.get("packets_sent", 0),
                 "fuzz_crashes": len(self._fuzz_crashes),
+                "data_exfiltration": len(self.pbap_results) + len(self.map_results),
             },
+            "timeline": timeline,
             "fingerprint": self.fingerprint_results,
             "scan_results": self.scan_results,
             "vulnerabilities": self.vuln_findings,
@@ -1098,9 +1583,3 @@ class ReportGenerator:
             json.dump(report, f, indent=2, default=str)
         success(f"JSON report generated: {output}")
         return output
-
-
-def _esc(text: str) -> str:
-    """Escape HTML special characters including single quotes."""
-    import html as _html
-    return _html.escape(str(text), quote=True)

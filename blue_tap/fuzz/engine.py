@@ -84,6 +84,14 @@ try:
 except ImportError:
     _HAS_MUTATORS = False
 
+try:
+    from blue_tap.fuzz.strategies.random_walk import RandomWalkStrategy
+    from blue_tap.fuzz.strategies.coverage_guided import CoverageGuidedStrategy
+    from blue_tap.fuzz.strategies.state_machine import StateMachineStrategy
+    _HAS_STRATEGIES = True
+except ImportError:
+    _HAS_STRATEGIES = False
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -191,11 +199,12 @@ class CampaignStats:
     current_protocol: str = ""
     errors: int = 0
     protocol_breakdown: dict[str, int] = field(default_factory=dict)
+    prior_elapsed: float = 0.0
 
     @property
     def runtime_seconds(self) -> float:
-        """Elapsed wall-clock seconds since campaign start."""
-        return time.time() - self.start_time
+        """Elapsed wall-clock seconds including any prior resumed run."""
+        return self.prior_elapsed + (time.time() - self.start_time)
 
     @property
     def packets_per_second(self) -> float:
@@ -250,7 +259,7 @@ class _StubCrashDB:
         *,
         severity: str = "MEDIUM",
         mutation_log: str = "",
-    ) -> None:
+    ) -> int:
         self._count += 1
         crash_file = os.path.join(self._dir, f"crash_{self._count:04d}.json")
         data = {
@@ -265,6 +274,7 @@ class _StubCrashDB:
         }
         with open(crash_file, "w") as f:
             json.dump(data, f, indent=2)
+        return self._count
 
     def crash_count(self) -> int:
         return self._count
@@ -306,7 +316,7 @@ class _StubCorpus:
         import random
         return os.urandom(random.randint(8, 256))
 
-    def add_seed(self, protocol: str, data: bytes, name: str = "") -> str:
+    def add_seed(self, protocol: str, data: bytes, name: str = "") -> None:
         """Save a seed to the corpus directory."""
         protocol_dir = os.path.join(self._dir, protocol) if protocol else self._dir
         os.makedirs(protocol_dir, exist_ok=True)
@@ -315,7 +325,6 @@ class _StubCorpus:
         if not os.path.exists(path):
             with open(path, "wb") as f:
                 f.write(data)
-        return path
 
     def seed_count(self, protocol: str = "") -> int:
         protocol_dir = os.path.join(self._dir, protocol) if protocol else self._dir
@@ -330,15 +339,21 @@ class _StubCorpus:
 class _StubMutator:
     """Minimal byte-level mutator when the real CorpusMutator is unavailable."""
 
-    def mutate(self, data: bytes) -> tuple[bytes, list[str]]:
-        """Apply a random byte-level mutation and return (mutated, log)."""
+    def __init__(self) -> None:
+        self.last_mutations: list[str] = []
+
+    def mutate(self, data: bytes) -> bytes:
+        """Apply a random byte-level mutation. Returns mutated bytes.
+
+        Mutation descriptions are stored in ``self.last_mutations``.
+        """
         import random
 
         if not data:
             data = os.urandom(random.randint(8, 64))
 
         mutated = bytearray(data)
-        mutations: list[str] = []
+        self.last_mutations = []
 
         strategy = random.choice(["bitflip", "byte_replace", "insert", "delete", "truncate"])
 
@@ -346,33 +361,33 @@ class _StubMutator:
             pos = random.randint(0, len(mutated) - 1)
             bit = 1 << random.randint(0, 7)
             mutated[pos] ^= bit
-            mutations.append(f"bitflip@{pos} bit={bit:#04x}")
+            self.last_mutations.append(f"bitflip@{pos} bit={bit:#04x}")
 
         elif strategy == "byte_replace" and mutated:
             pos = random.randint(0, len(mutated) - 1)
             old_val = mutated[pos]
             mutated[pos] = random.randint(0, 255)
-            mutations.append(f"byte_replace@{pos} {old_val:#04x}->{mutated[pos]:#04x}")
+            self.last_mutations.append(f"byte_replace@{pos} {old_val:#04x}->{mutated[pos]:#04x}")
 
         elif strategy == "insert":
             pos = random.randint(0, len(mutated))
             count = random.randint(1, 16)
             insert_bytes = os.urandom(count)
             mutated[pos:pos] = insert_bytes
-            mutations.append(f"insert@{pos} count={count}")
+            self.last_mutations.append(f"insert@{pos} count={count}")
 
         elif strategy == "delete" and len(mutated) > 1:
             pos = random.randint(0, len(mutated) - 1)
             count = min(random.randint(1, 8), len(mutated) - pos)
             del mutated[pos:pos + count]
-            mutations.append(f"delete@{pos} count={count}")
+            self.last_mutations.append(f"delete@{pos} count={count}")
 
         elif strategy == "truncate" and len(mutated) > 1:
             new_len = random.randint(1, len(mutated) - 1)
             mutated = mutated[:new_len]
-            mutations.append(f"truncate len={new_len}")
+            self.last_mutations.append(f"truncate len={new_len}")
 
-        return bytes(mutated), mutations
+        return bytes(mutated)
 
 
 # ---------------------------------------------------------------------------
@@ -457,7 +472,8 @@ class _StubTransport:
             self._sock = None
         self._connected = False
 
-    def is_connected(self) -> bool:
+    @property
+    def connected(self) -> bool:
         return self._connected
 
     def reconnect(self) -> bool:
@@ -549,8 +565,26 @@ class FuzzCampaign:
         self._transports: dict[str, Any] = {}
         self._last_stats_time: float = 0.0
 
-        # Seen response fingerprints (for corpus dedup, fix #8)
+        # Strategy dispatch — instantiate real strategy classes when available.
+        self._strategy_obj: Any = None
+        if _HAS_STRATEGIES and _HAS_CORPUS and isinstance(self.corpus, Corpus):
+            if strategy == "coverage_guided":
+                self._strategy_obj = CoverageGuidedStrategy(corpus=self.corpus)
+                info("Strategy: coverage-guided (response-diversity feedback)")
+            elif strategy == "state_machine":
+                self._strategy_obj = StateMachineStrategy()
+                info("Strategy: state-machine (protocol state violations)")
+            elif strategy == "random":
+                self._strategy_obj = RandomWalkStrategy(corpus=self.corpus)
+                info("Strategy: random-walk (70% template / 30% corpus)")
+        if self._strategy_obj is None and strategy not in ("random", "targeted"):
+            warning(f"Strategy '{strategy}' unavailable, falling back to byte-level mutation")
+
+        # Seen response fingerprints (for corpus dedup)
         self._seen_responses: set[str] = set()
+
+        # Per-protocol crash counts for adaptive scheduling
+        self._proto_crash_counts: dict[str, int] = {p: 0 for p in protocols}
 
         # Validate protocols
         unknown = [p for p in protocols if p not in PROTOCOL_TRANSPORT_MAP]
@@ -618,33 +652,34 @@ class FuzzCampaign:
     # Fuzz case generation
     # ------------------------------------------------------------------
 
-    def _generate_fuzz_case(self, protocol: str) -> tuple[bytes, list[str]]:
+    def _generate_fuzz_case(self, protocol: str) -> tuple[bytes | list[bytes], list[str]]:
         """Generate a mutated fuzz case for the given protocol.
 
-        Retrieves a random seed from the corpus, applies mutations,
-        and returns the mutated payload along with a mutation log.
-
-        Args:
-            protocol: Protocol name to generate a case for.
+        Delegates to the active strategy object when available, otherwise
+        falls back to byte-level corpus mutation.
 
         Returns:
-            Tuple of (fuzz_bytes, mutation_log).
+            Tuple of (fuzz_bytes_or_sequence, mutation_log).
+            For state-machine strategy, fuzz_bytes may be a list[bytes]
+            (multi-packet sequence to send in order).
         """
-        seed = self.corpus.get_random_seed(protocol)
+        # Delegate to strategy object if available
+        if self._strategy_obj is not None:
+            try:
+                result = self._strategy_obj.generate(protocol)
+                return result
+            except (ValueError, KeyError):
+                # Protocol not supported by this strategy — fall through
+                pass
 
-        # Handle None seed from corpus (generate random bytes as fallback)
+        # Fallback: byte-level corpus mutation
+        seed = self.corpus.get_random_seed(protocol)
         if seed is None:
             import random as _rng
             seed = os.urandom(_rng.randint(8, 256))
 
-        # CorpusMutator.mutate() returns bytes, not a tuple.
-        # Wrap the call to always return (bytes, list[str]).
-        result = self._mutator.mutate(seed)
-        if isinstance(result, tuple):
-            mutated, mutation_log = result
-        else:
-            mutated = result
-            mutation_log = ["mutated"]
+        mutated = self._mutator.mutate(seed)
+        mutation_log = getattr(self._mutator, "last_mutations", ["mutated"])
         return mutated, mutation_log
 
     # ------------------------------------------------------------------
@@ -664,24 +699,29 @@ class FuzzCampaign:
         unexpected error codes, or response patterns that suggest
         interesting behavior worth adding to the corpus.
 
-        Args:
-            protocol: Protocol that was fuzzed.
-            payload: The fuzz payload that was sent.
-            response: Response bytes, or ``None`` if the target timed out.
-            mutation_log: List of mutation operations applied.
+        Also feeds back to the active strategy (coverage-guided) so
+        novel responses guide future mutations.
         """
+        # Feed back to strategy for coverage-guided learning
+        if hasattr(self._strategy_obj, "feedback"):
+            try:
+                self._strategy_obj.feedback(protocol, payload, response, crash=False)
+            except (ValueError, KeyError):
+                pass
+
         if response is None:
-            # Timeout -- potential hang. Don't classify as crash yet;
-            # the main loop handles connection-level errors.
             return
 
-        # Check for interesting response patterns that suggest new code paths.
-        # If the response is significantly different from typical responses,
-        # save it as an interesting input for the corpus.
         if len(response) > 0:
-            # Only add if the response fingerprint hasn't been seen before
-            # to prevent explosive corpus growth.
-            fingerprint = hashlib.sha256(response[:32]).hexdigest()
+            # Improved fingerprint: hash (length bucket, first byte/opcode,
+            # error code byte, full prefix) — catches different error codes
+            # that share leading bytes.
+            len_bucket = len(response) // 16  # group by 16-byte size bands
+            opcode = response[0] if response else 0
+            err_byte = response[1] if len(response) > 1 else 0
+            fp_data = f"{len_bucket}:{opcode}:{err_byte}:{response[:16].hex()}"
+            fingerprint = hashlib.sha256(fp_data.encode()).hexdigest()[:16]
+
             if fingerprint not in self._seen_responses:
                 self._seen_responses.add(fingerprint)
                 try:
@@ -716,6 +756,11 @@ class FuzzCampaign:
         severity = CRASH_SEVERITY.get(crash_type, "MEDIUM")
         self.stats.crashes += 1
 
+        # Track per-protocol crash count for adaptive scheduling
+        self._proto_crash_counts[protocol] = (
+            self._proto_crash_counts.get(protocol, 0) + 1
+        )
+
         # Log to crash database
         try:
             self.crash_db.log_crash(
@@ -728,6 +773,25 @@ class FuzzCampaign:
             )
         except Exception as exc:
             error(f"Failed to log crash: {exc}")
+
+        # Feed crash payload back into corpus as a high-value seed.
+        # Crash-producing inputs are the best starting points for
+        # finding related bugs via further mutation.
+        try:
+            self.corpus.add_seed(
+                protocol,
+                payload,
+                name=f"crash_{self.stats.crashes}",
+            )
+        except (OSError, AttributeError):
+            pass
+
+        # Notify strategy of the crash (for coverage-guided energy boost)
+        if hasattr(self._strategy_obj, "feedback"):
+            try:
+                self._strategy_obj.feedback(protocol, payload, None, crash=True)
+            except (ValueError, KeyError):
+                pass
 
         crash_num = self.stats.crashes
         info(
@@ -781,9 +845,27 @@ class FuzzCampaign:
         return True
 
     def _next_protocol(self) -> str:
-        """Select the next protocol using round-robin rotation."""
-        idx = self.stats.iterations % len(self.protocols)
-        return self.protocols[idx]
+        """Select the next protocol with crash-rate-weighted scheduling.
+
+        Protocols that have produced more crashes get proportionally more
+        iterations.  Baseline weight ensures all protocols still get tested.
+        Falls back to round-robin when no crashes have been observed yet.
+        """
+        import random as _rng
+
+        total_crashes = sum(self._proto_crash_counts.values())
+        if total_crashes == 0:
+            # No crashes yet — use round-robin to explore evenly
+            idx = self.stats.iterations % len(self.protocols)
+            return self.protocols[idx]
+
+        # Weight = baseline(1) + crash_count for each protocol.
+        # This ensures every protocol gets at least ~1/N of iterations,
+        # while high-crash protocols get proportionally more.
+        weights = []
+        for p in self.protocols:
+            weights.append(1.0 + self._proto_crash_counts.get(p, 0))
+        return _rng.choices(self.protocols, weights=weights, k=1)[0]
 
     # ------------------------------------------------------------------
     # Main loop
@@ -876,35 +958,37 @@ class FuzzCampaign:
                     self.stats.iterations += 1
                     continue
 
-                # Generate fuzz case
-                fuzz_case, mutation_log = self._generate_fuzz_case(protocol)
+                # Generate fuzz case (may be single bytes or multi-packet list)
+                fuzz_result, mutation_log = self._generate_fuzz_case(protocol)
+
+                # Normalize to list for uniform handling.  State-machine
+                # strategy returns list[bytes]; others return bytes.
+                if isinstance(fuzz_result, list):
+                    packets = fuzz_result
+                else:
+                    packets = [fuzz_result]
+
+                # For crash attribution, keep the last packet as the
+                # "fuzz_case" — it's typically the mutated/attack packet.
+                fuzz_case = packets[-1] if packets else b""
 
                 # Send and observe
                 try:
-                    # BluetoothTransport uses a .connected property,
-                    # _StubTransport uses .is_connected() method.
-                    _is_conn = (
-                        transport.connected
-                        if hasattr(transport, "connected") and isinstance(
-                            type(transport).__dict__.get("connected"), property
-                        )
-                        else transport.is_connected()
-                        if hasattr(transport, "is_connected")
-                        else False
-                    )
-                    if not _is_conn:
+                    if not transport.connected:
                         if not transport.connect():
                             self.stats.errors += 1
                             self.stats.iterations += 1
                             continue
 
-                    transport.send(fuzz_case)
-                    self.stats.packets_sent += 1
-                    self.stats.protocol_breakdown[protocol] = (
-                        self.stats.protocol_breakdown.get(protocol, 0) + 1
-                    )
+                    response = None
+                    for pkt in packets:
+                        transport.send(pkt)
+                        self.stats.packets_sent += 1
+                        self.stats.protocol_breakdown[protocol] = (
+                            self.stats.protocol_breakdown.get(protocol, 0) + 1
+                        )
+                        response = transport.recv()
 
-                    response = transport.recv()
                     self._analyze_response(protocol, fuzz_case, response, mutation_log)
 
                 except ConnectionResetError:
@@ -1219,6 +1303,9 @@ class FuzzCampaign:
         Returns:
             Path to the saved state file.
         """
+        # Snapshot total elapsed time so resume carries it forward.
+        stats_dict = asdict(self.stats)
+        stats_dict["prior_elapsed"] = self.stats.runtime_seconds
         state = {
             "target": self.target,
             "protocols": self.protocols,
@@ -1227,7 +1314,7 @@ class FuzzCampaign:
             "max_iterations": self.max_iterations,
             "cooldown": self.cooldown,
             "session_dir": self.session_dir,
-            "stats": asdict(self.stats),
+            "stats": stats_dict,
             "timestamp": datetime.now().isoformat(),
         }
         state_path = os.path.join(self._fuzz_dir, "campaign_state.json")
@@ -1271,10 +1358,11 @@ class FuzzCampaign:
             packets_sent=saved_stats.get("packets_sent", 0),
             crashes=saved_stats.get("crashes", 0),
             reconnects=saved_stats.get("reconnects", 0),
-            start_time=time.time(),  # Reset start time for the resumed run
+            start_time=time.time(),
             current_protocol=saved_stats.get("current_protocol", ""),
             errors=saved_stats.get("errors", 0),
             protocol_breakdown=saved_stats.get("protocol_breakdown", {}),
+            prior_elapsed=saved_stats.get("prior_elapsed", 0.0),
         )
 
         info(

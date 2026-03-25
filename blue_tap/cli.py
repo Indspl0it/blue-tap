@@ -2130,6 +2130,13 @@ def report_cmd(dump_dir, fmt, output):
                         f"Category: {category_name} | Status: {status}"
                     )
 
+        # Pass full session metadata for timeline, scope, and methodology
+        if hasattr(report, "add_session_metadata"):
+            report.add_session_metadata(session.metadata)
+
+        # Load structured fuzz data (crash DB, corpus stats, evidence files)
+        report.load_fuzz_from_session(session.dir)
+
         # Add session metadata as a note
         meta = session.metadata
         report.add_note(
