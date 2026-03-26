@@ -782,7 +782,7 @@ blue-tap report -f html -o report.html       # HTML format (default)
 ```bash
 # 1. Install system dependencies (Kali / Ubuntu / Debian)
 sudo apt update
-sudo apt install -y bluez bluez-tools python3-pip python3-dev \
+sudo apt install -y bluez bluez-tools python3-pip python3-dev python3-venv \
   libbluetooth-dev libdbus-1-dev libglib2.0-dev \
   libgirepository1.0-dev libcairo2-dev gir1.2-glib-2.0 pkg-config
 
@@ -1245,7 +1245,7 @@ sudo apt install bluez-tools
 ### Ubuntu / Debian
 
 ```bash
-sudo apt install -y bluez bluez-tools python3-pip python3-dev \
+sudo apt install -y bluez bluez-tools python3-pip python3-dev python3-venv \
   libbluetooth-dev libdbus-1-dev libglib2.0-dev \
   libgirepository1.0-dev libcairo2-dev gir1.2-glib-2.0 pkg-config
 ```
