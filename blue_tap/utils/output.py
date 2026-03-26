@@ -91,8 +91,9 @@ def banner():
         "[bt.dim] ───────[/bt.dim]"
     )
     console.print(tagline, highlight=False)
+    from blue_tap import __version__
     console.print(
-        "  [bt.dim]v2.0.0 │ by Indspl0it[/bt.dim]",
+        f"  [bt.dim]v{__version__} │ by Indspl0it[/bt.dim]",
         highlight=False,
     )
     console.print()

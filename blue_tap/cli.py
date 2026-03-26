@@ -9,6 +9,7 @@ import click
 from rich.table import Table
 from rich.panel import Panel
 
+from blue_tap import __version__
 from blue_tap.utils.output import (
     banner, info, success, error, warning, verbose, device_table, service_table, channel_table,
     console, summary_panel,
@@ -127,7 +128,7 @@ LoggedGroup.group_class = LoggedGroup
 
 
 @click.group(cls=LoggedGroup)
-@click.version_option(version="2.0.0")
+@click.version_option(version=__version__)
 @click.option("-v", "--verbose", count=True, help="Verbosity: -v verbose, -vv debug")
 @click.option("-s", "--session", "session_name", default=None,
               help="Session name (default: auto-generated from date/time). "

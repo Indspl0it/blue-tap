@@ -7,9 +7,14 @@
 #       libglib2.0-dev libgirepository1.0-dev libcairo2-dev \
 #       gir1.2-glib-2.0 pkg-config
 
+# Core (always needed)
 click>=8.1
 rich>=13.0
 bleak>=0.21
+
+# System D-Bus/GLib integration (requires C headers above)
+# Needed for: AVRCP, adapter management, GLib main loop features
+# Skip these if you only need BLE scanning/fuzzing (bleak handles BLE via dbus-fast)
 dbus-python>=1.3
 PyGObject>=3.42
 
@@ -18,6 +23,3 @@ PyGObject>=3.42
 
 # Optional: audio capture
 # pip install pulsectl>=23.5
-
-# Optional: development
-# pip install pytest ruff
