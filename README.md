@@ -789,12 +789,13 @@ sudo apt install -y bluez bluez-tools python3-pip python3-dev \
 git clone https://github.com/Indspl0it/blue-tap.git
 cd blue-tap
 
-# 3. Install Blue-Tap
-pip install -e ".[fuzz]"          # With fuzzing support (scapy)
-# or
-pip install -e ".[fuzz,audio]"    # With fuzzing + audio (scapy + pulsectl)
-# or
+# 3. Install Blue-Tap (pick one)
+pip install -e ".[fuzz]"          # Recommended: core + fuzzing (scapy)
+pip install -e ".[fuzz,audio]"    # Full: core + fuzzing + audio capture
 pip install -e "."                # Core only
+
+# Alternative: use requirements.txt
+pip install -r requirements.txt   # Core deps only (see file for optional extras)
 
 # 4. Verify installation
 blue-tap --version
