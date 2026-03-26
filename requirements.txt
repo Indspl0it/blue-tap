@@ -4,7 +4,7 @@
 # System packages required first (Kali/Ubuntu):
 #   sudo apt install -y python3-dev python3-pip python3-venv \
 #       bluetooth bluez libbluetooth-dev libdbus-1-dev \
-#       libgirepository1.0-dev libcairo2-dev pkg-config
+#       libgirepository1.0-dev libcairo2-dev gir1.2-glib-2.0 pkg-config
 
 click>=8.1
 rich>=13.0

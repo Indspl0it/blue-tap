@@ -783,7 +783,8 @@ blue-tap report -f html -o report.html       # HTML format (default)
 # 1. Install system dependencies (Kali / Ubuntu / Debian)
 sudo apt update
 sudo apt install -y bluez bluez-tools python3-pip python3-dev \
-  libbluetooth-dev libdbus-1-dev libglib2.0-dev
+  libbluetooth-dev libdbus-1-dev libglib2.0-dev \
+  libgirepository1.0-dev libcairo2-dev gir1.2-glib-2.0 pkg-config
 
 # 2. Clone the repository
 git clone https://github.com/Indspl0it/blue-tap.git
@@ -1245,7 +1246,8 @@ sudo apt install bluez-tools
 
 ```bash
 sudo apt install -y bluez bluez-tools python3-pip python3-dev \
-  libbluetooth-dev libdbus-1-dev libglib2.0-dev
+  libbluetooth-dev libdbus-1-dev libglib2.0-dev \
+  libgirepository1.0-dev libcairo2-dev gir1.2-glib-2.0 pkg-config
 ```
 
 ### Raspberry Pi
