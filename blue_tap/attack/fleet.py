@@ -188,7 +188,13 @@ class FleetAssessment:
 
         # Resolve target list
         if targets:
-            target_addrs = [normalize_mac(t) for t in targets]
+            target_addrs = []
+            for t in targets:
+                try:
+                    target_addrs.append(normalize_mac(t))
+                except ValueError:
+                    warning(f"Skipping invalid MAC: {t}")
+                    continue
         else:
             if not self._scan_results:
                 warning("No scan results — run scan() first or provide explicit targets")

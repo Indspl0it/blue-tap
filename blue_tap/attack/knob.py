@@ -232,6 +232,8 @@ class KNOBAttack:
 
         # Step 3: Check InternalBlue availability
         ib_available = self._check_internalblue()
+        result["internalblue_available"] = ib_available
+        result["method"] = "internalblue" if ib_available else "btmgmt"
         if ib_available:
             result["details"].append(
                 "InternalBlue available — full LMP-level KNOB attack possible"
