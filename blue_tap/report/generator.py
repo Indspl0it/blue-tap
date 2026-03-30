@@ -315,6 +315,12 @@ class ReportGenerator:
         self._fuzz_evidence_files: list[tuple] = []
         # Session metadata for timeline/scope
         self._session_metadata: dict = {}
+        # Fuzzing intelligence data (Phase 1-6)
+        self._fuzz_state_coverage: dict = {}
+        self._fuzz_field_weights: dict = {}
+        self._fuzz_health_events: list[dict] = []
+        self._fuzz_anomalies: list[dict] = []
+        self._fuzz_baselines: dict = {}
 
     # ------------------------------------------------------------------
     # Data intake (public API — signatures must not change)
@@ -365,6 +371,13 @@ class ReportGenerator:
         self._fuzz_campaign_stats = campaign_stats
         self._fuzz_crashes = crashes
         self._fuzz_evidence_dir = evidence_dir
+        # Extract intelligence data from campaign stats if present
+        if "state_coverage" in campaign_stats:
+            self._fuzz_state_coverage = campaign_stats["state_coverage"]
+        if "field_weights" in campaign_stats:
+            self._fuzz_field_weights = campaign_stats["field_weights"]
+        if "health_monitor" in campaign_stats:
+            self._fuzz_health_events = campaign_stats["health_monitor"].get("events", [])
 
     # ------------------------------------------------------------------
     # Session / fuzz data loaders
@@ -451,6 +464,32 @@ class ReportGenerator:
                     evidence_files.append((fname, fpath))
 
         self._fuzz_evidence_files = evidence_files
+
+        # Load fuzzing intelligence files (Phase 1-6)
+        for fname, attr in [
+            ("state_graph.json", "_fuzz_state_coverage"),
+            ("field_weights.json", "_fuzz_field_weights"),
+            ("baselines.json", "_fuzz_baselines"),
+        ]:
+            fpath = os.path.join(fuzz_dir, fname)
+            if os.path.exists(fpath):
+                try:
+                    with open(fpath) as f:
+                        setattr(self, attr, json.load(f))
+                    info(f"Loaded {fname}")
+                except (json.JSONDecodeError, OSError):
+                    pass
+
+        # Extract intelligence from campaign stats
+        if self._fuzz_campaign_stats:
+            if "state_coverage" in self._fuzz_campaign_stats:
+                self._fuzz_state_coverage = self._fuzz_campaign_stats["state_coverage"]
+            if "field_weights" in self._fuzz_campaign_stats:
+                self._fuzz_field_weights = self._fuzz_campaign_stats["field_weights"]
+            if "health_monitor" in self._fuzz_campaign_stats:
+                hm = self._fuzz_campaign_stats["health_monitor"]
+                if isinstance(hm, dict):
+                    self._fuzz_health_events = hm.get("events", [])
 
     # ------------------------------------------------------------------
     # Evidence package
@@ -1224,6 +1263,98 @@ class ReportGenerator:
         sections.append("</div>")
         return sections
 
+    def _build_fuzz_intelligence_html(self) -> str:
+        """Build the fuzzing intelligence section (state coverage, field weights, health)."""
+        has_data = any([self._fuzz_state_coverage, self._fuzz_field_weights,
+                        self._fuzz_health_events, self._fuzz_baselines])
+        if not has_data:
+            return ""
+
+        s = []
+        s.append('<div class="section" id="sec-fuzz-intel">')
+        s.append('<h2>Fuzzing Intelligence Analysis</h2>')
+        s.append('<p>Behavioral analysis data collected during the fuzzing campaign.</p>')
+
+        # State coverage
+        if self._fuzz_state_coverage:
+            sc = self._fuzz_state_coverage
+            s.append('<h3>Protocol State Coverage</h3>')
+            s.append(f'<p>Total states discovered: <strong>{sc.get("total_states", 0)}</strong> | '
+                     f'Total transitions: <strong>{sc.get("total_transitions", 0)}</strong></p>')
+            protos = sc.get("protocols_tracked") or sc.get("protocols", {})
+            if isinstance(protos, dict):
+                s.append('<table><tr><th>Protocol</th><th>States</th><th>Transitions</th></tr>')
+                for proto, pdata in sorted(protos.items()) if isinstance(protos, dict) else []:
+                    states = pdata.get("states", 0) if isinstance(pdata, dict) else 0
+                    trans = pdata.get("transitions", 0) if isinstance(pdata, dict) else 0
+                    s.append(f'<tr><td>{_esc(proto)}</td><td>{states}</td><td>{trans}</td></tr>')
+                s.append('</table>')
+            elif isinstance(protos, list):
+                s.append(f'<p>Protocols tracked: {_esc(", ".join(protos))}</p>')
+
+        # Field mutation weights
+        if self._fuzz_field_weights:
+            s.append('<h3>Field Mutation Weight Analysis</h3>')
+            s.append('<p>Fields ranked by anomaly/crash production. Higher weight = '
+                     'more productive for finding bugs.</p>')
+            for proto, weights in sorted(self._fuzz_field_weights.items()):
+                if not isinstance(weights, dict) or not weights:
+                    continue
+                s.append(f'<h4>{_esc(proto)}</h4>')
+                s.append('<table><tr><th>Field</th><th>Weight</th><th>Bar</th></tr>')
+                sorted_fields = sorted(weights.items(), key=lambda x: x[1], reverse=True)
+                for fname, w in sorted_fields:
+                    bar_width = int(w * 200)
+                    bar_color = "#ff4444" if w > 0.3 else "#ffaa00" if w > 0.15 else "#88cc00"
+                    s.append(
+                        f'<tr><td><code>{_esc(fname)}</code></td>'
+                        f'<td>{w:.1%}</td>'
+                        f'<td><div style="background:{bar_color};width:{bar_width}px;'
+                        f'height:14px;border-radius:3px;display:inline-block"></div></td></tr>'
+                    )
+                s.append('</table>')
+
+        # Baseline profiles
+        if self._fuzz_baselines:
+            s.append('<h3>Target Response Baselines</h3>')
+            s.append('<p>Normal response behavior learned before fuzzing began.</p>')
+            s.append('<table><tr><th>Protocol</th><th>Samples</th><th>Avg Size</th>'
+                     '<th>Avg Latency</th><th>Response Opcodes</th></tr>')
+            for proto, bl in sorted(self._fuzz_baselines.items()):
+                if not isinstance(bl, dict):
+                    continue
+                s.append(
+                    f'<tr><td>{_esc(proto)}</td>'
+                    f'<td>{bl.get("samples", 0)}</td>'
+                    f'<td>{bl.get("mean_len", 0):.0f}B</td>'
+                    f'<td>{bl.get("mean_latency_ms", 0):.0f}ms</td>'
+                    f'<td>{_esc(str(bl.get("seen_opcodes", [])))}</td></tr>'
+                )
+            s.append('</table>')
+
+        # Health events (reboots, degradation)
+        if self._fuzz_health_events:
+            s.append('<h3>Target Health Events</h3>')
+            s.append('<table><tr><th>Time</th><th>Status</th><th>Details</th>'
+                     '<th>Iteration</th></tr>')
+            for evt in self._fuzz_health_events:
+                if not isinstance(evt, dict):
+                    continue
+                status = evt.get("status", "unknown")
+                status_color = "#ff4444" if status in ("rebooted", "zombie", "unreachable") else (
+                    "#ffaa00" if status == "degraded" else "#88cc00")
+                s.append(
+                    f'<tr><td>{_esc(str(evt.get("timestamp", "")))}</td>'
+                    f'<td style="color:{status_color};font-weight:bold">'
+                    f'{_esc(status.upper())}</td>'
+                    f'<td>{_esc(evt.get("details", ""))}</td>'
+                    f'<td>{evt.get("iteration", "")}</td></tr>'
+                )
+            s.append('</table>')
+
+        s.append('</div>')
+        return "\n".join(s)
+
     def _build_recon_html(self) -> str:
         if not self.recon_results:
             return ""
@@ -1441,6 +1572,10 @@ class ReportGenerator:
             toc_entries.append(("sec-attack", "Attack Chain Results"))
         if self._fuzz_campaign_stats or self._fuzz_crashes or self.fuzz_results:
             toc_entries.append(("sec-fuzzing", "Fuzzing Campaign Results"))
+        has_fuzz_intel = any([self._fuzz_state_coverage, self._fuzz_field_weights,
+                             self._fuzz_health_events, self._fuzz_baselines])
+        if has_fuzz_intel:
+            toc_entries.append(("sec-fuzz-intel", "Fuzzing Intelligence Analysis"))
         if self.recon_results:
             toc_entries.append(("sec-recon", "Reconnaissance Results"))
         if self.dos_results:
@@ -1467,6 +1602,7 @@ class ReportGenerator:
             self._build_attack_html(),
         ]
         body_parts.extend(self._build_fuzz_html())
+        body_parts.append(self._build_fuzz_intelligence_html())
         body_parts.extend([
             self._build_recon_html(),
             self._build_dos_html(),
@@ -1570,6 +1706,13 @@ class ReportGenerator:
             "attack_results": self.attack_results,
             "recon_results": self.recon_results,
             "fuzzing": fuzz_data if fuzz_data else self.fuzz_results,
+            "fuzzing_intelligence": {
+                "state_coverage": self._fuzz_state_coverage,
+                "field_weights": self._fuzz_field_weights,
+                "baselines": self._fuzz_baselines,
+                "health_events": self._fuzz_health_events,
+            } if any([self._fuzz_state_coverage, self._fuzz_field_weights,
+                      self._fuzz_health_events, self._fuzz_baselines]) else {},
             "dos_results": self.dos_results,
             "audio_captures": self.audio_captures,
             "other_data": self.other_data,

@@ -218,6 +218,12 @@ def _build_dashboard(
     last_crash: dict | None,
     paused: bool = False,
     keyboard_hint: str = "",
+    state_coverage: dict | None = None,
+    field_weights: dict | None = None,
+    anomaly_counts: dict | None = None,
+    timing_clusters: dict | None = None,
+    health_status: str | None = None,
+    health_reboots: int = 0,
 ) -> Table:
     """Build the Rich renderable for the live campaign dashboard."""
     # Title changes when paused
@@ -400,7 +406,138 @@ def _build_dashboard(
     else:
         outer.add_row(Text("  Waiting for first test case...", style=DIM))
 
+    # ── Row 5: Intelligence metrics ──────────────────────────────────
+    has_intel = any([state_coverage, field_weights, anomaly_counts,
+                     timing_clusters, health_status])
+    if has_intel:
+        intel_text = Text()
+
+        # Health status (most important — show first)
+        if health_status:
+            h_color = GREEN if health_status == "alive" else (
+                RED if health_status in ("unreachable", "rebooted", "zombie") else YELLOW
+            )
+            intel_text.append("  Target:     ", style="bold white")
+            intel_text.append(f"{health_status.upper()}", style=f"bold {h_color}")
+            if health_reboots > 0:
+                intel_text.append(f"  ({health_reboots} reboot{'s' if health_reboots != 1 else ''})", style=RED)
+            intel_text.append("\n")
+
+        # State coverage per protocol
+        if state_coverage:
+            proto_stats = state_coverage.get("protocols", {})
+            if proto_stats:
+                parts = []
+                for p, ps in sorted(proto_stats.items()):
+                    s_count = ps.get("states", 0)
+                    t_count = ps.get("transitions", 0)
+                    parts.append(f"[{PURPLE}]{p}[/{PURPLE}]:[{CYAN}]{s_count}S/{t_count}T[/{CYAN}]")
+                intel_text.append("  States:     ", style="bold white")
+                intel_text.append_text(Text.from_markup("  ".join(parts)))
+                intel_text.append("\n")
+
+        # Timing clusters
+        if timing_clusters:
+            parts = []
+            for p, count in sorted(timing_clusters.items()):
+                parts.append(f"[{PURPLE}]{p}[/{PURPLE}]:[{CYAN}]{count}[/{CYAN}]")
+            intel_text.append("  Timing:     ", style="bold white")
+            intel_text.append_text(Text.from_markup("  ".join(parts)))
+            intel_text.append("\n")
+
+        # Anomaly counts
+        if anomaly_counts:
+            parts = []
+            total = 0
+            for atype, count in sorted(anomaly_counts.items()):
+                if count > 0:
+                    a_color = RED if atype in ("structural", "length", "leak") else YELLOW
+                    parts.append(f"[{a_color}]{atype}:{count}[/{a_color}]")
+                    total += count
+            if parts:
+                intel_text.append("  Anomalies:  ", style="bold white")
+                intel_text.append(f"[{RED}]{total}[/{RED}] total  ", style="white")
+                intel_text.append_text(Text.from_markup("  ".join(parts)))
+                intel_text.append("\n")
+
+        # Top field weights (show top 3 hottest fields)
+        if field_weights:
+            hot_fields = []
+            for proto, weights in sorted(field_weights.items()):
+                if isinstance(weights, dict):
+                    top = sorted(weights.items(), key=lambda x: x[1], reverse=True)[:2]
+                    for fname, w in top:
+                        if w > 0.15:  # Only show fields with meaningful weight
+                            hot_fields.append(f"[{PURPLE}]{proto}[/{PURPLE}]."
+                                              f"[{ORANGE}]{fname}[/{ORANGE}]"
+                                              f"([{CYAN}]{w:.0%}[/{CYAN}])")
+            if hot_fields:
+                intel_text.append("  Hot fields: ", style="bold white")
+                intel_text.append_text(Text.from_markup("  ".join(hot_fields[:5])))
+
+        intel_panel = Panel(
+            intel_text,
+            title=f"[bold {CYAN}]Fuzzing Intelligence[/bold {CYAN}]",
+            border_style=DIM,
+            padding=(0, 1),
+        )
+        outer.add_row(intel_panel)
+
     return outer
+
+
+def _extract_intel_metrics(cam) -> dict:
+    """Extract intelligence metrics from a FuzzCampaign for the dashboard."""
+    metrics: dict = {}
+
+    # State coverage
+    if hasattr(cam, '_state_tracker') and cam._state_tracker is not None:
+        try:
+            metrics["state_coverage"] = cam._state_tracker.get_state_coverage()
+        except Exception:
+            pass
+
+    # Field weights (top weights per protocol)
+    if hasattr(cam, '_field_tracker') and cam._field_tracker is not None:
+        try:
+            fw = {}
+            for proto in cam.protocols:
+                w = cam._field_tracker.get_weights(proto)
+                if w:
+                    fw[proto] = w
+            if fw:
+                metrics["field_weights"] = fw
+        except Exception:
+            pass
+
+    # Anomaly counts (from analyzer)
+    if hasattr(cam, '_analyzer') and cam._analyzer is not None:
+        try:
+            ac = getattr(cam._analyzer, '_anomaly_counts', None)
+            if ac:
+                metrics["anomaly_counts"] = dict(ac)
+        except Exception:
+            pass
+
+    # Timing clusters
+    if hasattr(cam, '_analyzer') and cam._analyzer is not None:
+        try:
+            tc = getattr(cam._analyzer, '_timing_clusters', None)
+            if tc:
+                metrics["timing_clusters"] = {p: len(clusters) for p, clusters in tc.items()}
+        except Exception:
+            pass
+
+    # Health monitor
+    if hasattr(cam, '_health_monitor') and cam._health_monitor is not None:
+        try:
+            hstats = cam._health_monitor.get_stats()
+            metrics["health_status"] = hstats.get("current_status", "alive")
+            metrics["health_reboots"] = hstats.get("reboot_count", 0)
+        except Exception:
+            pass
+
+    return metrics
 
 
 # ---------------------------------------------------------------------------
@@ -641,6 +778,7 @@ def _campaign_command(fuzz_group):
                     last_crash=None,
                     paused=False,
                     keyboard_hint=kb.status_text,
+                    **_extract_intel_metrics(cam),
                 ),
                 console=console,
                 refresh_per_second=1,
@@ -663,6 +801,7 @@ def _campaign_command(fuzz_group):
                                 last_crash=all_crashes[-1] if all_crashes else None,
                                 paused=True,
                                 keyboard_hint=kb.status_text,
+                                **_extract_intel_metrics(cam),
                             )
                         )
                         kb.wait_if_paused()
@@ -749,6 +888,7 @@ def _campaign_command(fuzz_group):
                                 last_crash=last_crash,
                                 paused=kb.paused,
                                 keyboard_hint=kb.status_text,
+                                **_extract_intel_metrics(cam),
                             )
                         )
                         last_dashboard_update = now

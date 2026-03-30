@@ -1,4 +1,4 @@
-# Blue-Tap v2.0.1
+# Blue-Tap v2.1.0
 #
 # System packages (run first):
 #   sudo apt install -y bluez bluez-tools libbluetooth-dev

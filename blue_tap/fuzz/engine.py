@@ -92,6 +92,30 @@ try:
 except ImportError:
     _HAS_STRATEGIES = False
 
+try:
+    from blue_tap.fuzz.response_analyzer import ResponseAnalyzer
+    _HAS_ANALYZER = True
+except ImportError:
+    _HAS_ANALYZER = False
+
+try:
+    from blue_tap.fuzz.state_inference import StateTracker
+    _HAS_STATE_TRACKER = True
+except ImportError:
+    _HAS_STATE_TRACKER = False
+
+try:
+    from blue_tap.fuzz.field_weight_tracker import FieldWeightTracker, FieldAwareMutator
+    _HAS_FIELD_WEIGHTS = True
+except ImportError:
+    _HAS_FIELD_WEIGHTS = False
+
+try:
+    from blue_tap.fuzz.health_monitor import TargetHealthMonitor, HealthStatus
+    _HAS_HEALTH_MONITOR = True
+except ImportError:
+    _HAS_HEALTH_MONITOR = False
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -580,6 +604,19 @@ class FuzzCampaign:
         if self._strategy_obj is None and strategy not in ("random", "targeted"):
             warning(f"Strategy '{strategy}' unavailable, falling back to byte-level mutation")
 
+        # Response anomaly analyzer (learns baseline, detects deviations)
+        self._analyzer: Any = ResponseAnalyzer() if _HAS_ANALYZER else None
+
+        # State inference (Phase 1)
+        self._state_tracker: Any = StateTracker() if _HAS_STATE_TRACKER else None
+
+        # Field mutation weights (Phase 2)
+        self._field_tracker: Any = FieldWeightTracker() if _HAS_FIELD_WEIGHTS else None
+        self._field_mutator: Any = FieldAwareMutator() if _HAS_FIELD_WEIGHTS else None
+
+        # Target health monitor (Phase 6)
+        self._health_monitor: Any = TargetHealthMonitor(target) if _HAS_HEALTH_MONITOR else None
+
         # Seen response fingerprints (for corpus dedup)
         self._seen_responses: set[str] = set()
 
@@ -672,6 +709,18 @@ class FuzzCampaign:
                 # Protocol not supported by this strategy — fall through
                 pass
 
+        # 50% chance: use field-aware mutation if tracker has learned weights
+        if self._field_mutator is not None and self._field_tracker is not None:
+            import random as _rng
+            if _rng.random() < 0.5 and self._field_tracker.get_weights(protocol):
+                try:
+                    seed = self.corpus.get_random_seed(protocol)
+                    if seed is not None:
+                        mutated, log = self._field_mutator.mutate(protocol, seed, self._field_tracker)
+                        return mutated, log
+                except Exception:
+                    pass  # fall through to byte-level
+
         # Fallback: byte-level corpus mutation
         seed = self.corpus.get_random_seed(protocol)
         if seed is None:
@@ -692,15 +741,14 @@ class FuzzCampaign:
         payload: bytes,
         response: bytes | None,
         mutation_log: list[str],
+        latency_ms: float = 0.0,
     ) -> None:
         """Analyze the target's response to a fuzz case.
 
-        Checks for anomalies such as timeouts (potential hangs),
-        unexpected error codes, or response patterns that suggest
-        interesting behavior worth adding to the corpus.
-
-        Also feeds back to the active strategy (coverage-guided) so
-        novel responses guide future mutations.
+        Three layers of analysis:
+        1. Coverage-guided strategy feedback (response diversity tracking)
+        2. Response fingerprinting (novel response -> save to corpus)
+        3. Behavioral anomaly detection (structural, statistical, leak indicators)
         """
         # Feed back to strategy for coverage-guided learning
         if hasattr(self._strategy_obj, "feedback"):
@@ -709,14 +757,48 @@ class FuzzCampaign:
             except (ValueError, KeyError):
                 pass
 
+        # Run anomaly analyzer (structural + baseline deviation + leak detection)
+        if self._analyzer is not None:
+            anomalies = self._analyzer.analyze(protocol, payload, response, latency_ms)
+            for anomaly in anomalies:
+                if anomaly.score >= 7.0:
+                    # High-confidence anomaly — treat as interesting input
+                    try:
+                        self.corpus.add_seed(
+                            protocol, payload,
+                            name=f"anomaly_{anomaly.anomaly_type.value}_{self.stats.iterations}",
+                        )
+                    except (OSError, AttributeError):
+                        pass
+                    info(
+                        f"[bt.yellow]ANOMALY[/bt.yellow] "
+                        f"[{anomaly.severity}] {anomaly.description}"
+                    )
+                if anomaly.score >= 9.0:
+                    # Very high score — log as potential crash/leak for investigation
+                    self._handle_crash(
+                        "unexpected_response", protocol, payload, mutation_log,
+                    )
+                    return  # Don't double-count
+
+            # Feed anomaly info to field weight tracker
+            if self._field_tracker is not None and anomalies:
+                for log_entry in mutation_log:
+                    if ":" in log_entry:
+                        field_name = log_entry.split(":")[0].strip()
+                        for anomaly in anomalies:
+                            if anomaly.score >= 5.0:
+                                try:
+                                    self._field_tracker.record_anomaly(protocol, field_name)
+                                except Exception:
+                                    pass
+
         if response is None:
             return
 
         if len(response) > 0:
-            # Improved fingerprint: hash (length bucket, first byte/opcode,
-            # error code byte, full prefix) — catches different error codes
-            # that share leading bytes.
-            len_bucket = len(response) // 16  # group by 16-byte size bands
+            # Response fingerprinting for corpus evolution
+            len_bucket = len(response) // 16
             opcode = response[0] if response else 0
             err_byte = response[1] if len(response) > 1 else 0
             fp_data = f"{len_bucket}:{opcode}:{err_byte}:{response[:16].hex()}"
@@ -785,6 +867,16 @@ class FuzzCampaign:
             )
         except (OSError, AttributeError):
             pass
+
+        # Feed crash info to field weight tracker
+        if self._field_tracker is not None:
+            for log_entry in mutation_log:
+                if ":" in log_entry:
+                    field_name = log_entry.split(":")[0].strip()
+                    try:
+                        self._field_tracker.record_crash(protocol, field_name)
+                    except Exception:
+                        pass
 
         # Notify strategy of the crash (for coverage-guided energy boost)
         if hasattr(self._strategy_obj, "feedback"):
@@ -945,6 +1037,33 @@ class FuzzCampaign:
                 self._generate_initial_seeds(proto)
 
         info(f"Corpus loaded: {sum(self.corpus.seed_count(p) for p in self.protocols)} seeds")
+
+        # Baseline learning: send a few valid seeds per protocol and record
+        # normal response behavior (size, latency, opcodes) before fuzzing.
+        if self._analyzer is not None:
+            info("Learning baseline response behavior...")
+            for proto in self.protocols:
+                transport = self._transports.get(proto)
+                if transport is None:
+                    continue
+                seeds = self.corpus.get_all_seeds(proto) if hasattr(self.corpus, 'get_all_seeds') else []
+                for seed in seeds[:5]:  # up to 5 baseline samples per protocol
+                    try:
+                        if not transport.connected:
+                            transport.connect()
+                        t0 = time.time()
+                        transport.send(seed)
+                        response = transport.recv()
+                        latency_ms = (time.time() - t0) * 1000
+                        self._analyzer.record_baseline(proto, response, latency_ms)
+                    except Exception:
+                        pass
+            self._analyzer.finalize_baselines()
+            bl_summary = self._analyzer.baseline_summary()
+            for proto, stats in bl_summary.items():
+                info(f"  {proto}: {stats['samples']} samples, "
+                     f"avg {stats['mean_len']:.0f}B, {stats['mean_latency_ms']:.0f}ms")
+
         console.print()
 
         # Main fuzzing loop
@@ -981,6 +1100,7 @@ class FuzzCampaign:
                             continue
 
                     response = None
+                    t0 = time.time()
                     for pkt in packets:
                         transport.send(pkt)
                         self.stats.packets_sent += 1
@@ -988,8 +1108,38 @@ class FuzzCampaign:
                             self.stats.protocol_breakdown.get(protocol, 0) + 1
                         )
                         response = transport.recv()
+                    latency_ms = (time.time() - t0) * 1000
 
-                    self._analyze_response(protocol, fuzz_case, response, mutation_log)
+                    self._analyze_response(
+                        protocol, fuzz_case, response, mutation_log, latency_ms,
+                    )
+
+                    # State tracking
+                    if self._state_tracker is not None and response is not None:
+                        try:
+                            novel_state = self._state_tracker.record(protocol, response, seed=fuzz_case)
+                            if novel_state:
+                                try:
+                                    self.corpus.add_seed(protocol, fuzz_case, name=f"state_novel_{self.stats.iterations}")
+                                except (OSError, AttributeError):
+                                    pass
+                        except Exception:
+                            pass
+
+                    # Health monitoring
+                    if self._health_monitor is not None:
+                        self._health_monitor.record_fuzz_case(fuzz_case)
+                        if self._health_monitor.should_check(self.stats.iterations):
+                            try:
+                                health = self._health_monitor.update(self.stats.iterations, latency_ms, response)
+                                if health.value in ("rebooted", "zombie"):
+                                    for payload, confidence in self._health_monitor.get_crash_candidates():
+                                        self._handle_crash(
+                                            "device_disappeared", protocol, payload,
+                                            [f"reboot_candidate(conf={confidence:.1f})"],
+                                        )
+                            except Exception:
+                                pass
 
                 except ConnectionResetError:
                     self._handle_crash("connection_drop", protocol, fuzz_case, mutation_log)
@@ -1274,7 +1424,7 @@ class FuzzCampaign:
 
     def _build_summary(self) -> dict:
         """Build a summary dict of the campaign for serialization."""
-        return {
+        result = {
             "result": "complete" if not self._running or self.stats.iterations > 0 else "stopped",
             "target": self.target,
             "protocols": self.protocols,
@@ -1292,6 +1442,48 @@ class FuzzCampaign:
             "crash_db_path": os.path.join(self._fuzz_dir, "crashes.db"),
             "corpus_dir": os.path.join(self._fuzz_dir, "corpus"),
         }
+
+        # State coverage stats (Phase 1)
+        if self._state_tracker is not None:
+            try:
+                tracker_data = self._state_tracker.to_dict()
+                total_states = sum(
+                    len(g.get("nodes", []))
+                    for g in tracker_data.get("graphs", {}).values()
+                )
+                total_transitions = sum(
+                    len(g.get("edges", []))
+                    for g in tracker_data.get("graphs", {}).values()
+                )
+                result["state_coverage"] = {
+                    "total_states": total_states,
+                    "total_transitions": total_transitions,
+                    "protocols_tracked": list(tracker_data.get("graphs", {}).keys()),
+                }
+            except Exception:
+                pass
+
+        # Field weight stats (Phase 2)
+        if self._field_tracker is not None:
+            try:
+                weights_summary = {}
+                for proto in self.protocols:
+                    w = self._field_tracker.get_weights(proto)
+                    if w:
+                        weights_summary[proto] = w
+                if weights_summary:
+                    result["field_weights"] = weights_summary
+            except Exception:
+                pass
+
+        # Health monitor stats (Phase 6)
+        if self._health_monitor is not None:
+            try:
+                result["health_monitor"] = self._health_monitor.get_stats()
+            except Exception:
+                pass
+
+        return result
 
     # ------------------------------------------------------------------
     # State persistence
@@ -1317,6 +1509,23 @@ class FuzzCampaign:
             "stats": stats_dict,
             "timestamp": datetime.now().isoformat(),
         }
+
+        # Persist Phase 1/2/6 module states
+        if self._state_tracker is not None:
+            try:
+                state["state_tracker"] = self._state_tracker.to_dict()
+            except Exception:
+                pass
+        if self._field_tracker is not None:
+            try:
+                state["field_tracker"] = self._field_tracker.to_dict()
+            except Exception:
+                pass
+        if self._health_monitor is not None:
+            try:
+                state["health_monitor"] = self._health_monitor.to_dict()
+            except Exception:
+                pass
         state_path = os.path.join(self._fuzz_dir, "campaign_state.json")
         with open(state_path, "w") as f:
             json.dump(state, f, indent=2, default=str)
@@ -1364,6 +1573,23 @@ class FuzzCampaign:
             protocol_breakdown=saved_stats.get("protocol_breakdown", {}),
             prior_elapsed=saved_stats.get("prior_elapsed", 0.0),
         )
+
+        # Restore Phase 1/2/6 module states
+        if _HAS_STATE_TRACKER and "state_tracker" in state:
+            try:
+                campaign._state_tracker = StateTracker.from_dict(state["state_tracker"])
+            except Exception:
+                pass
+        if _HAS_FIELD_WEIGHTS and "field_tracker" in state:
+            try:
+                campaign._field_tracker = FieldWeightTracker.from_dict(state["field_tracker"])
+            except Exception:
+                pass
+        if _HAS_HEALTH_MONITOR and "health_monitor" in state:
+            try:
+                campaign._health_monitor = TargetHealthMonitor.from_dict(state["health_monitor"])
+            except Exception:
+                pass
 
         info(
             f"Resumed campaign from {state_path} "

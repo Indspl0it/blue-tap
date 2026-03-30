@@ -4,7 +4,7 @@
 
 <p align="center">
   <b>Bluetooth/BLE Penetration Testing Toolkit for Automotive IVI Systems</b><br/>
-  <sub>by <a href="https://github.com/Indspl0it">Santhosh Ballikonda</a> · v2.0.0 · Python 3.10+ · Linux · <a href="LICENSE">GPLv3</a></sub>
+  <sub>by <a href="https://github.com/Indspl0it">Santhosh Ballikonda</a> · Python 3.10+ · Linux · <a href="LICENSE">GPLv3</a></sub>
 </p>
 
 ---
@@ -525,124 +525,254 @@ blue-tap avrcp monitor <MAC>               # Monitor track changes in real-time
 
 ### 8. Protocol Fuzzing
 
-Multi-protocol fuzzing engine with campaign management, crash database, corpus management, and crash minimization.
+Response-guided, state-aware fuzzing engine designed for discovering 0-day vulnerabilities in automotive IVI Bluetooth stacks. Works purely over-the-air with standard hardware — no firmware access, no special dongles, no target instrumentation required.
+
+The engine combines techniques from published research (AFLNet, BrakTooth, SNIPUZZ, Defensics) with novel approaches (entropy-based leak detection, timing-based coverage proxy, structural self-consistency validation) to detect bugs that traditional blind fuzzers miss.
+
+#### Architecture
+
+```
+                        ┌─────────────────────────────────┐
+                        │        Campaign Engine           │
+                        │   (protocol rotation, transport) │
+                        └────────┬──────────┬──────────────┘
+                                 │          │
+              ┌──────────────────┤          ├──────────────────────┐
+              ▼                  ▼          ▼                      ▼
+    ┌─────────────────┐  ┌────────────┐  ┌──────────────┐  ┌──────────────┐
+    │  State Inference │  │  Mutation  │  │   Response   │  │    Health    │
+    │   (AFLNet IPSM)  │  │  Weights   │  │   Analyzer   │  │   Monitor   │
+    │  state_inference │  │  field_wt  │  │  response_   │  │  health_    │
+    │       .py        │  │  tracker.py│  │  analyzer.py │  │  monitor.py │
+    └─────────────────┘  └────────────┘  └──────────────┘  └──────────────┘
+      Protocol state       Adaptive        3-layer anomaly    Watchdog reboot
+      graph + scoring      field-level     detection: struct  detection, zombie
+      + seed selection     mutation        + timing + entropy  state, degradation
+```
 
 #### Campaign Mode
 
-```
+```bash
 blue-tap fuzz campaign <MAC>                              # Fuzz all protocols
 blue-tap fuzz campaign <MAC> -p sdp -p rfcomm             # Specific protocols
-blue-tap fuzz campaign <MAC> --strategy targeted           # Vulnerability-targeted
-blue-tap fuzz campaign <MAC> --strategy state-machine      # State machine exploration
+blue-tap fuzz campaign <MAC> --strategy targeted           # CVE-targeted mutations
+blue-tap fuzz campaign <MAC> --strategy state-machine      # Protocol state violations
 blue-tap fuzz campaign <MAC> --strategy coverage           # Response-guided coverage
-blue-tap fuzz campaign <MAC> --duration 1h --capture       # 1 hour + pcap capture
-blue-tap fuzz campaign <MAC> -n 10000 --delay 0.1          # 10K iterations, fast
+blue-tap fuzz campaign <MAC> --duration 2h --capture       # 2 hours + pcap capture
+blue-tap fuzz campaign <MAC> -n 50000 --delay 0.1          # 50K iterations, fast
 blue-tap fuzz campaign --resume                            # Resume previous campaign
 ```
 
-**Supported protocols for campaign mode:**
+#### Supported Protocols (11)
 
-| Protocol | Transport | What It Fuzzes |
+| Protocol | Transport | Attack Surface |
 |----------|-----------|----------------|
-| `sdp` | L2CAP PSM 1 | SDP service records, continuation state, data elements |
-| `rfcomm` | L2CAP PSM 3 | RFCOMM frames, PN/MSC/RPN negotiation, credits |
-| `obex-pbap` | RFCOMM | OBEX PBAP headers, app parameters, session state |
-| `obex-map` | RFCOMM | OBEX MAP headers, message listing, folder operations |
-| `obex-opp` | RFCOMM | OBEX Object Push headers, large payloads |
-| `at-hfp` | RFCOMM | HFP AT commands, SLC handshake, codec negotiation |
-| `at-phonebook` | RFCOMM | AT+CPBR phonebook access commands |
-| `at-sms` | RFCOMM | AT+CMGL/CMGR SMS commands |
-| `ble-att` | BLE L2CAP | ATT handles, writes, MTU, prepare writes, unknown opcodes |
-| `ble-smp` | BLE L2CAP | SMP pairing, key sizes, ECDH curve, sequencing |
-| `bnep` | L2CAP PSM 15 | BNEP setup, ethernet frames, filter lists, extensions |
+| `sdp` | L2CAP PSM 1 | Service records, continuation state, data elements, PDU parsing |
+| `rfcomm` | L2CAP PSM 3 | Frame types, PN/MSC/RPN negotiation, credit flow, FCS |
+| `l2cap` | L2CAP PSM 1 | Signaling commands, config options, CID manipulation, echo |
+| `obex-pbap` | RFCOMM ch 15 | PBAP headers, app parameters, session lifecycle |
+| `obex-map` | RFCOMM ch 16 | MAP headers, message listing, folder traversal |
+| `obex-opp` | RFCOMM ch 9 | Object Push headers, large payloads |
+| `at-hfp` | RFCOMM ch 10 | HFP SLC handshake, codec negotiation, AT injection |
+| `at-phonebook` | RFCOMM ch 1 | AT+CPBR phonebook access |
+| `at-sms` | RFCOMM ch 1 | AT+CMGL/CMGR SMS commands |
+| `ble-att` | BLE CID 4 | ATT handles, writes, MTU, prepare writes, signed writes |
+| `ble-smp` | BLE CID 6 | Pairing, key sizes, ECDH curve points, sequencing |
+| `bnep` | L2CAP PSM 15 | Setup connection, ethernet frames, filter lists |
 
-**Fuzzing strategies:**
+#### Fuzzing Strategies
 
-| Strategy | Description |
-|----------|-------------|
-| `random` | Random protocol rotation and mutation selection (default) |
-| `targeted` | Prioritizes protocols and mutations known to trigger CVEs |
-| `coverage` | Tracks response patterns and favors mutations that produce new responses |
-| `state-machine` | Explores protocol state machines by maintaining session state across test cases |
+| Strategy | Approach | Best For |
+|----------|----------|----------|
+| `random` | 70% template + 30% corpus byte-level mutation with adaptive field weighting | General exploration, first-pass fuzzing |
+| `coverage` | Response-diversity tracking with energy scheduling — inputs producing novel responses get more mutations | Deep exploration, maximizing code path coverage |
+| `state-machine` | Protocol state violation attacks — skip steps, go backwards, repeat states | OBEX, HFP, SMP, ATT state machine bugs |
+| `targeted` | CVE reproduction + variation — exact reproduction patterns then field mutations | Testing for known vulnerability classes |
+
+#### Fuzzing Intelligence (What Makes It Different)
+
+Blue-Tap implements six layers of intelligence that run automatically during every campaign:
+
+**1. Response-Based State Inference** (adapted from [AFLNet](https://mboehme.github.io/paper/ICST20.AFLNet.pdf))
+
+Extracts protocol state IDs from every response (SDP PDU type + error code, ATT opcode + error, L2CAP command + result, RFCOMM frame type, SMP code, OBEX response code, BNEP type, AT result). Builds a directed state graph incrementally. Uses AFLNet's scoring formula to prioritize under-explored states:
+
+```
+score = 1000 * 2^(-log10(log10(fuzz_count+1) * selected_times + 1)) * 2^(log(paths_discovered+1))
+```
+
+States that produce new transitions get more fuzzing iterations. States that have been heavily explored get fewer.
+
+**2. Anomaly-Guided Field Mutation Weights** (inspired by [BrakTooth](https://asset-group.github.io/papers/BrakTooth.pdf))
+
+Instead of mutating random bytes, the engine knows which fields exist in each protocol packet (SDP `param_length`, ATT `handle`, L2CAP `CID`, RFCOMM `length`, etc.). It tracks which fields produce anomalies and crashes, then increases their mutation probability:
+
+```
+weight = 1.0 + (anomaly_ratio * 5.0) + (crash_ratio * 20.0)
+```
+
+Fields that cause crashes get 20x the base mutation weight. The fuzzer converges on the fields that matter for each specific target.
+
+**3. Structural Response Validation** (novel — no prior BT fuzzer does this)
+
+Validates every response against protocol-level self-consistency rules that ALL Bluetooth stacks must follow:
+
+- SDP: `ParameterLength` must match actual payload bytes
+- ATT: Error codes must be in valid range (0x01-0x14 or 0x80-0xFF)
+- L2CAP: Signaling `Length` field must match payload
+- RFCOMM: FCS checksum must be correct (CRC-8 computation)
+- SMP: Pairing Request/Response must be exactly 7 bytes
+- OBEX: Packet length header must match actual size
+- AT: Responses must be valid ASCII terminated with `\r\n`
+
+Any violation = the target's parser is confused = potential vulnerability.
+
+**4. Timing-Based Coverage Proxy** (novel — identified as open research gap)
+
+Before fuzzing starts, the engine learns each target's normal response latency per protocol and per opcode. During fuzzing, it detects:
+
+- **Latency spikes**: Response > p99 baseline = different code path reached
+- **Latency drops**: Response significantly faster = parser rejected input early
+- **Timing clusters**: Groups of similar latencies; new cluster = new code path
+- **Consecutive spikes**: 3+ in a row = target may be degrading
+
+**5. Entropy-Based Leak Detection** (novel application to Bluetooth)
+
+Detects information leaks (heap/stack disclosure) without firmware access using:
+
+- **Shannon entropy**: Structured protocol data has entropy 2-5 bits/byte. Leaked heap data has entropy >6.5 bits/byte
+- **Renyi entropy**: More sensitive to dominant byte values for partial leaks
+- **Sliding window analysis**: Detects localized high-entropy regions in otherwise normal responses
+- **Heap pattern scanning**: Detects 0xDEADBEEF, 0xBAADF00D, repeated 4-byte patterns, pointer-like values
+- **Response echo detection**: Request bytes appearing in unexpected response positions = buffer reuse
+
+**6. Watchdog Reboot Detection** (adapted from [Defensics](https://www.blackduck.com/blog/break-car-kits-with-bluetooth-fuzz-testing.html))
+
+IVI Bluetooth stacks have watchdog timers that restart the daemon after a crash. This reboot is invisible at the protocol level. The health monitor detects it by:
+
+- Tracking consecutive failures (3+ = trigger health check)
+- Probing target with l2ping at exponential backoff (1s, 2s, 4s)
+- Detecting the reboot signature: target returns after silence with fresh state
+- Tracking reboot count as the highest-confidence crash signal
+- Saving the last 10 fuzz payloads before each reboot as crash candidates with confidence scores
+- Detecting zombie states: l2ping succeeds but protocol requests fail = upper stack crashed
+- Detecting degradation: gradually increasing latency = memory leak on target
+
+#### Live Dashboard
+
+The campaign runs with a real-time Rich terminal dashboard showing:
+
+| Metric | Description |
+|--------|-------------|
+| Runtime / progress | Elapsed time with progress bar (% of duration or iterations) |
+| Test cases / rate | Total iterations and cases per second |
+| Crashes found | Count with severity breakdown (CRITICAL, HIGH, MEDIUM, LOW) |
+| Protocol breakdown | Per-protocol: test cases sent and crashes detected |
+| Last crash | Timestamp, protocol, type, payload hex preview, mutation log |
+| **Target health** | ALIVE / DEGRADED / UNREACHABLE / REBOOTED / ZOMBIE (color-coded) |
+| **States discovered** | Per-protocol state and transition counts |
+| **Timing clusters** | Number of distinct response latency groups per protocol |
+| **Anomaly count** | Breakdown by type: structural, timing, leak, behavioral |
+| **Hot fields** | Top mutation fields ranked by anomaly/crash weight |
+
+**Keyboard controls:** `SPACE` pause/resume, `S` snapshot, `Q` quit.
+
+#### Crash Management
+
+```bash
+blue-tap fuzz crashes list                             # List all crashes
+blue-tap fuzz crashes list --severity CRITICAL          # Filter by severity
+blue-tap fuzz crashes list --protocol sdp               # Filter by protocol
+blue-tap fuzz crashes show 1                           # Full crash details + hexdump
+blue-tap fuzz crashes replay 1                         # Replay to verify reproduction
+blue-tap fuzz crashes replay 1 --capture               # Replay with pcap capture
+blue-tap fuzz crashes export -o crashes.json           # Export for reporting
+```
+
+The crash detail view shows: severity, protocol, crash type, full payload hexdump, mutation log (which field was mutated and how), device response hexdump, reproduction status, and analyst notes.
+
+#### Crash Minimization
+
+Reduce crash payloads to the minimum bytes needed to trigger the bug:
+
+```bash
+blue-tap fuzz minimize 1                               # Auto-select strategy
+blue-tap fuzz minimize 3 --strategy ddmin              # Delta debugging (thorough)
+blue-tap fuzz minimize 5 --strategy binary              # Binary search (fast)
+blue-tap fuzz minimize 2 --strategy field               # Field-level analysis
+```
+
+Three complementary strategies:
+- **Binary search**: Halve payload, test, refine — fast, ~8 iterations
+- **Delta debugging (ddmin)**: Incrementally remove chunks — thorough, ~50-200 tests
+- **Field reducer**: Zero each byte individually, mark essential vs nullable — identifies exact crash-triggering fields
 
 #### Protocol-Specific Fuzzers
 
-Deep protocol fuzzers with mode selection:
+Deep protocol fuzzers with targeted mode selection:
 
-```
-blue-tap fuzz l2cap-sig <MAC> --mode config          # L2CAP config option parsing
-blue-tap fuzz l2cap-sig <MAC> --mode echo             # L2CAP echo request flooding
-blue-tap fuzz rfcomm-raw <MAC> --mode pn              # RFCOMM PN negotiation
-blue-tap fuzz rfcomm-raw <MAC> --mode credits          # Credit-based flow control
+```bash
 blue-tap fuzz sdp-deep <MAC> --mode continuation       # SDP continuation state (CVE-2017-0785)
 blue-tap fuzz sdp-deep <MAC> --mode data-elements      # SDP data element malformation
+blue-tap fuzz l2cap-sig <MAC> --mode config            # L2CAP config option parsing
+blue-tap fuzz l2cap-sig <MAC> --mode echo              # L2CAP echo flood
+blue-tap fuzz rfcomm-raw <MAC> --mode credits          # Credit-based flow control abuse
 blue-tap fuzz obex <MAC> -p pbap --mode headers        # OBEX header parsing
 blue-tap fuzz obex <MAC> -p map --mode path-traversal  # OBEX path traversal
 blue-tap fuzz ble-att <MAC> --mode writes              # BLE ATT write overflow
-blue-tap fuzz ble-att <MAC> --mode mtu                 # BLE MTU negotiation
+blue-tap fuzz ble-att <MAC> --mode mtu                 # MTU negotiation boundary
 blue-tap fuzz ble-smp <MAC> --mode curve               # Invalid ECDH curve (CVE-2018-5383)
-blue-tap fuzz ble-smp <MAC> --mode sequence             # Out-of-sequence SMP
-blue-tap fuzz bnep <MAC> --mode setup                   # BNEP setup connection (CVE-2017-0781)
-blue-tap fuzz bnep <MAC> --mode filters                 # BNEP filter list overflow
-blue-tap fuzz at-deep <MAC> --category injection        # AT command injection patterns
-blue-tap fuzz at-deep <MAC> --category hfp-slc          # HFP SLC handshake fuzzing
+blue-tap fuzz bnep <MAC> --mode setup                  # BNEP setup (CVE-2017-0781)
+blue-tap fuzz at-deep <MAC> --category injection       # AT command injection
 ```
 
 #### CVE Reproduction
 
-```
+Test targets against known Bluetooth vulnerability patterns:
+
+```bash
 blue-tap fuzz cve --list                              # List all supported CVE patterns
 blue-tap fuzz cve <MAC>                                # Run all CVE patterns
-blue-tap fuzz cve <MAC> --cve-id 2017-0785             # BlueBorne SDP overflow
-blue-tap fuzz cve <MAC> --cve-id sweyntooth            # SweynTooth BLE patterns
+blue-tap fuzz cve <MAC> --cve-id 2017-0785             # Android SDP info leak
+blue-tap fuzz cve <MAC> --cve-id 2017-0781             # BNEP heap overflow
+blue-tap fuzz cve <MAC> --cve-id 2018-5383             # Invalid ECDH curve
+blue-tap fuzz cve <MAC> --cve-id 2024-24746            # NimBLE prepare write loop
 ```
 
-#### Crash Management
-
-```
-blue-tap fuzz crashes list                             # List all crashes from session
-blue-tap fuzz crashes show 1                           # Detailed crash info
-blue-tap fuzz crashes replay 1                         # Replay crash to verify
-blue-tap fuzz crashes export                           # Export crashes to JSON
-```
-
-#### Crash Minimization
-
-Reduce crash payloads to the minimum bytes needed to trigger the bug.
-
-```
-blue-tap fuzz minimize 1                               # Auto-select strategy
-blue-tap fuzz minimize 3 --strategy ddmin              # Delta debugging
-blue-tap fuzz minimize 5 --strategy binary              # Binary search reduction
-blue-tap fuzz minimize 2 --strategy field               # Field-level analysis
-```
+Supported CVEs: CVE-2017-0785 (BlueBorne SDP), CVE-2017-0781 (BNEP overflow), SweynTooth family, CVE-2018-5383 (Invalid Curve), CVE-2024-24746 (NimBLE), CVE-2024-45431 (PerfektBlue L2CAP).
 
 #### Corpus Management
 
-```
-blue-tap fuzz corpus generate                          # Generate seed corpus from builders
-blue-tap fuzz corpus list                              # Show corpus stats per protocol
+```bash
+blue-tap fuzz corpus generate                          # Generate seeds from protocol builders
+blue-tap fuzz corpus generate -p sdp                   # Generate for specific protocol
+blue-tap fuzz corpus list                              # Show stats per protocol
 blue-tap fuzz corpus minimize                          # Deduplicate by content hash
 ```
 
+Protocol builders generate 2,900+ seed cases across all protocols (SDP: 858, SMP: 650, BNEP: 580, ATT: 411, RFCOMM: 239, L2CAP: 166).
+
 #### PCAP Replay
 
-```
-blue-tap fuzz replay capture.btsnoop -t <MAC> --list    # Inspect captured frames
+Import and replay captured Bluetooth traffic:
+
+```bash
+blue-tap fuzz replay capture.btsnoop -t <MAC> --list    # Inspect frames
 blue-tap fuzz replay capture.btsnoop -t <MAC>            # Replay all frames
 blue-tap fuzz replay capture.btsnoop -t <MAC> -p sdp     # Filter by protocol
 blue-tap fuzz replay capture.btsnoop -t <MAC> --mutate   # Replay with mutations
 ```
 
-#### Legacy Single-Protocol Fuzzers
+Supports btsnoop v1 format with HCI ACL fragmentation reassembly.
 
-```
-blue-tap fuzz l2cap <MAC>                              # Basic L2CAP fuzzing
-blue-tap fuzz rfcomm <MAC>                              # Basic RFCOMM fuzzing
-blue-tap fuzz at <MAC>                                  # Basic AT command fuzzing
-blue-tap fuzz sdp <MAC>                                 # SDP continuation probe (CVE-2017-0785)
-blue-tap fuzz bss <MAC>                                 # Bluetooth Stack Smasher (external)
-```
+#### Report Integration
+
+Campaign results feed directly into the pentest report (`blue-tap report`):
+
+- **Executive summary**: Crash counts, severity breakdown, SVG donut/bar charts
+- **Crash details**: Full hexdump, mutation log, reproduction steps per crash
+- **Fuzzing intelligence**: State coverage graph, field weight analysis with bar charts, target response baselines, health event timeline
+- **Evidence package**: Exportable crash payloads (.bin), pcap captures, crash descriptions
 
 ---
 

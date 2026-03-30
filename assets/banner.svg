@@ -120,22 +120,15 @@
       AUTOMOTIVE IVI SECURITY ASSESSMENT
     </text>
 
-    <!-- Version badge -->
-    <g transform="translate(517, 228)">
-      <rect x="0" y="0" width="46" height="20" rx="4" fill="#00d4ff" opacity="0.15"/>
-      <text x="23" y="14" font-family="'SF Mono', 'Fira Code', 'Consolas', monospace"
-            font-size="10" font-weight="600" fill="#00d4ff" text-anchor="middle">v2.0.1</text>
-    </g>
-
     <!-- Python badge -->
-    <g transform="translate(571, 228)">
+    <g transform="translate(545, 228)">
       <rect x="0" y="0" width="66" height="20" rx="4" fill="#bf5af2" opacity="0.15"/>
       <text x="33" y="14" font-family="'SF Mono', 'Fira Code', 'Consolas', monospace"
             font-size="10" font-weight="600" fill="#bf5af2" text-anchor="middle">Python 3.10+</text>
     </g>
 
     <!-- License badge -->
-    <g transform="translate(645, 228)">
+    <g transform="translate(619, 228)">
       <rect x="0" y="0" width="46" height="20" rx="4" fill="#ff3366" opacity="0.15"/>
       <text x="23" y="14" font-family="'SF Mono', 'Fira Code', 'Consolas', monospace"
             font-size="10" font-weight="600" fill="#ff3366" text-anchor="middle">GPLv3</text>
