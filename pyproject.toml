@@ -6,8 +6,10 @@ build-backend = "setuptools.build_meta"
 name = "blue-tap"
 version = "2.1.0"
 description = "Bluetooth/BLE Penetration Testing Toolkit for Automotive IVI Systems"
+readme = "README.md"
 license = {text = "GPL-3.0-or-later"}
 authors = [{name = "Santhosh Ballikonda"}]
+keywords = ["bluetooth", "ble", "pentest", "security", "automotive", "ivi", "fuzzing"]
 requires-python = ">=3.10"
 dependencies = [
     "click>=8.1",
@@ -17,6 +19,26 @@ dependencies = [
     "scapy>=2.5",
     "pulsectl>=23.5",
 ]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+    "Topic :: System :: Networking",
+]
+
+[project.urls]
+Homepage = "https://github.com/Indspl0it/blue-tap"
+Repository = "https://github.com/Indspl0it/blue-tap"
+Issues = "https://github.com/Indspl0it/blue-tap/issues"
+Changelog = "https://github.com/Indspl0it/blue-tap/blob/main/docs/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = ["pytest", "ruff"]
@@ -31,8 +53,6 @@ include = ["blue_tap*"]
 line-length = 120
 
 [tool.ruff.lint]
-# Enforce high-signal runtime correctness checks now; stylistic cleanup can
-# be tightened progressively without blocking releases.
 select = ["E9", "F63", "F7", "F82"]
 
 [tool.pytest.ini_options]
