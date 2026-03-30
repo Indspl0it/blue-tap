@@ -1015,14 +1015,20 @@ A dedicated USB Bluetooth adapter is **required** for full-feature pentesting. I
 sudo apt update
 sudo apt install -y bluez bluez-tools python3-pip python3-dev python3-venv libbluetooth-dev
 
-# 2. Clone and install
-git clone https://github.com/Indspl0it/blue-tap.git
-cd blue-tap
-pip install -r requirements.txt
+# 2. Install Blue-Tap
+pip install blue-tap
 
 # 3. Verify
 blue-tap --version
 blue-tap adapter list
+```
+
+**Alternative: install from source**
+
+```bash
+git clone https://github.com/Indspl0it/blue-tap.git
+cd blue-tap
+pip install -e .
 ```
 
 ### Optional: Enable BlueZ Compatibility Mode

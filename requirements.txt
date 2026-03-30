@@ -1,9 +1,11 @@
 # Blue-Tap v2.1.0
 #
+# Preferred install: pip install blue-tap
+#
 # System packages (run first):
 #   sudo apt install -y bluez bluez-tools libbluetooth-dev
 #
-# Then: pip install -r requirements.txt
+# For source installs: pip install -r requirements.txt
 
 click>=8.1
 rich>=13.0
