@@ -124,7 +124,7 @@
     <g transform="translate(517, 228)">
       <rect x="0" y="0" width="46" height="20" rx="4" fill="#00d4ff" opacity="0.15"/>
       <text x="23" y="14" font-family="'SF Mono', 'Fira Code', 'Consolas', monospace"
-            font-size="10" font-weight="600" fill="#00d4ff" text-anchor="middle">v2.0.0</text>
+            font-size="10" font-weight="600" fill="#00d4ff" text-anchor="middle">v2.0.1</text>
     </g>
 
     <!-- Python badge -->

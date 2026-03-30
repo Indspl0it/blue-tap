@@ -1,18 +1,13 @@
 # Blue-Tap v2.0.1
 #
-# Step 1 - Install system packages (run this first):
-#   sudo apt install -y python3-dev python3-pip python3-venv \
-#       bluez bluez-tools libbluetooth-dev libdbus-1-dev \
-#       libglib2.0-dev libgirepository1.0-dev libcairo2-dev \
-#       gir1.2-glib-2.0 pkg-config
+# System packages (run first):
+#   sudo apt install -y bluez bluez-tools libbluetooth-dev
 #
-# Step 2 - Install Python packages:
-#   pip install -r requirements.txt
+# Then: pip install -r requirements.txt
 
 click>=8.1
 rich>=13.0
 bleak>=0.21
-dbus-python>=1.3
-PyGObject>=3.42
+dbus-fast>=2.0
 scapy>=2.5
 pulsectl>=23.5

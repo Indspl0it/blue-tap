@@ -766,39 +766,37 @@ blue-tap report -f html -o report.html       # HTML format (default)
 
 | Requirement | Purpose |
 |-------------|---------|
-| Linux (Kali recommended) | BlueZ Bluetooth stack |
+| Linux (Kali, Ubuntu 22.04+, Debian) | BlueZ Bluetooth stack |
 | Python 3.10+ | Runtime |
 | BlueZ 5.x | Bluetooth protocol stack |
-| Bluetooth adapter | HCI interface (internal or USB dongle) |
+| External USB Bluetooth adapter | Required for full feature access (see below) |
 | Root access | Required for raw L2CAP/RFCOMM, adapter control, btmon |
 
-**Recommended adapters:**
-- **CSR8510** (~$5 USB dongle) — supports legacy PIN, MAC spoofing, all features
-- **BCM20702** — good alternative USB dongle
-- **Intel AX200/210** — built-in laptop adapter (SSP enforced, no MAC spoofing)
+### Recommended Hardware
+
+A dedicated USB Bluetooth adapter is **required** for full-feature pentesting. Internal laptop adapters (Intel, Realtek) enforce Secure Simple Pairing and block MAC spoofing, which disables most attack capabilities.
+
+| Adapter | MAC Spoofing | Legacy PIN | BLE | Classic | Fuzzing | Price | Verdict |
+|---------|:---:|:---:|:---:|:---:|:---:|:-----:|---------|
+| **CSR8510 USB** | Yes | Yes | Yes | Yes | Yes | ~$5 | Best overall — full feature support |
+| **BCM20702 USB** | Yes | Yes | Yes | Yes | Yes | ~$10 | Solid alternative to CSR |
+| **RTL8761B USB** | Partial | Partial | Yes | Yes | Partial | ~$8 | Budget option, some limitations |
+| **nRF52840 dongle** | N/A | N/A | Sniff only | No | No | ~$10 | BLE sniffing and raw PDU capture only |
+| **USRP B210** | Yes | Yes | Yes | Yes | Yes | ~$1500 | Research-grade — full baseband access |
 
 ### Installation
 
 ```bash
 # 1. Install system dependencies (Kali / Ubuntu / Debian)
 sudo apt update
-sudo apt install -y bluez bluez-tools python3-pip python3-dev python3-venv \
-  libbluetooth-dev libdbus-1-dev libglib2.0-dev \
-  libgirepository1.0-dev libcairo2-dev gir1.2-glib-2.0 pkg-config
+sudo apt install -y bluez bluez-tools python3-pip python3-dev python3-venv libbluetooth-dev
 
-# 2. Clone the repository
+# 2. Clone and install
 git clone https://github.com/Indspl0it/blue-tap.git
 cd blue-tap
+pip install -r requirements.txt
 
-# 3. Install Blue-Tap (pick one)
-pip install -e ".[fuzz]"          # Recommended: core + fuzzing (scapy)
-pip install -e ".[fuzz,audio]"    # Full: core + fuzzing + audio capture
-pip install -e "."                # Core only
-
-# Alternative: use requirements.txt
-pip install -r requirements.txt   # Core deps only (see file for optional extras)
-
-# 4. Verify installation
+# 3. Verify
 blue-tap --version
 blue-tap adapter list
 ```
@@ -1239,40 +1237,22 @@ sudo apt install bluez-tools
 
 - All tools pre-installed (BlueZ, hcitool, sdptool, btmgmt, bluetoothctl)
 - May need `--compat` flag for bluetoothd
-- Intel laptop adapters enforce SSP (no legacy PIN testing, no MAC spoofing)
-- Recommended: add a CSR8510 USB dongle for full feature access
+- Use an external USB adapter (CSR8510/BCM20702) for full feature access
 
 ### Ubuntu / Debian
 
 ```bash
-sudo apt install -y bluez bluez-tools python3-pip python3-dev python3-venv \
-  libbluetooth-dev libdbus-1-dev libglib2.0-dev \
-  libgirepository1.0-dev libcairo2-dev gir1.2-glib-2.0 pkg-config
+sudo apt install -y bluez bluez-tools python3-pip python3-dev python3-venv libbluetooth-dev
 ```
 
 ### Raspberry Pi
 
-- Broadcom BCM43xx adapter supports legacy PIN mode
-- Pi 5: BT 5.2 — fewer version-dependent vuln findings
-- Pi 4: BT 5.0 — good balance of features
-- Pi 3: BT 4.2 — triggers more vuln-scan findings (KNOB, BLURtooth)
-- Excellent as IVI simulator target
+- Use an external USB adapter (CSR8510/BCM20702) for full feature access
 
 ### WSL (Windows Subsystem for Linux)
 
-- **Not supported** for Bluetooth operations — WSL does not pass through USB Bluetooth adapters
+- **Not supported** — WSL does not pass through USB Bluetooth adapters
 - Use a native Linux installation or VM with USB passthrough
-
-### Adapter Comparison
-
-| Adapter | MAC Spoofing | Legacy PIN | BLE | Price | Best For |
-|---------|:----------:|:----------:|:---:|:-----:|----------|
-| CSR8510 USB | Yes | Yes | Yes | ~$5 | Full-feature testing |
-| BCM20702 USB | Yes | Yes | Yes | ~$10 | Alternative to CSR |
-| Intel AX200/210 | No | No (SSP enforced) | Yes | Built-in | BLE + recon only |
-| RTL8761B USB | Partial | Partial | Yes | ~$8 | Budget option |
-| nRF52840 | N/A | N/A | Sniff only | ~$10 | BLE sniffing |
-| USRP B210 | N/A | N/A | Baseband | ~$1500 | Research-grade |
 
 ---
 
