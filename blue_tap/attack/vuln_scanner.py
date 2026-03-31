@@ -1062,8 +1062,9 @@ def _check_authorization_model(address: str, services: list[dict]) -> list[dict]
     AF_BLUETOOTH = getattr(socket, "AF_BLUETOOTH", 31)
     BTPROTO_RFCOMM = getattr(socket, "BTPROTO_RFCOMM", 3)
 
-    # PBAP target UUID
+    # OBEX target UUIDs per profile
     PBAP_UUID = bytes.fromhex("796135f0f0c511d809660800200c9a66")
+    MAP_UUID = bytes.fromhex("bb582b40420c11dbb0de0800200c9a66")
 
     profile_channels = []
     for svc in services:
@@ -1078,6 +1079,9 @@ def _check_authorization_model(address: str, services: list[dict]) -> list[dict]
             profile_channels.append((name, ch))
 
     for svc_name, ch in profile_channels:
+        # Select correct OBEX target UUID based on service name
+        svc_lower = svc_name.lower()
+        target_uuid = MAP_UUID if any(k in svc_lower for k in ("map", "message")) else PBAP_UUID
         try:
             sock = socket.socket(AF_BLUETOOTH, socket.SOCK_STREAM, BTPROTO_RFCOMM)
             sock.settimeout(4.0)
@@ -1103,7 +1107,7 @@ def _check_authorization_model(address: str, services: list[dict]) -> list[dict]
             # Connected — send OBEX Connect with target UUID
             # OBEX Connect: opcode=0x80, version=0x10, flags=0x00, maxlen=0xFFFF
             # Target header: HI=0x46, length=2+16
-            target_header = b"\x46" + struct.pack(">H", 3 + len(PBAP_UUID)) + PBAP_UUID
+            target_header = b"\x46" + struct.pack(">H", 3 + len(target_uuid)) + target_uuid
             obex_body = b"\x10\x00" + struct.pack(">H", 0xFFFF) + target_header
             obex_connect = b"\x80" + struct.pack(">H", 3 + len(obex_body)) + obex_body
 

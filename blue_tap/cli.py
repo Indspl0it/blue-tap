@@ -99,22 +99,21 @@ class LoggedCommand(click.Command):
             err = str(exc)
             raise
         finally:
-            if command_path in _SESSION_SKIP_COMMANDS:
-                return
-            payload = {
-                "command_path": command_path,
-                "status": status,
-                "duration_s": round(time.time() - started, 3),
-                "params": dict(ctx.params),
-            }
-            if err:
-                payload["error"] = err
-            log_command(
-                command=command_path.replace(" ", "_"),
-                data=payload,
-                category=_infer_category(command_path),
-                target=_extract_target_param(ctx.params),
-            )
+            if command_path not in _SESSION_SKIP_COMMANDS:
+                payload = {
+                    "command_path": command_path,
+                    "status": status,
+                    "duration_s": round(time.time() - started, 3),
+                    "params": dict(ctx.params),
+                }
+                if err:
+                    payload["error"] = err
+                log_command(
+                    command=command_path.replace(" ", "_"),
+                    data=payload,
+                    category=_infer_category(command_path),
+                    target=_extract_target_param(ctx.params),
+                )
 
 
 class LoggedGroup(click.Group):
@@ -155,11 +154,17 @@ def main(verbose, session_name):
     from blue_tap.utils.output import set_verbosity
     set_verbosity(verbose)
 
-    # Skip session creation when user is just asking for help
+    # Skip session creation for help, read-only commands, and when not needed
     if '--help' in sys.argv or '-h' in sys.argv:
         return
 
-    # Always create a session — auto-generate name if not provided
+    # Commands that don't need a session (read-only or use explicit directory)
+    _NO_SESSION_COMMANDS = {"session", "report", "adapter"}
+    subcommand = sys.argv[1] if len(sys.argv) > 1 else ""
+    if not session_name and subcommand in _NO_SESSION_COMMANDS:
+        return
+
+    # Create session for active commands
     from blue_tap.utils.session import Session, set_session
     from datetime import datetime
     if not session_name:
@@ -1000,11 +1005,19 @@ def map_dump(address, channel, output_dir):
 
     try:
         info("  Dumping messages from all folders...")
-        client.dump_all_messages(output_dir)
-        success(f"MAP dump complete -> {output_dir}/")
+        dump_results = client.dump_all_messages(output_dir)
+        if dump_results and isinstance(dump_results, dict):
+            total_msgs = sum(
+                len(v.get("messages", [])) if isinstance(v, dict) else 0
+                for v in dump_results.values()
+            )
+            success(f"MAP dump complete: {len(dump_results)} folder(s), {total_msgs} message(s) -> {output_dir}/")
+        else:
+            success(f"MAP dump complete -> {output_dir}/")
+            dump_results = {"output_dir": output_dir}
 
         from blue_tap.utils.session import log_command
-        log_command("map_dump", {"output_dir": output_dir}, category="data", target=address)
+        log_command("map_dump", dump_results, category="data", target=address)
     finally:
         client.disconnect()
         info("  MAP session closed")
