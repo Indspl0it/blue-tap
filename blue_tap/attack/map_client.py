@@ -286,7 +286,7 @@ class MAPClient:
                 data += chunk
                 remaining -= len(chunk)
             return bytes([header[0]]) + header[1:3] + data
-        except (socket.timeout, OSError):
+        except (TimeoutError, OSError):
             return None
 
     def _recv_body(self) -> bytes:

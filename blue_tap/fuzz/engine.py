@@ -111,7 +111,7 @@ except ImportError:
     _HAS_FIELD_WEIGHTS = False
 
 try:
-    from blue_tap.fuzz.health_monitor import TargetHealthMonitor, HealthStatus
+    from blue_tap.fuzz.health_monitor import TargetHealthMonitor
     _HAS_HEALTH_MONITOR = True
 except ImportError:
     _HAS_HEALTH_MONITOR = False
@@ -483,7 +483,7 @@ class _StubTransport:
         try:
             data = self._sock.recv(bufsize)
             return data if data else None
-        except socket.timeout:
+        except TimeoutError:
             return None
 
     def close(self) -> None:
@@ -1145,7 +1145,7 @@ class FuzzCampaign:
                     self._handle_crash("connection_drop", protocol, fuzz_case, mutation_log)
                 except BrokenPipeError:
                     self._handle_crash("connection_drop", protocol, fuzz_case, mutation_log)
-                except socket.timeout:
+                except TimeoutError:
                     self._handle_crash("timeout", protocol, fuzz_case, mutation_log)
                 except OSError as exc:
                     if "Host is down" in str(exc) or "No route" in str(exc):

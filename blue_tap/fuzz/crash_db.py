@@ -13,7 +13,7 @@ import os
 import sqlite3
 import time
 from enum import Enum
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from blue_tap.utils.output import info, warning
 
@@ -163,8 +163,8 @@ class CrashDB:
         protocol: str,
         payload: bytes,
         crash_type: CrashType | str,
-        response: Optional[bytes] = None,
-        severity: Optional[CrashSeverity | str] = None,
+        response: bytes | None = None,
+        severity: CrashSeverity | str | None = None,
         payload_description: str = "",
         response_description: str = "",
         mutation_log: str = "",
@@ -195,7 +195,7 @@ class CrashDB:
         """
         # Normalize enum values to their string form
         crash_type_str = crash_type.value if isinstance(crash_type, CrashType) else str(crash_type)
-        severity_str: Optional[str] = None
+        severity_str: str | None = None
         if severity is not None:
             severity_str = severity.value if isinstance(severity, CrashSeverity) else str(severity)
 
@@ -237,8 +237,8 @@ class CrashDB:
 
     def get_crashes(
         self,
-        protocol: Optional[str] = None,
-        severity: Optional[CrashSeverity | str] = None,
+        protocol: str | None = None,
+        severity: CrashSeverity | str | None = None,
         limit: int = 0,
     ) -> list[dict]:
         """Retrieve crashes, optionally filtered by protocol and/or severity.
@@ -289,7 +289,7 @@ class CrashDB:
         ).fetchall()
         return [dict(row) for row in rows]
 
-    def get_crash_by_id(self, crash_id: int) -> Optional[dict]:
+    def get_crash_by_id(self, crash_id: int) -> dict | None:
         """Retrieve a single crash by its database ID.
 
         Args:
@@ -353,7 +353,7 @@ class CrashDB:
 
     # -- Aggregation --------------------------------------------------------
 
-    def crash_count(self, protocol: Optional[str] = None) -> int:
+    def crash_count(self, protocol: str | None = None) -> int:
         """Return the total number of crashes, optionally filtered by protocol.
 
         Args:
@@ -443,7 +443,7 @@ class CrashDB:
     def reproduce_crash(
         self,
         crash_id: int,
-        transport: "BluetoothTransport",
+        transport: BluetoothTransport,
         recv_timeout: float = 5.0,
     ) -> bool:
         """Replay the exact payload from a crash record and check if it recurs.
@@ -537,7 +537,7 @@ class CrashDB:
             self._conn.close()
             self._conn = None
 
-    def __enter__(self) -> "CrashDB":
+    def __enter__(self) -> CrashDB:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:

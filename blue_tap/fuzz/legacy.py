@@ -209,7 +209,7 @@ class RFCOMMFuzzer:
                     try:
                         resp = sock.recv(1024)
                         entry["response"] = resp.decode("utf-8", errors="replace")
-                    except socket.timeout:
+                    except TimeoutError:
                         entry["response"] = None
                     entry["status"] = "sent"
                 except OSError as exc:
@@ -329,7 +329,7 @@ class SDPFuzzer:
                                 if i == 2 and probe_resp and len(probe_resp) != len(resp):
                                     results["leak_suspected"] = True
                                     warning("Response size varies with continuation offset — possible info leak!")
-                            except (socket.timeout, OSError):
+                            except (TimeoutError, OSError):
                                 results["responses"].append({
                                     "type": f"cont_probe_{i}",
                                     "cont_state": test_cont.hex(),
@@ -337,7 +337,7 @@ class SDPFuzzer:
                                 })
                     else:
                         info("No continuation state in response (response fit in single fragment)")
-            except socket.timeout:
+            except TimeoutError:
                 info("No SDP response (timeout)")
 
             success(f"SDP continuation probe: {results['probes_sent']} probes sent")

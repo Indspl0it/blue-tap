@@ -35,11 +35,10 @@ References:
 """
 
 import re
-import struct
 import time
 
 from blue_tap.utils.bt_helpers import normalize_mac, run_cmd
-from blue_tap.utils.output import info, success, error, warning
+from blue_tap.utils.output import info, success, warning
 
 
 # HCI command constants for encryption key size operations

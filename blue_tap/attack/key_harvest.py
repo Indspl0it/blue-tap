@@ -58,7 +58,7 @@ class KeyDatabase:
         """Load entries from disk (no-op if file missing)."""
         if os.path.exists(self._path):
             try:
-                with open(self._path, "r") as fh:
+                with open(self._path) as fh:
                     data = json.load(fh)
                 if isinstance(data, list):
                     for entry in data:
@@ -362,7 +362,7 @@ class KeyHarvester:
             entry["verified"] = True
             self._db._save()
             return True
-        except (OSError, socket.error) as exc:
+        except OSError as exc:
             warning(f"Key verification failed for {target_mac}: {exc}")
             entry["verified"] = False
             self._db._save()

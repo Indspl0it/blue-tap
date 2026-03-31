@@ -16,7 +16,7 @@ import logging
 import struct
 import time
 from dataclasses import dataclass
-from typing import Callable
+from collections.abc import Callable
 
 from blue_tap.fuzz.corpus import Corpus
 from blue_tap.fuzz.mutators import FieldMutator

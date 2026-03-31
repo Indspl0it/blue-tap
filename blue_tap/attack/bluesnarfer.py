@@ -57,7 +57,7 @@ class ATClient:
             # Drain any initial banner
             try:
                 self.sock.recv(1024)
-            except socket.timeout:
+            except TimeoutError:
                 pass
             return True
         except OSError as e:
@@ -88,7 +88,7 @@ class ATClient:
                         text = response.decode("utf-8", errors="replace")
                         if "OK" in text or "ERROR" in text:
                             break
-                except socket.timeout:
+                except TimeoutError:
                     continue
             return response.decode("utf-8", errors="replace")
         except OSError as e:
@@ -219,7 +219,7 @@ class ATClient:
         time.sleep(2)
         try:
             return self.sock.recv(1024).decode("utf-8", errors="replace")
-        except socket.timeout:
+        except TimeoutError:
             return ""
 
     def dump_all(self, output_dir: str = "at_dump") -> dict:

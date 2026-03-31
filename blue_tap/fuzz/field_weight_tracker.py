@@ -15,7 +15,7 @@ Key components:
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from blue_tap.fuzz.mutators import (

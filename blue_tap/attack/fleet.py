@@ -8,7 +8,7 @@ generates a consolidated fleet report.
 import time
 from datetime import datetime, timezone
 
-from blue_tap.utils.bt_helpers import normalize_mac, run_cmd
+from blue_tap.utils.bt_helpers import normalize_mac
 from blue_tap.utils.output import error, info, success, warning
 
 

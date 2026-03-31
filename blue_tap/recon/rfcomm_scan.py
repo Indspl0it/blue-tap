@@ -100,7 +100,7 @@ class RFCOMMScanner:
                     if chunk:
                         data = chunk
                         break
-                except socket.timeout:
+                except TimeoutError:
                     continue
                 except OSError:
                     break

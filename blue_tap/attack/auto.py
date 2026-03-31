@@ -20,7 +20,7 @@ import os
 import time
 
 from blue_tap.utils.bt_helpers import normalize_mac
-from blue_tap.utils.output import info, success, error, warning, console, section
+from blue_tap.utils.output import info, success, warning, console, section
 
 
 def _rssi_key(d):
@@ -331,7 +331,7 @@ class AutoPentest:
                 ]
 
                 unresponsive = 0
-                for name, key, func in tests:
+                for name, _key, func in tests:
                     info(f"  Running: {name}...")
                     try:
                         result = func()

@@ -20,7 +20,7 @@ import random
 import re
 import struct
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any
 
 
 # ---------------------------------------------------------------------------
@@ -365,7 +365,7 @@ def extract_state_at(response: bytes) -> StateID:
 # Dispatcher
 # ---------------------------------------------------------------------------
 
-_EXTRACTORS: Dict[str, Any] = {
+_EXTRACTORS: dict[str, Any] = {
     "sdp": extract_state_sdp,
     "att": extract_state_att,
     "l2cap": extract_state_l2cap,
@@ -409,10 +409,10 @@ class StateSequence:
 
     def __init__(
         self,
-        seed: Optional[bytes] = None,
+        seed: bytes | None = None,
         iteration: int = 0,
     ) -> None:
-        self.states: List[StateID] = []
+        self.states: list[StateID] = []
         self.seed = seed
         self.iteration = iteration
 
@@ -420,7 +420,7 @@ class StateSequence:
         """Add a state observation."""
         self.states.append(state)
 
-    def trimmed(self) -> List[StateID]:
+    def trimmed(self) -> list[StateID]:
         """Return sequence with consecutive duplicates removed (AFLNet pattern).
 
         Example: [220, 220, 250, 250] -> [220, 250]
@@ -461,8 +461,8 @@ class StateGraph:
     """
 
     def __init__(self) -> None:
-        self._nodes: Set[StateID] = set()
-        self._edges: Set[Tuple[StateID, StateID]] = set()
+        self._nodes: set[StateID] = set()
+        self._edges: set[tuple[StateID, StateID]] = set()
 
     def add_transition(self, from_state: StateID, to_state: StateID) -> bool:
         """Add a transition edge. Returns True if the transition is new."""
@@ -494,7 +494,7 @@ class StateGraph:
         max_edges = n * n
         return len(self._edges) / max_edges
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Serialize to JSON-compatible dict."""
         return {
             "nodes": [
@@ -531,7 +531,7 @@ class StateGraph:
         }
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "StateGraph":
+    def from_dict(cls, data: dict[str, Any]) -> StateGraph:
         """Deserialize from JSON-compatible dict."""
         graph = cls()
         for node_data in data.get("nodes", []):
@@ -555,7 +555,7 @@ class StateInfo:
     """
 
     state_id: StateID
-    seeds: List[bytes] = field(default_factory=list)
+    seeds: list[bytes] = field(default_factory=list)
     paths: int = 0
     paths_discovered: int = 0
     selected_times: int = 0
@@ -585,7 +585,7 @@ class StateInfo:
         self.score = 1000.0 * (2.0 ** penalty) * (2.0 ** reward)
         return self.score
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Serialize to JSON-compatible dict (seeds stored as hex)."""
         return {
             "state_id": {
@@ -603,7 +603,7 @@ class StateInfo:
         }
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "StateInfo":
+    def from_dict(cls, data: dict[str, Any]) -> StateInfo:
         """Deserialize from JSON-compatible dict."""
         state_id = StateID(**data["state_id"])
         seeds = [bytes.fromhex(h) for h in data.get("seeds_hex", [])]
@@ -644,22 +644,22 @@ class StateTracker:
 
     def __init__(self) -> None:
         # Per-protocol state graphs
-        self._graphs: Dict[str, StateGraph] = {}
+        self._graphs: dict[str, StateGraph] = {}
         # Per-protocol current sequences (reset each seed execution)
-        self._current_sequences: Dict[str, StateSequence] = {}
+        self._current_sequences: dict[str, StateSequence] = {}
         # Set of seen sequence hashes for novelty detection
-        self._seen_hashes: Set[str] = set()
+        self._seen_hashes: set[str] = set()
         # Mapping: sequence_hash -> seed bytes for reproduction
-        self._hash_to_seed: Dict[str, bytes] = {}
+        self._hash_to_seed: dict[str, bytes] = {}
         # Per-state metadata: (protocol, state_id) -> StateInfo
-        self._state_info: Dict[StateID, StateInfo] = {}
+        self._state_info: dict[StateID, StateInfo] = {}
         # Last extracted state (for external inspection)
-        self.last_state: Optional[StateID] = None
+        self.last_state: StateID | None = None
 
     # -- Core recording API ------------------------------------------------
 
     def record(self, protocol: str, response: bytes,
-               seed: Optional[bytes] = None) -> bool:
+               seed: bytes | None = None) -> bool:
         """Extract state from response, update graph, return True if novel.
 
         If *seed* is provided, it is automatically registered for the
@@ -710,7 +710,7 @@ class StateTracker:
 
         return novel
 
-    def finalize_sequence(self, protocol: str, seed: Optional[bytes] = None) -> bool:
+    def finalize_sequence(self, protocol: str, seed: bytes | None = None) -> bool:
         """Finalize current sequence after seed execution completes.
 
         Hashes the trimmed sequence and checks for novelty.
@@ -750,14 +750,14 @@ class StateTracker:
 
     # -- State-aware seed selection (AFLNet) --------------------------------
 
-    def select_target_state(self, protocol: str) -> Optional[StateID]:
+    def select_target_state(self, protocol: str) -> StateID | None:
         """Select a target state for fuzzing using AFLNet weighted scoring.
 
         Computes scores for all known states of the given protocol, then
         performs weighted random selection. Returns None if no states known.
         """
         protocol = protocol.lower()
-        candidates: List[StateInfo] = [
+        candidates: list[StateInfo] = [
             info for info in self._state_info.values()
             if info.state_id.protocol == protocol
         ]
@@ -786,7 +786,7 @@ class StateTracker:
         chosen.selected_times += 1
         return chosen.state_id
 
-    def select_seed_for_state(self, state: StateID) -> Optional[bytes]:
+    def select_seed_for_state(self, state: StateID) -> bytes | None:
         """Select a seed that reaches the given state.
 
         Prefers seeds that have been fuzzed fewer times in this state context.
@@ -817,7 +817,7 @@ class StateTracker:
 
     # -- Coverage reporting ------------------------------------------------
 
-    def get_state_coverage(self, protocol: Optional[str] = None) -> Dict[str, Any]:
+    def get_state_coverage(self, protocol: str | None = None) -> dict[str, Any]:
         """Get state coverage statistics.
 
         If protocol is given, return stats for that protocol only.
@@ -851,7 +851,7 @@ class StateTracker:
         # Aggregate across all protocols
         total_states = 0
         total_transitions = 0
-        per_protocol: Dict[str, Any] = {}
+        per_protocol: dict[str, Any] = {}
         for proto, graph in self._graphs.items():
             total_states += graph.node_count()
             total_transitions += graph.transition_count()
@@ -869,7 +869,7 @@ class StateTracker:
 
     # -- Persistence --------------------------------------------------------
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Serialize full tracker state to JSON-compatible dict."""
         return {
             "graphs": {
@@ -887,7 +887,7 @@ class StateTracker:
         }
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "StateTracker":
+    def from_dict(cls, data: dict[str, Any]) -> StateTracker:
         """Deserialize from JSON-compatible dict."""
         tracker = cls()
 

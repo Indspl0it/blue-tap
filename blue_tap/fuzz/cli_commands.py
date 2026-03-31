@@ -11,7 +11,6 @@ import json
 import os
 import select
 import signal
-import socket
 import sys
 import threading
 import time
@@ -853,7 +852,7 @@ def _campaign_command(fuzz_group):
                             cam, "connection_drop", protocol, fuzz_case, mutation_log,
                             all_crashes, crash_counts_by_proto,
                         )
-                    except socket.timeout:
+                    except TimeoutError:
                         _record_crash(
                             cam, "timeout", protocol, fuzz_case, mutation_log,
                             all_crashes, crash_counts_by_proto,

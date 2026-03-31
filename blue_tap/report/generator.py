@@ -5,7 +5,6 @@ scan results, vulnerability findings, PBAP/MAP dumps, fuzzing campaigns, and
 analysis notes.  All charts use inline SVG (no JS dependencies).
 """
 
-import hashlib
 import html as _html_mod
 import json
 import math

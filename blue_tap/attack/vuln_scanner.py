@@ -1115,7 +1115,7 @@ def _check_authorization_model(address: str, services: list[dict]) -> list[dict]
                 sock.sendall(obex_connect)
                 sock.settimeout(3.0)
                 resp = sock.recv(1024)
-            except (OSError, socket.timeout):
+            except (TimeoutError, OSError):
                 resp = b""
             finally:
                 sock.close()
@@ -1228,7 +1228,7 @@ def _check_automotive_diagnostics(address: str, services: list[dict]) -> list[di
                     data = sock.recv(1024)
                     if data:
                         responses.append((probe.strip().decode(), data))
-                except (OSError, socket.timeout):
+                except (TimeoutError, OSError):
                     continue
 
             sock.close()

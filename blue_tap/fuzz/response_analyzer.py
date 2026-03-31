@@ -27,10 +27,8 @@ from __future__ import annotations
 import collections
 import math
 import struct
-import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
 
 
 # ---------------------------------------------------------------------------
@@ -827,7 +825,7 @@ def _validate_bnep_structure(response: bytes) -> list[Anomaly]:
 
     type_byte = response[0]
     pkt_type = type_byte & 0x7F
-    has_extension = bool(type_byte & 0x80)
+    _has_extension = bool(type_byte & 0x80)  # parsed but not validated yet
 
     # Valid BNEP types: 0x00 (General Ethernet), 0x01 (Control),
     # 0x02 (Compressed Ethernet), 0x03 (Compressed Src Only),
@@ -949,7 +947,7 @@ def _validate_at_structure(response: bytes) -> list[Anomaly]:
 
     # Check terminal response presence (OK, ERROR, +CME ERROR, +CMS ERROR)
     terminal_patterns = ("OK", "ERROR", "+CME ERROR:", "+CMS ERROR:")
-    has_terminal = any(
+    _has_terminal = any(
         line.strip().startswith(p) or line.strip() == p.rstrip(":")
         for line in lines
         for p in terminal_patterns
@@ -995,7 +993,7 @@ def _check_leak_indicators(
     protocol: str,
     request: bytes,
     response: bytes,
-    baseline: Optional[ProtocolBaseline],
+    baseline: ProtocolBaseline | None,
 ) -> list[Anomaly]:
     """Detect potential information leaks via weighted composite scoring.
 
@@ -1400,7 +1398,7 @@ class CausalMap:
         return {str(k): sorted(v) for k, v in self.map.items()}
 
     @classmethod
-    def from_dict(cls, data: dict[str, list[int]]) -> "CausalMap":
+    def from_dict(cls, data: dict[str, list[int]]) -> CausalMap:
         """Deserialize from the format produced by ``to_dict()``."""
         cm = cls()
         for k, v in data.items():

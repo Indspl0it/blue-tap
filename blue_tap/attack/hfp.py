@@ -201,7 +201,7 @@ class HFPClient:
                 data = self.sco_sock.recv(480)  # Typical SCO packet size
                 if data:
                     frames.append(data)
-            except socket.timeout:
+            except TimeoutError:
                 continue
             except OSError as e:
                 error(f"Audio capture error: {e}")
@@ -494,7 +494,7 @@ class HFPClient:
                                 result["name"] = clip_m.group(3)
                         success(f"Incoming call: {result['number']} ({result.get('name', 'Unknown')})")
                         return result
-            except socket.timeout:
+            except TimeoutError:
                 continue
             except OSError:
                 break
@@ -530,7 +530,7 @@ class HFPClient:
                         text = response.decode("utf-8", errors="replace")
                         if any(code in text for code in ["OK", "ERROR", "+CME ERROR"]):
                             break
-                except socket.timeout:
+                except TimeoutError:
                     continue
 
             result = response.decode("utf-8", errors="replace").strip()

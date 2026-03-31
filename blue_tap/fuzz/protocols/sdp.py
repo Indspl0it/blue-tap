@@ -19,7 +19,7 @@ CVE targets: CVE-2017-0785 (Android), CVE-2017-1000250 (BlueZ)
 from __future__ import annotations
 
 import struct
-from typing import Callable
+from collections.abc import Callable
 
 
 # ---------------------------------------------------------------------------

@@ -168,7 +168,7 @@ class HCICapture:
 
         # Fall back to PID file for cross-invocation checks
         try:
-            with open(self.PID_FILE, "r") as pf:
+            with open(self.PID_FILE) as pf:
                 data = json.load(pf)
             pid = data["pid"]
             os.kill(pid, 0)  # signal 0 = existence check
@@ -184,7 +184,7 @@ class HCICapture:
             (pgid, pid, output_file) or (None, None, None) if unavailable.
         """
         try:
-            with open(cls.PID_FILE, "r") as pf:
+            with open(cls.PID_FILE) as pf:
                 data = json.load(pf)
             return data.get("pgid"), data.get("pid"), data.get("output_file")
         except (OSError, KeyError, json.JSONDecodeError, ValueError):
@@ -256,7 +256,7 @@ def detect_pairing_mode(address: str, hci: str = "hci0") -> dict:
 
         # Parse btmon output
         try:
-            with open(tmp_path, "r", errors="replace") as fh:
+            with open(tmp_path, errors="replace") as fh:
                 lines = fh.readlines()
         except OSError:
             lines = []

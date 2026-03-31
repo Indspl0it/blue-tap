@@ -14,7 +14,6 @@ import struct
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Optional
 
 from blue_tap.utils.bt_helpers import run_cmd
 from blue_tap.utils.output import info, warning, error
@@ -128,7 +127,7 @@ class BluetoothTransport(ABC):
         self.timeout = timeout
         self.max_reconnects = max_reconnects
         self.stats = TransportStats()
-        self._sock: Optional[socket.socket] = None
+        self._sock: socket.socket | None = None
         self._connected = False
 
     # -- Abstract interface (subclasses implement these) --------------------
@@ -204,7 +203,7 @@ class BluetoothTransport(ABC):
             error(f"Send error: {exc}")
             return 0
 
-    def recv(self, bufsize: int = 4096, recv_timeout: Optional[float] = None) -> Optional[bytes]:
+    def recv(self, bufsize: int = 4096, recv_timeout: float | None = None) -> bytes | None:
         """Receive data from the transport.
 
         Args:
@@ -234,7 +233,7 @@ class BluetoothTransport(ABC):
             self.stats.connection_drops += 1
             self._connected = False
             return None
-        except socket.timeout:
+        except TimeoutError:
             return b""
         except (BrokenPipeError, ConnectionResetError):
             self.stats.errors += 1
@@ -305,7 +304,7 @@ class BluetoothTransport(ABC):
         """Whether the transport currently believes it is connected."""
         return self._connected
 
-    def __enter__(self) -> "BluetoothTransport":
+    def __enter__(self) -> BluetoothTransport:
         if not self.connect():
             raise ConnectionError(
                 f"Failed to connect to {self.address} via {self.__class__.__name__}"
@@ -347,7 +346,7 @@ class L2CAPTransport(BluetoothTransport):
         psm: int = 1,
         timeout: float = 5.0,
         max_reconnects: int = 3,
-        mtu: Optional[int] = None,
+        mtu: int | None = None,
     ) -> None:
         super().__init__(address, timeout, max_reconnects)
         self.psm = psm

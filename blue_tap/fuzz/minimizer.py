@@ -19,7 +19,8 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Callable, TYPE_CHECKING
+from typing import TYPE_CHECKING
+from collections.abc import Callable
 
 from blue_tap.utils.output import info, warning
 
@@ -519,7 +520,7 @@ class CrashMinimizer:
     def __init__(
         self,
         target: str,
-        transport_factory: Callable[[], "BluetoothTransport"],
+        transport_factory: Callable[[], BluetoothTransport],
         timeout: float = 5.0,
         cooldown: float = 5.0,
         max_retries: int = 3,
@@ -793,7 +794,7 @@ class CrashMinimizer:
 
     def minimize_from_db(
         self,
-        crash_db: "CrashDB",
+        crash_db: CrashDB,
         crash_id: int,
         strategy: str = "auto",
     ) -> MinimizationResult:

@@ -11,11 +11,11 @@ import collections
 import socket
 import subprocess
 import time
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-from blue_tap.utils.output import info, warning, error
+from blue_tap.utils.output import info, warning
 
 
 # ---------------------------------------------------------------------------
@@ -119,7 +119,7 @@ class TargetHealthMonitor:
             sock.settimeout(2)
             sock.connect((target, 1))  # PSM 1 = SDP
             return HealthStatus.ALIVE
-        except (OSError, socket.timeout):
+        except (TimeoutError, OSError):
             return HealthStatus.UNREACHABLE
         finally:
             if sock is not None:

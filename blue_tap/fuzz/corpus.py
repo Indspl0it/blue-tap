@@ -272,7 +272,7 @@ def _load_generator(module_path: str, func_name: str):
 
 
 def generate_full_corpus(
-    corpus: "Corpus",
+    corpus: Corpus,
     protocols: list[str] | None = None,
     show_progress: bool = True,
 ) -> dict[str, int]:
@@ -363,7 +363,7 @@ def generate_full_corpus(
     return results
 
 
-def _generate_protocol_seeds(corpus: "Corpus", protocol: str) -> int:
+def _generate_protocol_seeds(corpus: Corpus, protocol: str) -> int:
     """Generate seeds for a single protocol using its builder."""
     if protocol not in _PROTOCOL_GENERATORS:
         return 0

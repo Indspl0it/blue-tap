@@ -287,7 +287,7 @@ class PBAPClient:
                 data += chunk
                 remaining -= len(chunk)
             return bytes([opcode]) + header[1:3] + data
-        except (socket.timeout, OSError):
+        except (TimeoutError, OSError):
             return None
 
     def _parse_connect_response(self, response: bytes):

@@ -630,8 +630,8 @@ class ATCorpus:
         corpus.append(b'AT+CPBW=1,"+1",145,"\xc0\xc1\xc2"\r')
 
         # --- Mixed encoding: UTF-8 multibyte in arguments ---
-        corpus.append("AT+CPBF=\"\u00e9\u00e8\u00ea\"\r".encode("utf-8"))
-        corpus.append("AT+CPBW=1,\"+1\",145,\"\U0001f600\U0001f4a9\"\r".encode("utf-8"))
+        corpus.append("AT+CPBF=\"\u00e9\u00e8\u00ea\"\r".encode())
+        corpus.append("AT+CPBW=1,\"+1\",145,\"\U0001f600\U0001f4a9\"\r".encode())
 
         # --- Escape sequences in arguments ---
         escape_seqs = ["\\\\", "\\'", '\\"', "\\0", "\\t", "\\n", "\\r"]

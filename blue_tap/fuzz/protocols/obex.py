@@ -11,7 +11,6 @@ All multi-byte fields are big-endian.
 from __future__ import annotations
 
 import struct
-from typing import Optional
 
 # ---------------------------------------------------------------------------
 # Opcodes (request)
@@ -338,7 +337,7 @@ def build_obex_packet(opcode: int, body: bytes = b"") -> bytes:
 
 
 def build_connect(
-    target_uuid: Optional[bytes] = None,
+    target_uuid: bytes | None = None,
     version: int = 0x10,
     flags: int = 0x00,
     max_pkt_len: int = 0xFFFF,
@@ -365,7 +364,7 @@ def build_connect(
     return bytes([OBEX_CONNECT]) + struct.pack(">H", length) + body
 
 
-def build_disconnect(connection_id: Optional[int] = None) -> bytes:
+def build_disconnect(connection_id: int | None = None) -> bytes:
     """Build an OBEX Disconnect request.
 
     Args:
@@ -381,7 +380,7 @@ def build_disconnect(connection_id: Optional[int] = None) -> bytes:
 
 
 def build_setpath(
-    name: Optional[str] = None,
+    name: str | None = None,
     backup: bool = False,
     no_create: bool = True,
 ) -> bytes:
@@ -443,7 +442,7 @@ def build_put(
     type_str: bytes,
     body_data: bytes = b"",
     final: bool = True,
-    connection_id: Optional[int] = None,
+    connection_id: int | None = None,
 ) -> bytes:
     """Build an OBEX Put request.
 
@@ -473,7 +472,7 @@ def build_put(
     return build_obex_packet(opcode, headers)
 
 
-def build_abort(connection_id: Optional[int] = None) -> bytes:
+def build_abort(connection_id: int | None = None) -> bytes:
     """Build an OBEX Abort request.
 
     Args:
@@ -510,13 +509,13 @@ def build_app_params(tags: list[tuple[int, bytes]]) -> bytes:
 
 
 def build_pbap_app_params(
-    max_count: Optional[int] = None,
-    offset: Optional[int] = None,
-    fmt: Optional[int] = None,
-    filter_mask: Optional[int] = None,
-    search_value: Optional[str] = None,
-    search_attr: Optional[int] = None,
-    order: Optional[int] = None,
+    max_count: int | None = None,
+    offset: int | None = None,
+    fmt: int | None = None,
+    filter_mask: int | None = None,
+    search_value: str | None = None,
+    search_attr: int | None = None,
+    order: int | None = None,
 ) -> bytes:
     """Build PBAP-specific application parameters.
 
@@ -553,12 +552,12 @@ def build_pbap_app_params(
 
 
 def build_map_app_params(
-    max_count: Optional[int] = None,
-    offset: Optional[int] = None,
-    subject_length: Optional[int] = None,
-    charset: Optional[int] = None,
-    filter_msg_type: Optional[int] = None,
-    parameter_mask: Optional[int] = None,
+    max_count: int | None = None,
+    offset: int | None = None,
+    subject_length: int | None = None,
+    charset: int | None = None,
+    filter_msg_type: int | None = None,
+    parameter_mask: int | None = None,
 ) -> bytes:
     """Build MAP-specific application parameters.
 
