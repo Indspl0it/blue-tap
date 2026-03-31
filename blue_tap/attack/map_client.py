@@ -228,7 +228,8 @@ class MAPClient:
                         try:
                             content = self.get_message(handle)
                             if content:
-                                msg_file = os.path.join(msg_dir, f"{handle}.bmsg")
+                                safe_handle = os.path.basename(handle).replace("/", "_").replace("\\", "_")
+                                msg_file = os.path.join(msg_dir, f"{safe_handle}.bmsg")
                                 with open(msg_file, "w") as f:
                                     f.write(content)
                                 results[folder]["messages"].append({

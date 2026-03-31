@@ -223,6 +223,7 @@ class BIASAttack:
             with step(f"Connecting to IVI {target(self.ivi_address)}"):
                 import subprocess
                 bt_commands = "\n".join([
+                    f"select {self.hci}",
                     f"trust {self.ivi_address}",
                     f"pair {self.ivi_address}",
                     f"connect {self.ivi_address}",

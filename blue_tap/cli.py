@@ -3,7 +3,6 @@
 import json
 import os
 import re
-import time
 
 import click
 from rich.table import Table
@@ -83,37 +82,9 @@ class LoggedCommand(click.Command):
     """Click command with automatic session logging for every invocation."""
 
     def invoke(self, ctx):
-        from blue_tap.utils.session import log_command
-
-        status = "success"
-        err = ""
-        started = time.time()
-        command_path = _normalize_command_path(ctx)
-        try:
-            return super().invoke(ctx)
-        except KeyboardInterrupt:
-            status = "interrupted"
-            raise
-        except Exception as exc:
-            status = "error"
-            err = str(exc)
-            raise
-        finally:
-            if command_path not in _SESSION_SKIP_COMMANDS:
-                payload = {
-                    "command_path": command_path,
-                    "status": status,
-                    "duration_s": round(time.time() - started, 3),
-                    "params": dict(ctx.params),
-                }
-                if err:
-                    payload["error"] = err
-                log_command(
-                    command=command_path.replace(" ", "_"),
-                    data=payload,
-                    category=_infer_category(command_path),
-                    target=_extract_target_param(ctx.params),
-                )
+        # Commands log their own structured results via log_command().
+        # No auto-logging here to avoid double-counting in sessions.
+        return super().invoke(ctx)
 
 
 class LoggedGroup(click.Group):
@@ -3024,8 +2995,7 @@ def keys_harvest(address, duration, hci):
 
 
 @keys.command("list")
-@click.option("-i", "--hci", default="hci0")
-def keys_list(hci):
+def keys_list():
     """List all stored link keys."""
     from blue_tap.attack.key_harvest import KeyDatabase
     from blue_tap.utils.session import get_session

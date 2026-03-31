@@ -222,7 +222,7 @@ def scan_classic(duration: int = 10, hci: str = "hci0") -> list[dict]:
 # BLE Scanning
 # ============================================================================
 
-async def scan_ble(duration: int = 10, passive: bool = False) -> list[dict]:
+async def scan_ble(duration: int = 10, passive: bool = False, adapter: str = "") -> list[dict]:
     """Scan for BLE devices using bleak with advertising data parsing.
 
     Args:
@@ -241,10 +241,10 @@ async def scan_ble(duration: int = 10, passive: bool = False) -> list[dict]:
     # bleak's scanning_mode parameter: "active" sends SCAN_REQ, "passive" does not
     scanning_mode = "passive" if passive else "active"
     try:
-        discovered = await BleakScanner.discover(
-            timeout=duration,
-            scanning_mode=scanning_mode,
-        )
+        kwargs = {"timeout": duration, "scanning_mode": scanning_mode}
+        if adapter:
+            kwargs["adapter"] = adapter
+        discovered = await BleakScanner.discover(**kwargs)
     except Exception as e:
         error(f"BLE scan failed: {e}")
         return []
@@ -315,9 +315,9 @@ def _lookup_ble_manufacturer(company_id: int) -> str:
     return _BLE_MANUFACTURERS.get(company_id, f"Unknown (0x{company_id:04X})")
 
 
-def scan_ble_sync(duration: int = 10, passive: bool = False) -> list[dict]:
+def scan_ble_sync(duration: int = 10, passive: bool = False, adapter: str = "") -> list[dict]:
     """Synchronous wrapper for BLE scanning."""
-    return asyncio.run(scan_ble(duration, passive))
+    return asyncio.run(scan_ble(duration, passive, adapter=adapter))
 
 
 # ============================================================================
@@ -327,7 +327,7 @@ def scan_ble_sync(duration: int = 10, passive: bool = False) -> list[dict]:
 def scan_all(duration: int = 10, hci: str = "hci0") -> list[dict]:
     """Scan both Classic and BLE, merge and deduplicate results."""
     classic = scan_classic(duration, hci)
-    ble = scan_ble_sync(duration)
+    ble = scan_ble_sync(duration, adapter=hci)
 
     # Merge, dedup by address, prefer richer records
     seen = {}
