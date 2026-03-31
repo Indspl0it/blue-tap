@@ -43,7 +43,7 @@
 
 ## Purpose
 
-Blue-Tap is a comprehensive Bluetooth and BLE penetration testing toolkit designed specifically for security assessments of **automotive In-Vehicle Infotainment (IVI)** systems. It provides a complete attack lifecycle — from passive device discovery through active exploitation, data extraction, and automated report generation.
+Blue-Tap is a Bluetooth/BLE penetration testing toolkit built for automotive IVI security assessments. It discovers and fingerprints Bluetooth devices, identifies known CVEs and configuration weaknesses, hijacks connections via identity cloning and pairing attacks (BIAS, SSP downgrade, KNOB), extracts phonebooks, messages, and call audio, and fuzzes 11 Bluetooth protocols with a response-guided engine that detects crashes, information leaks, and behavioral anomalies without requiring firmware access or special hardware. All findings are logged into sessions and exported as evidence-backed HTML/JSON pentest reports.
 
 ### What Blue-Tap Does
 
