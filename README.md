@@ -129,9 +129,9 @@ Blue-Tap is designed exclusively for **authorized security testing**. You must h
 │  │  └──────────┘ └──────────┘ └──────────┘ └──────────┘ └──────────┘     │ │
 │  │                                                                         │ │
 │  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐     │ │
-│  │  │   A2DP   │ │  AVRCP   │ │   OPP    │ │   BIAS   │ │   DoS    │     │ │
-│  │  │ Media/Mic│ │ Media Ctl│ │ File Push│ │CVE-2020- │ │Pair/Name │     │ │
-│  │  │CapturInj │ │ Vol Ramp │ │   vCard  │ │  10135   │ │  Flood   │     │ │
+│  │  │   A2DP   │ │  AVRCP   │ │   OPP    │ │   BIAS   │ │ Proto DoS│     │ │
+│  │  │ Media/Mic│ │ Media Ctl│ │ File Push│ │CVE-2020- │ │ L2CAP/SDP│     │ │
+│  │  │CapturInj │ │ Vol Ramp │ │   vCard  │ │  10135   │ │ RFCOMM/HF│     │ │
 │  │  └──────────┘ └──────────┘ └──────────┘ └──────────┘ └──────────┘     │ │
 │  │                                                                         │ │
 │  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐     │ │
@@ -279,6 +279,7 @@ cli.py ────────────────────────�
   │   ├── bias.py          ← L2CAP role-switch manipulation
   │   ├── bluesnarfer.py   ← socket(RFCOMM) + AT commands
   │   ├── dos.py           ← pairing flood, l2ping, name flood
+  │   ├── protocol_dos.py  ← L2CAP/SDP/RFCOMM/OBEX/HFP protocol-level DoS
   │   ├── opp.py           ← socket(RFCOMM) + OBEX Push
   │   ├── pin_brute.py     ← D-Bus pairing agent
   │   ├── key_harvest.py   ← HCI capture + link key extraction + key DB
@@ -812,12 +813,12 @@ blue-tap dos pin-brute <MAC>                           # Brute-force legacy PIN 
 blue-tap dos l2ping-flood <MAC>                        # L2CAP echo request flood (requires root)
 ```
 
-#### L2CAP Signaling
+#### L2CAP Transport
 
 ```bash
-blue-tap dos l2cap-config-bomb <MAC>                   # Config option bomb (unknown options force memory allocation)
-blue-tap dos l2cap-cid-exhaust <MAC>                   # CID exhaustion (open channels without configuring)
-blue-tap dos l2cap-echo-amp <MAC>                      # Echo amplification (max-size echo requests)
+blue-tap dos l2cap-storm <MAC>                         # Connection storm (rapid connect/disconnect cycling)
+blue-tap dos l2cap-cid-exhaust <MAC>                   # CID exhaustion (open and hold parallel connections)
+blue-tap dos l2cap-data-flood <MAC>                    # Data flood (large malformed SDP requests at max rate)
 ```
 
 #### Protocol-Specific
@@ -846,15 +847,35 @@ blue-tap spoof restore                                 # Restore original MAC
 
 ### 11. Automation and Orchestration
 
-#### Auto Mode
+#### Auto Mode — Full 9-Phase Pentest
 
-Fully automated: discover phone, hijack IVI, extract all data, generate report.
+Executes a complete Bluetooth penetration test methodology in a single command:
 
+| Phase | Name | What It Does |
+|:-----:|------|-------------|
+| 1 | Discovery | Scan for nearby devices, identify the phone paired with the IVI |
+| 2 | Fingerprinting | BT version, chipset, manufacturer, profiles, attack surface |
+| 3 | Reconnaissance | SDP services, RFCOMM channels 1-30, L2CAP PSMs |
+| 4 | Vuln Assessment | 20+ CVE and configuration checks |
+| 5 | Pairing Attacks | SSP downgrade probe, KNOB (CVE-2019-9506) probe |
+| 6 | Exploitation | Hijack: MAC spoof + identity clone + PBAP/MAP extraction |
+| 7 | Protocol Fuzzing | Coverage-guided fuzzing across sdp, rfcomm, l2cap, ble-att (default: 1 hour) |
+| 8 | DoS Testing | L2CAP storm, CID exhaustion, SDP continuation, RFCOMM SABM, HFP AT flood |
+| 9 | Report | HTML + JSON with all findings, evidence, and fuzzing intelligence |
+
+The **coverage-guided** fuzzing strategy is used by default — it learns from target responses, adapts mutation focus to productive protocol fields, tracks protocol state transitions, and detects behavioral anomalies. This provides maximum code path exploration with zero manual configuration.
+
+```bash
+blue-tap auto <IVI_MAC>                                # Full 9-phase pentest (1hr fuzz)
+blue-tap auto <IVI_MAC> --fuzz-duration 7200           # 2 hour fuzzing phase
+blue-tap auto <IVI_MAC> --skip-fuzz                    # Skip fuzzing (faster assessment)
+blue-tap auto <IVI_MAC> --skip-dos                     # Skip DoS tests
+blue-tap auto <IVI_MAC> --skip-fuzz --skip-dos         # Quick: recon + vuln + exploit only
+blue-tap auto <IVI_MAC> -d 60                          # 60-second phone discovery window
+blue-tap auto <IVI_MAC> -o ./pentest_output/           # Custom output directory
 ```
-blue-tap auto <IVI_MAC>                                # Full auto chain
-blue-tap auto <IVI_MAC> -d 30                          # 30-second phone discovery window
-blue-tap auto <IVI_MAC> -o ./auto_results/              # Custom output directory
-```
+
+Each phase runs independently — a failure in one phase does not stop subsequent phases. Results from all phases feed into the final HTML/JSON report.
 
 #### Run Mode (Playbook)
 
@@ -1160,7 +1181,15 @@ blue-tap -s quick-assessment report
 
 ### Workflow 2: Full IVI Penetration Test
 
-Comprehensive assessment with data extraction and fuzzing.
+**Option A — Automated (recommended):**
+
+All 9 phases in a single command. Coverage-guided fuzzing runs for 1 hour by default.
+
+```bash
+blue-tap -s full-pentest auto AA:BB:CC:DD:EE:FF
+```
+
+**Option B — Manual (full control):**
 
 ```bash
 # Phase 1: Discovery and reconnaissance
@@ -1176,19 +1205,32 @@ blue-tap -s full-pentest recon pairing-mode AA:BB:CC:DD:EE:FF
 # Phase 2: Vulnerability assessment
 blue-tap -s full-pentest vulnscan AA:BB:CC:DD:EE:FF
 
-# Phase 3: Data extraction
+# Phase 3: Pairing attacks
+blue-tap -s full-pentest ssp-downgrade probe AA:BB:CC:DD:EE:FF
+blue-tap -s full-pentest knob probe AA:BB:CC:DD:EE:FF
+
+# Phase 4: Data extraction
 blue-tap -s full-pentest pbap dump AA:BB:CC:DD:EE:FF
 blue-tap -s full-pentest map dump AA:BB:CC:DD:EE:FF
 blue-tap -s full-pentest at dump AA:BB:CC:DD:EE:FF
 
-# Phase 4: Connection hijack (if phone MAC known)
+# Phase 5: Connection hijack (if phone MAC known)
 blue-tap -s full-pentest hijack AA:BB:CC:DD:EE:FF CC:DD:EE:FF:00:11
 
 # Phase 5: Protocol fuzzing
 blue-tap -s full-pentest fuzz campaign AA:BB:CC:DD:EE:FF \
   --duration 30m --strategy targeted --capture
 
-# Phase 6: Report
+# Phase 6: Protocol fuzzing (1 hour, coverage-guided)
+blue-tap -s full-pentest fuzz campaign AA:BB:CC:DD:EE:FF \
+  --strategy coverage --duration 1h --capture
+
+# Phase 7: DoS testing
+blue-tap -s full-pentest dos l2cap-storm AA:BB:CC:DD:EE:FF
+blue-tap -s full-pentest dos rfcomm-sabm-flood AA:BB:CC:DD:EE:FF
+blue-tap -s full-pentest dos hfp-at-flood AA:BB:CC:DD:EE:FF
+
+# Phase 8: Report
 blue-tap -s full-pentest report -f html
 ```
 

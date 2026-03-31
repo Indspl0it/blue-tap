@@ -5,6 +5,33 @@ All notable changes to Blue-Tap are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.1] - 2026-03-31
+
+### Added
+
+- **10 protocol-level DoS attacks** targeting L2CAP, SDP, RFCOMM, OBEX, and HFP
+- **Link key harvest and persistent access** (`keys` command group)
+- **SSP downgrade attack** (`ssp-downgrade` command group)
+- **KNOB attack execution** (`knob` command group, CVE-2019-9506)
+- **Fleet-wide assessment** (`fleet` command group)
+- **Full 9-phase automated pentest** (`auto` command): discovery, fingerprinting, recon, vuln assessment, pairing attacks, exploitation, coverage-guided fuzzing (1hr default), DoS testing, report generation
+- **Comprehensive CLI logging** across all 100+ commands: every operation now logs start, progress, result, and errors with context
+- Changelog file (`docs/CHANGELOG.md`)
+
+### Changed
+
+- **Report overhaul**: modern UI with Inter/JetBrains Mono fonts, Tailwind-inspired color palette, rounded cards, soft severity badges, pentest narrative text in every section, support for v2.1.1 findings (key harvest, SSP downgrade, KNOB, fleet, protocol DoS)
+- **Auto command** rewritten from 4-phase (discover, vulnscan, hijack, report) to 9-phase pentest methodology with coverage-guided fuzzing and DoS testing. New options: `--fuzz-duration`, `--skip-fuzz`, `--skip-dos`, `--skip-exploit`
+
+### Fixed
+
+- L2CAP DoS attacks use valid socket operations (not raw signaling)
+- DoS result dict key mismatch with CLI
+- KNOB probe missing `internalblue_available` field
+- Fleet assess crash on invalid MAC address
+- Report collector namespaces new attack types (key_harvest, ssp_downgrade, knob_attack)
+- DoS grouping keywords cover all protocol-level attacks
+
 ## [2.1.0] - 2026-03-31
 
 ### Added
@@ -90,6 +117,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rich terminal UI with styled output, tables, panels
 - Live fuzzing dashboard with keyboard controls
 
-[2.1.0]: https://github.com/Indspl0it/blue-tap/compare/v2.0.0...HEAD
+[2.1.1]: https://github.com/Indspl0it/blue-tap/compare/v2.1.0...HEAD
+[2.1.0]: https://github.com/Indspl0it/blue-tap/compare/v2.0.0...v2.1.0
 [2.0.1]: https://github.com/Indspl0it/blue-tap/compare/v2.0.0...v2.0.1
 [2.0.0]: https://github.com/Indspl0it/blue-tap/releases/tag/v2.0.0

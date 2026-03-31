@@ -298,11 +298,14 @@ def scan_classic(duration, hci, output):
     from blue_tap.core.scanner import scan_classic as _scan
     from blue_tap.utils.session import log_command
 
+    info(f"Scanning for Classic BT devices on {hci} ({duration}s)...")
     devices = _scan(duration, hci)
-    verbose(f"hcitool scan completed, parsing {len(devices)} results")
     if devices:
+        success(f"Scan complete: {len(devices)} device(s) discovered")
         console.print(device_table(devices, "Classic BT Devices"))
         log_command("scan_classic", devices, category="scan")
+    else:
+        warning("Scan complete: no devices found")
     if output:
         _save_json(devices, output)
 
@@ -316,10 +319,15 @@ def scan_ble(duration, passive, output):
     from blue_tap.core.scanner import scan_ble_sync
     from blue_tap.utils.session import log_command
 
+    mode = "passive" if passive else "active"
+    info(f"Scanning for BLE devices ({duration}s, {mode} mode)...")
     devices = scan_ble_sync(duration, passive=passive)
     if devices:
+        success(f"BLE scan complete: {len(devices)} device(s) discovered")
         console.print(device_table(devices, "BLE Devices"))
         log_command("scan_ble", devices, category="scan")
+    else:
+        warning("BLE scan complete: no devices found")
     if output:
         _save_json(devices, output)
 
@@ -333,10 +341,14 @@ def scan_all(duration, hci, output):
     from blue_tap.core.scanner import scan_all as _scan_all
     from blue_tap.utils.session import log_command
 
+    info(f"Scanning for Classic BT + BLE devices on {hci} ({duration}s)...")
     devices = _scan_all(duration, hci)
     if devices:
+        success(f"Scan complete: {len(devices)} device(s) discovered")
         console.print(device_table(devices, "All Bluetooth Devices"))
         log_command("scan_all", devices, category="scan")
+    else:
+        warning("Scan complete: no devices found")
     if output:
         _save_json(devices, output)
 
@@ -359,16 +371,20 @@ def recon_sdp(address, output):
         return
     from blue_tap.recon.sdp import browse_services
 
+    info(f"Browsing SDP services on [bold]{address}[/bold]...")
     services = browse_services(address)
     if services:
+        success(f"Found {len(services)} SDP service(s)")
         console.print(service_table(services, f"SDP Services: {address}"))
 
-        # Show raw details
+        # Highlight interesting services
         for svc in services:
             profile = svc.get("profile", "")
             if any(kw in profile for kw in ["PBAP", "MAP", "HFP", "A2DP", "SPP"]):
-                success(f"  INTERESTING: {svc.get('name')} -> {profile} "
-                        f"(ch={svc.get('channel')})")
+                info(f"  Attack surface: {svc.get('name')} -> {profile} "
+                     f"(ch={svc.get('channel')})")
+    else:
+        warning(f"No SDP services found on {address}")
 
     from blue_tap.utils.session import log_command
     log_command("sdp_browse", services, category="recon", target=address)
@@ -387,7 +403,13 @@ def recon_gatt(address, output):
         return
     from blue_tap.recon.gatt import enumerate_services_sync
 
+    info(f"Enumerating GATT services on [bold]{address}[/bold]...")
     services = enumerate_services_sync(address)
+    if not services:
+        warning("No GATT services found")
+        return
+    total_chars = sum(len(s.get("characteristics", [])) for s in services)
+    success(f"Found {len(services)} service(s) with {total_chars} characteristic(s)")
     for svc in services:
         console.print(f"\n[bold cyan]Service: {svc['description']}[/bold cyan]")
         console.print(f"  UUID: {svc['uuid']}  Handle: {svc['handle']}")
@@ -412,7 +434,10 @@ def recon_fingerprint(address, output):
         return
     from blue_tap.recon.fingerprint import fingerprint_device
 
+    info(f"Fingerprinting device [bold]{address}[/bold]...")
     fp = fingerprint_device(address)
+    success(f"Fingerprint complete: {fp.get('manufacturer', '?')}, BT {fp.get('bt_version', '?')}, "
+            f"{len(fp.get('profiles', []))} profile(s)")
 
     class_info = fp.get("device_class_info", {})
     class_str = ""
@@ -463,6 +488,7 @@ def recon_ssp(address):
         return
     from blue_tap.recon.sdp import check_ssp
 
+    info(f"Checking SSP support on [bold]{address}[/bold]...")
     result = check_ssp(address)
     if result is True:
         success(f"{address} supports SSP (more secure pairing)")
@@ -483,6 +509,7 @@ def recon_rfcomm_scan(address, timeout, output):
         return
     from blue_tap.recon.rfcomm_scan import RFCOMMScanner
 
+    info(f"Scanning RFCOMM channels 1-30 on [bold]{address}[/bold] (timeout={timeout}s)...")
     scanner = RFCOMMScanner(address)
     results = scanner.scan_all_channels(timeout_per_ch=timeout)
 
@@ -515,10 +542,13 @@ def recon_l2cap_scan(address, dynamic, timeout, output):
         return
     from blue_tap.recon.l2cap_scan import L2CAPScanner
 
+    range_desc = "standard + dynamic" if dynamic else "standard"
+    info(f"Scanning L2CAP PSMs on [bold]{address}[/bold] ({range_desc}, timeout={timeout}s)...")
     scanner = L2CAPScanner(address)
     results = scanner.scan_standard_psms(timeout=timeout)
 
     if dynamic:
+        info("  Scanning dynamic PSM range...")
         results.extend(scanner.scan_dynamic_psms(timeout=timeout))
 
     if results:
@@ -574,6 +604,7 @@ def recon_pairing_mode(address, hci):
         return
     from blue_tap.recon.hci_capture import detect_pairing_mode
 
+    info(f"Detecting pairing mode on [bold]{address}[/bold]...")
     result = detect_pairing_mode(address, hci)
     panel_text = (
         f"[cyan]SSP Supported:[/cyan] {result.get('ssp_supported') if result.get('ssp_supported') is not None else 'Inconclusive (probe failed)'}\n"
@@ -589,6 +620,7 @@ def recon_nrf_scan(duration):
     """Scan BLE advertisers using nRF52840 dongle."""
     from blue_tap.recon.sniffer import NRFBLESniffer
 
+    info(f"Starting BLE advertisement scan via nRF52840 ({duration}s)...")
     sniffer = NRFBLESniffer()
     sniffer.scan_advertisers(duration)
 
@@ -599,6 +631,7 @@ def recon_usrp_scan(duration):
     """Scan for BR/EDR piconets using USRP B210."""
     from blue_tap.recon.sniffer import USRPCapture
 
+    info(f"Starting BR/EDR piconet scan via USRP B210 ({duration}s)...")
     cap = USRPCapture()
     cap.scan_piconets(duration)
 
@@ -611,6 +644,8 @@ def recon_nrf_sniff(target, output, duration):
     """Sniff BLE pairing exchanges using nRF52840 dongle."""
     from blue_tap.recon.sniffer import NRFBLESniffer
 
+    target_str = f" following {target}" if target else ""
+    info(f"Starting BLE pairing sniff via nRF52840{target_str} ({duration}s)...")
     sniffer = NRFBLESniffer()
     sniffer.sniff_pairing(output, duration, target=target)
 
@@ -626,6 +661,7 @@ def recon_usrp_follow(address, output, duration):
         return
     from blue_tap.recon.sniffer import USRPCapture
 
+    info(f"Following piconet [bold]{address}[/bold] via USRP B210 ({duration}s)...")
     cap = USRPCapture()
     cap.follow_piconet(address, output, duration)
 
@@ -639,6 +675,7 @@ def recon_usrp_capture(output, duration, freq, rate):
     """Raw IQ capture with USRP B210."""
     from blue_tap.recon.sniffer import USRPCapture
 
+    info(f"Starting raw IQ capture via USRP B210 ({duration}s, {freq/1e6:.0f}MHz)...")
     cap = USRPCapture()
     cap.capture_raw_iq(output, duration, freq, rate)
 
@@ -650,13 +687,16 @@ def recon_crack_key(pcap_file, output):
     """Crack BLE pairing key from captured pcap using Crackle."""
     from blue_tap.recon.sniffer import CrackleRunner
 
+    info(f"Cracking BLE pairing key from [bold]{pcap_file}[/bold]...")
     runner = CrackleRunner()
     result = runner.crack_ble(pcap_file, output)
     if result.get("success"):
         if result.get("ltk"):
-            success(f"LTK: {result['ltk']}")
+            success(f"LTK recovered: {result['ltk']}")
         if result.get("tk"):
-            info(f"TK: {result['tk']}")
+            info(f"TK recovered: {result['tk']}")
+    else:
+        warning("Key crack failed — pcap may not contain a complete pairing exchange")
 
 
 @recon.command("extract-link-key")
@@ -665,6 +705,7 @@ def recon_extract_link_key(pcap_file):
     """Extract BR/EDR link key from captured pairing pcap (via tshark)."""
     from blue_tap.recon.sniffer import LinkKeyExtractor
 
+    info(f"Extracting link keys from [bold]{pcap_file}[/bold]...")
     extractor = LinkKeyExtractor()
     result = extractor.extract_from_pcap(pcap_file)
     if result.get("success"):
@@ -686,12 +727,14 @@ def recon_inject_link_key(remote_mac, link_key, hci, key_type):
     """
     from blue_tap.recon.sniffer import LinkKeyExtractor
 
+    info(f"Injecting link key for [bold]{remote_mac}[/bold] into BlueZ ({hci})...")
     extractor = LinkKeyExtractor()
     adapter_mac = extractor.get_adapter_mac(hci)
     if not adapter_mac:
         error(f"Cannot determine adapter MAC for {hci}")
         return
     extractor.inject_link_key(adapter_mac, remote_mac, link_key, key_type)
+    success(f"Link key injected — try: bluetoothctl connect {remote_mac}")
 
 
 # ============================================================================
@@ -712,8 +755,13 @@ def spoof_mac(target_mac, hci, method):
     target_mac = resolve_address(target_mac)
     if not target_mac:
         return
+    info(f"Spoofing adapter {hci} MAC to {target_mac} (method={method})")
     from blue_tap.core.spoofer import spoof_address
-    spoof_address(hci, target_mac, method)
+    try:
+        spoof_address(hci, target_mac, method)
+        success(f"MAC address changed to {target_mac} on {hci}")
+    except Exception as exc:
+        error(f"MAC spoof failed: {exc}")
 
 
 @spoof.command("clone")
@@ -730,8 +778,17 @@ def spoof_clone(target_mac, target_name, hci, device_class):
     if not target_name:
         error("Phone name is required for identity clone (e.g., 'Galaxy S24')")
         return
+    info(f"Cloning device identity from {target_mac} on adapter {hci}")
+    info(f"  MAC: {target_mac}, Name: {target_name}, Class: {device_class}")
     from blue_tap.core.spoofer import clone_device_identity
-    clone_device_identity(hci, target_mac, target_name, device_class)
+    try:
+        info("Step 1/3: Spoofing MAC address...")
+        info("Step 2/3: Setting device name...")
+        info("Step 3/3: Setting device class...")
+        clone_device_identity(hci, target_mac, target_name, device_class)
+        success(f"Identity clone complete: now impersonating {target_name} ({target_mac})")
+    except Exception as exc:
+        error(f"Identity clone failed: {exc}")
 
 
 @spoof.command("restore")
@@ -740,8 +797,13 @@ def spoof_clone(target_mac, target_name, hci, device_class):
               type=click.Choice(["auto", "bdaddr", "spooftooph", "btmgmt"]))
 def spoof_restore(hci, method):
     """Restore adapter to its original MAC address."""
+    info(f"Restoring original MAC address on adapter {hci} (method={method})")
     from blue_tap.core.spoofer import restore_original_mac
-    restore_original_mac(hci, method)
+    try:
+        restore_original_mac(hci, method)
+        success(f"Original MAC restored on {hci}")
+    except Exception as exc:
+        error(f"MAC restore failed: {exc}")
 
 
 # ============================================================================
@@ -767,29 +829,38 @@ def pbap_pull(address, channel, path, output_dir):
     from blue_tap.attack.pbap import PBAPClient
     from blue_tap.recon.sdp import find_service_channel
 
+    info(f"Pulling PBAP object [bold]{path}[/bold] from [bold]{address}[/bold]...")
     if channel is None:
+        info("  Auto-discovering PBAP channel via SDP...")
         channel = find_service_channel(address, "Phonebook")
         if channel is None:
             channel = find_service_channel(address, "PBAP")
         if channel is None:
-            error("Could not find PBAP channel. Specify with -c.")
+            error("Could not find PBAP channel via SDP. Specify with -c.")
             return
+        info(f"  Found PBAP on RFCOMM channel {channel}")
 
+    info(f"  Connecting to PBAP service on channel {channel}...")
     client = PBAPClient(address, channel=channel)
     if not client.connect():
+        error("PBAP connection failed")
         return
 
     try:
+        info(f"  Requesting {path}...")
         data = client.pull_phonebook(path)
         if data:
             os.makedirs(output_dir, exist_ok=True)
             filename = os.path.join(output_dir, path.replace("/", "_"))
             with open(filename, "w") as f:
                 f.write(data)
-            success(f"Saved to {filename}")
-            console.print(data[:2000])  # Preview
+            entries = data.count("BEGIN:VCARD")
+            success(f"Extracted {entries} vCard(s) -> {filename} ({len(data):,} bytes)")
+        else:
+            warning(f"No data returned for {path}")
     finally:
         client.disconnect()
+        info("  PBAP session closed")
 
 
 @pbap.command("dump")
@@ -804,19 +875,26 @@ def pbap_dump(address, channel, output_dir):
     from blue_tap.attack.pbap import PBAPClient
     from blue_tap.recon.sdp import find_service_channel
 
+    info(f"Starting full PBAP dump from [bold]{address}[/bold]...")
+    info("  Targets: contacts, call history (in/out/missed), favorites, SIM phonebook")
     if channel is None:
+        info("  Auto-discovering PBAP channel via SDP...")
         channel = find_service_channel(address, "Phonebook")
         if channel is None:
             channel = find_service_channel(address, "PBAP")
         if channel is None:
-            error("Could not find PBAP channel. Specify with -c.")
+            error("Could not find PBAP channel via SDP. Specify with -c.")
             return
+        info(f"  Found PBAP on RFCOMM channel {channel}")
 
+    info(f"  Connecting to PBAP service on channel {channel}...")
     client = PBAPClient(address, channel=channel)
     if not client.connect():
+        error("PBAP connection failed")
         return
 
     try:
+        info("  Pulling all phonebook objects...")
         results = client.pull_all_data(output_dir)
         if results:
             table = Table(title="PBAP Dump Results")
@@ -828,8 +906,16 @@ def pbap_dump(address, channel, output_dir):
                 table.add_row(path, info_dict["description"],
                               info_dict["file"], str(info_dict["size"]))
             console.print(table)
+            total_size = sum(d["size"] for d in results.values())
+            success(f"PBAP dump complete: {len(results)} object(s), {total_size:,} bytes -> {output_dir}/")
+
+            from blue_tap.utils.session import log_command
+            log_command("pbap_dump", results, category="data", target=address)
+        else:
+            warning("No PBAP data returned — device may require authorization")
     finally:
         client.disconnect()
+        info("  PBAP session closed")
 
 
 # ============================================================================
@@ -852,24 +938,34 @@ def map_list(address, channel, folder):
     from blue_tap.attack.map_client import MAPClient
     from blue_tap.recon.sdp import find_service_channel
 
+    info(f"Listing messages in [bold]{folder}[/bold] on [bold]{address}[/bold]...")
     if channel is None:
+        info("  Auto-discovering MAP channel via SDP...")
         channel = find_service_channel(address, "Message")
         if channel is None:
             channel = find_service_channel(address, "MAP")
         if channel is None:
-            error("Could not find MAP channel. Specify with -c.")
+            error("Could not find MAP channel via SDP. Specify with -c.")
             return
+        info(f"  Found MAP on RFCOMM channel {channel}")
 
+    info(f"  Connecting to MAP service on channel {channel}...")
     client = MAPClient(address, channel=channel)
     if not client.connect():
+        error("MAP connection failed")
         return
 
     try:
+        info(f"  Fetching message listing from {folder}...")
         listing = client.get_messages_listing(folder)
         if listing:
             console.print(listing)
+            success(f"Message listing retrieved from {folder}")
+        else:
+            warning(f"No messages found in {folder}")
     finally:
         client.disconnect()
+        info("  MAP session closed")
 
 
 @map_cmd.command("dump")
@@ -884,22 +980,34 @@ def map_dump(address, channel, output_dir):
     from blue_tap.attack.map_client import MAPClient
     from blue_tap.recon.sdp import find_service_channel
 
+    info(f"Starting full MAP dump from [bold]{address}[/bold]...")
+    info("  Targets: inbox, sent, draft, deleted, outbox")
     if channel is None:
+        info("  Auto-discovering MAP channel via SDP...")
         channel = find_service_channel(address, "Message")
         if channel is None:
             channel = find_service_channel(address, "MAP")
         if channel is None:
-            error("Could not find MAP channel. Specify with -c.")
+            error("Could not find MAP channel via SDP. Specify with -c.")
             return
+        info(f"  Found MAP on RFCOMM channel {channel}")
 
+    info(f"  Connecting to MAP service on channel {channel}...")
     client = MAPClient(address, channel=channel)
     if not client.connect():
+        error("MAP connection failed")
         return
 
     try:
+        info("  Dumping messages from all folders...")
         client.dump_all_messages(output_dir)
+        success(f"MAP dump complete -> {output_dir}/")
+
+        from blue_tap.utils.session import log_command
+        log_command("map_dump", {"output_dir": output_dir}, category="data", target=address)
     finally:
         client.disconnect()
+        info("  MAP session closed")
 
 
 # ============================================================================
@@ -930,9 +1038,10 @@ def hfp_connect(address, channel):
         error("Could not find HFP channel. Specify with -c.")
         return
 
+    info(f"Establishing HFP connection to {address} on channel {channel}...")
     client = HFPClient(address, channel=channel)
     if client.connect() and client.setup_slc():
-        success("HFP SLC ready. Use other hfp commands for audio operations.")
+        success(f"HFP SLC established with {address}.")
         # Interactive AT command mode
         info("Entering AT command mode. Type 'quit' to exit.")
         while True:
@@ -945,6 +1054,9 @@ def hfp_connect(address, channel):
             except (EOFError, KeyboardInterrupt):
                 break
         client.disconnect()
+        info("HFP session closed.")
+    else:
+        error(f"HFP SLC setup failed for {address} on channel {channel}.")
 
 
 @hfp.command("capture")
@@ -969,10 +1081,22 @@ def hfp_capture(address, channel, output, duration):
         error("Could not find HFP channel.")
         return
 
+    info(f"Establishing HFP connection to {address} on channel {channel}...")
     client = HFPClient(address, channel=channel)
     if client.connect() and client.setup_slc():
+        success("HFP SLC established.")
+        info(f"Starting call audio capture on {address} (duration {duration}s)...")
         client.capture_audio(output, duration)
+        import os
+        if os.path.exists(output):
+            size = os.path.getsize(output)
+            success(f"Audio saved to {output} ({size} bytes)")
+        else:
+            warning(f"Capture completed but output file {output} not found.")
         client.disconnect()
+        info("HFP session closed.")
+    else:
+        error(f"HFP connection/SLC setup failed for {address}.")
 
 
 @hfp.command("inject")
@@ -996,10 +1120,17 @@ def hfp_inject(address, audio_file, channel):
         error("Could not find HFP channel.")
         return
 
+    info(f"Establishing HFP connection to {address} on channel {channel}...")
     client = HFPClient(address, channel=channel)
     if client.connect() and client.setup_slc():
+        success("HFP SLC established.")
+        info(f"Injecting audio from {audio_file} into call on {address}...")
         client.inject_audio(audio_file)
+        success("Audio injection complete.")
         client.disconnect()
+        info("HFP session closed.")
+    else:
+        error(f"HFP connection/SLC setup failed for {address}.")
 
 
 @hfp.command("at")
@@ -1021,12 +1152,18 @@ def hfp_at(address, command, channel):
         error("Could not find HFP channel.")
         return
 
+    info(f"Connecting to HFP on {address} channel {channel}...")
     client = HFPClient(address, channel=channel)
     if client.connect():
         client.setup_slc()
+        info(f"Sending AT command: {command}")
         result = client.send_at(command)
         console.print(f"[yellow]{result}[/yellow]")
+        success("AT command sent.")
         client.disconnect()
+        info("HFP session closed.")
+    else:
+        error(f"HFP connection failed for {address}.")
 
 
 @hfp.command("dtmf")
@@ -1050,10 +1187,17 @@ def hfp_dtmf(address, digits, channel, interval):
         error("Could not find HFP channel.")
         return
 
+    info(f"Establishing HFP connection to {address} on channel {channel}...")
     client = HFPClient(address, channel=channel)
     if client.connect() and client.setup_slc():
+        success("HFP SLC established.")
+        info(f"Sending DTMF digits '{digits}' (interval {interval}s)...")
         client.dtmf_sequence(digits, interval)
+        success(f"DTMF sequence '{digits}' sent.")
         client.disconnect()
+        info("HFP session closed.")
+    else:
+        error(f"HFP connection/SLC setup failed for {address}.")
 
 
 @hfp.command("hold")
@@ -1076,11 +1220,20 @@ def hfp_hold(address, action, channel):
         error("Could not find HFP channel.")
         return
 
+    action_names = {0: "release", 1: "hold+accept", 2: "swap", 3: "conference"}
+    action_desc = action_names.get(action, str(action))
+    info(f"Establishing HFP connection to {address} on channel {channel}...")
     client = HFPClient(address, channel=channel)
     if client.connect() and client.setup_slc():
+        success("HFP SLC established.")
+        info(f"Sending call hold action {action} ({action_desc}) to {address}...")
         result = client.call_hold(action)
         console.print(f"[yellow]{result}[/yellow]")
+        success(f"Hold action '{action_desc}' sent.")
         client.disconnect()
+        info("HFP session closed.")
+    else:
+        error(f"HFP connection/SLC setup failed for {address}.")
 
 
 @hfp.command("redial")
@@ -1102,11 +1255,18 @@ def hfp_redial(address, channel):
         error("Could not find HFP channel.")
         return
 
+    info(f"Establishing HFP connection to {address} on channel {channel}...")
     client = HFPClient(address, channel=channel)
     if client.connect() and client.setup_slc():
+        success("HFP SLC established.")
+        info(f"Sending redial command to {address}...")
         result = client.redial()
         console.print(f"[yellow]{result}[/yellow]")
+        success("Redial command sent.")
         client.disconnect()
+        info("HFP session closed.")
+    else:
+        error(f"HFP connection/SLC setup failed for {address}.")
 
 
 @hfp.command("voice")
@@ -1129,11 +1289,19 @@ def hfp_voice(address, on, channel):
         error("Could not find HFP channel.")
         return
 
+    state_str = "ON" if on else "OFF"
+    info(f"Establishing HFP connection to {address} on channel {channel}...")
     client = HFPClient(address, channel=channel)
     if client.connect() and client.setup_slc():
+        success("HFP SLC established.")
+        info(f"Setting voice recognition {state_str} on {address}...")
         result = client.voice_recognition(on)
         console.print(f"[yellow]{result}[/yellow]")
+        success(f"Voice recognition {state_str} command sent.")
         client.disconnect()
+        info("HFP session closed.")
+    else:
+        error(f"HFP connection/SLC setup failed for {address}.")
 
 
 # ============================================================================
@@ -1159,7 +1327,17 @@ def audio_record_mic(mac, output, duration, no_setup):
     if not mac:
         return
     from blue_tap.attack.a2dp import record_car_mic
+    dur_str = f"{duration}s" if duration > 0 else "until Ctrl+C"
+    info(f"Recording microphone audio from {mac} ({dur_str}, output: {output})...")
+    if not no_setup:
+        info("Auto-configuring HFP profile and mic settings...")
     record_car_mic(mac, output, duration, auto_setup=not no_setup)
+    import os
+    if os.path.exists(output):
+        size = os.path.getsize(output)
+        success(f"Recording saved to {output} ({size} bytes)")
+    else:
+        warning(f"Recording completed but output file {output} not found.")
 
 
 @audio.command("live")
@@ -1171,7 +1349,11 @@ def audio_live(mac, no_setup):
     if not mac:
         return
     from blue_tap.attack.a2dp import live_eavesdrop
+    info(f"Starting live eavesdrop on {mac} (streaming car mic to laptop speakers)...")
+    if not no_setup:
+        info("Auto-configuring HFP profile and mic settings...")
     live_eavesdrop(mac, auto_setup=not no_setup)
+    info("Live eavesdrop session ended.")
 
 
 @audio.command("play")
@@ -1184,7 +1366,9 @@ def audio_play(mac, audio_file, volume):
     if not mac:
         return
     from blue_tap.attack.a2dp import play_to_car
+    info(f"Playing {audio_file} through car speakers on {mac} (volume {volume}%)...")
     play_to_car(mac, audio_file, volume)
+    success("Audio playback complete.")
 
 
 @audio.command("loopback")
@@ -1196,14 +1380,19 @@ def audio_loopback(mac, mic_source):
     if not mac:
         return
     from blue_tap.attack.a2dp import stream_mic_to_car
+    src_str = mic_source if mic_source else "auto-detected"
+    info(f"Starting loopback: routing laptop mic ({src_str}) to car speakers on {mac}...")
     stream_mic_to_car(mac, mic_source)
+    info("Loopback session ended.")
 
 
 @audio.command("loopback-stop")
 def audio_loopback_stop():
     """Stop all audio loopback modules."""
     from blue_tap.attack.a2dp import stop_loopback
+    info("Stopping all audio loopback modules...")
     stop_loopback()
+    success("Loopback modules stopped.")
 
 
 @audio.command("capture")
@@ -1216,7 +1405,14 @@ def audio_capture_a2dp(mac, output, duration):
     if not mac:
         return
     from blue_tap.attack.a2dp import capture_a2dp
+    info(f"Capturing A2DP media stream from {mac} ({duration}s, output: {output})...")
     capture_a2dp(mac, output, duration)
+    import os
+    if os.path.exists(output):
+        size = os.path.getsize(output)
+        success(f"A2DP capture saved to {output} ({size} bytes)")
+    else:
+        warning(f"Capture completed but output file {output} not found.")
 
 
 @audio.command("profile")
@@ -1228,10 +1424,12 @@ def audio_profile(mac, mode):
     if not mac:
         return
     from blue_tap.attack.a2dp import set_profile_hfp, set_profile_a2dp
+    info(f"Switching {mac} to {mode.upper()} profile...")
     if mode == "hfp":
         set_profile_hfp(mac)
     else:
         set_profile_a2dp(mac)
+    success(f"Profile switched to {mode.upper()}.")
 
 
 @audio.command("devices")
@@ -1239,6 +1437,7 @@ def audio_devices():
     """List Bluetooth audio sources and sinks."""
     from blue_tap.attack.a2dp import list_bt_audio_sources, list_bt_audio_sinks
 
+    info("Enumerating Bluetooth audio devices...")
     sources = list_bt_audio_sources()
     sinks = list_bt_audio_sinks()
 
@@ -1271,14 +1470,18 @@ def audio_diagnose(mac):
     if not mac:
         return
     from blue_tap.attack.a2dp import diagnose_bt_audio
+    info(f"Running Bluetooth audio diagnostics for {mac}...")
     diagnose_bt_audio(mac)
+    info("Diagnostics complete.")
 
 
 @audio.command("restart")
 def audio_restart():
     """Restart PipeWire/PulseAudio to fix audio routing issues."""
     from blue_tap.attack.a2dp import restart_audio_services
+    info("Restarting PipeWire/PulseAudio audio services...")
     restart_audio_services()
+    success("Audio services restarted.")
 
 
 @audio.command("list")
@@ -1287,10 +1490,12 @@ def audio_list(directory):
     """List all captured WAV files with duration and size."""
     from blue_tap.attack.a2dp import list_captures
 
+    info(f"Scanning for WAV files in {directory}...")
     captures = list_captures(directory)
     if not captures:
         warning(f"No WAV files found in {directory}")
         return
+    info(f"Found {len(captures)} audio file(s).")
 
     table = Table(title="Captured Audio Files", show_lines=True)
     table.add_column("#", style="dim", width=4)
@@ -1313,10 +1518,11 @@ def audio_playback(file):
     """Play a captured audio file on laptop speakers."""
     from blue_tap.attack.a2dp import play_capture
 
+    info(f"Playing captured audio file: {file}")
     if play_capture(file):
-        success("Playback complete")
+        success(f"Playback of {file} complete.")
     else:
-        error("Playback failed")
+        error(f"Playback of {file} failed.")
 
 
 @audio.command("review")
@@ -1324,7 +1530,9 @@ def audio_playback(file):
 def audio_review(directory):
     """Interactive audio review: list, select, play, repeat."""
     from blue_tap.attack.a2dp import interactive_review
+    info(f"Starting interactive audio review in {directory}...")
     interactive_review(directory)
+    info("Interactive review session ended.")
 
 
 # ============================================================================
@@ -1356,10 +1564,18 @@ def opp_push(address, filepath, channel):
         error("Could not find OPP channel.")
         return
 
+    import os
+    file_size = os.path.getsize(filepath) if os.path.exists(filepath) else 0
+    info(f"Pushing {filepath} ({file_size} bytes) to {address} via OPP on channel {channel}...")
     client = OPPClient(address, channel=channel)
     if client.connect():
+        success(f"OPP connection established with {address}.")
         client.push_file(filepath)
+        success(f"File {filepath} sent ({file_size} bytes).")
         client.disconnect()
+        info("OPP session closed.")
+    else:
+        error(f"OPP connection to {address} on channel {channel} failed.")
 
 
 @opp.command("vcard")
@@ -1383,10 +1599,16 @@ def opp_vcard(address, name, phone, email, channel):
         error("Could not find OPP channel.")
         return
 
+    info(f"Pushing vCard for '{name}' ({phone}) to {address} via OPP...")
     client = OPPClient(address, channel=channel)
     if client.connect():
+        success(f"OPP connection established with {address}.")
         client.push_vcard(name, phone, email)
+        success(f"vCard for '{name}' sent to {address}.")
         client.disconnect()
+        info("OPP session closed.")
+    else:
+        error(f"OPP connection to {address} failed.")
 
 
 # ============================================================================
@@ -1407,11 +1629,14 @@ def at_connect(address, channel):
         return
     from blue_tap.attack.bluesnarfer import ATClient
 
+    info(f"Opening AT command session to [bold]{address}[/bold] on RFCOMM channel {channel}...")
     client = ATClient(address, channel=channel)
     if not client.connect():
+        error("AT connection failed — check channel number or pairing status")
         return
 
-    info("AT session ready. Type 'quit' to exit.")
+    success("AT session established. Type 'quit' to exit.")
+    info("  Try: AT+CGSN (IMEI), AT+CIMI (IMSI), AT+CPBR=1,10 (phonebook)")
     while True:
         try:
             cmd = input("AT> ").strip()
@@ -1436,15 +1661,24 @@ def at_dump(address, channel, output_dir):
         return
     from blue_tap.attack.bluesnarfer import ATClient
 
+    info(f"Starting AT data dump from [bold]{address}[/bold] (ch={channel})...")
+    info("  Targets: IMEI, IMSI, phonebook (SM/ME), SMS, battery, signal")
     client = ATClient(address, channel=channel)
     if not client.connect():
+        error("AT connection failed")
         return
     try:
+        info("  Extracting data via AT commands...")
         results = client.dump_all(output_dir)
         if results:
-            console.print(f"\n[bold green]Dump complete -> {output_dir}/[/bold green]")
+            success(f"AT dump complete -> {output_dir}/")
+            from blue_tap.utils.session import log_command
+            log_command("at_dump", results, category="data", target=address)
+        else:
+            warning("No data extracted via AT commands")
     finally:
         client.disconnect()
+        info("  AT session closed")
 
 
 @at_cmd.command("snarf")
@@ -1458,6 +1692,7 @@ def at_snarf(address, memory, entry_range):
     if not address:
         return
     from blue_tap.attack.bluesnarfer import bluesnarfer_extract
+    info(f"Running bluesnarfer against [bold]{address}[/bold] (memory={memory}, range={entry_range})...")
     parts = entry_range.split("-")
     if len(parts) != 2:
         error("Range must be START-END (e.g., 1-100)")
@@ -1490,8 +1725,17 @@ def vulnscan(address, hci, output):
     if not address:
         return
     from blue_tap.attack.vuln_scanner import scan_vulnerabilities
+    info(f"Starting vulnerability assessment on [bold]{address}[/bold]...")
+    info("  Running 20+ checks: SSP, KNOB, BIAS, BlueBorne, BLURtooth, BLUFFS, PerfektBlue, BrakTooth...")
     findings = scan_vulnerabilities(address, hci)
-    # scan_vulnerabilities already prints the table via _print_findings
+
+    confirmed = sum(1 for f in findings if f.get("status") == "confirmed")
+    potential = sum(1 for f in findings if f.get("status") == "potential")
+    critical = sum(1 for f in findings if f.get("severity", "").upper() == "CRITICAL")
+    high = sum(1 for f in findings if f.get("severity", "").upper() == "HIGH")
+    success(f"Assessment complete: {len(findings)} finding(s) — "
+            f"{confirmed} confirmed, {potential} potential "
+            f"({critical} CRITICAL, {high} HIGH)")
 
     from blue_tap.utils.session import log_command
     log_command("vulnscan", findings, category="vuln", target=address)
@@ -1542,6 +1786,17 @@ def hijack(ivi_address, phone_address, phone_name, hci, output_dir,
         ivi_address, phone_address = result
     from blue_tap.attack.hijack import HijackSession
 
+    info(f"Starting IVI hijack: target={ivi_address}, impersonating={phone_address}")
+    if phone_name:
+        info(f"  Phone name: {phone_name}")
+    info(f"  Adapter: {hci}, Output: {output_dir}")
+    if bias:
+        info("  Mode: BIAS authentication bypass (CVE-2020-10135)")
+    elif recon_only:
+        info("  Mode: Reconnaissance only")
+    else:
+        info("  Mode: Full attack chain")
+
     verbose(f"Starting hijack session: IVI={ivi_address} Phone={phone_address}")
     session = HijackSession(
         ivi_address=ivi_address,
@@ -1553,28 +1808,46 @@ def hijack(ivi_address, phone_address, phone_name, hci, output_dir,
 
     try:
         if recon_only:
+            info("Phase 1/1: Reconnaissance — fingerprinting IVI and discovering services...")
             session.recon()
+            success("Reconnaissance complete")
         elif bias:
             # BIAS path: recon → BIAS auth bypass → dump data
+            info("Phase 1/4: Reconnaissance — fingerprinting IVI...")
             session.recon()
+            success("Recon complete")
+            info("Phase 2/4: BIAS authentication bypass...")
             if session.connect_bias():
+                success("BIAS connection established")
+                info("Phase 3/4: Dumping phonebook via PBAP...")
                 session.dump_phonebook()
+                info("Phase 3/4: Dumping messages via MAP...")
                 session.dump_messages()
                 if not skip_audio:
+                    info("Phase 4/4: Setting up HFP audio interception...")
                     session.setup_audio()
+                else:
+                    info("Phase 4/4: Audio setup skipped (--skip-audio)")
+            else:
+                warning("BIAS connection failed — target may not be vulnerable")
             results = {"method": "bias", "phases": {"recon": "success"}}
             os.makedirs(output_dir, exist_ok=True)
             _save_json(results, os.path.join(output_dir, "attack_results.json"))
+            success(f"BIAS attack results saved to {output_dir}/attack_results.json")
         else:
+            info("Running full attack chain (recon → impersonate → connect → dump → audio)...")
             results = session.run_full_attack()
             # Save results
             os.makedirs(output_dir, exist_ok=True)
             results_file = os.path.join(output_dir, "attack_results.json")
             _save_json(results, results_file)
+            success(f"Full attack complete — results saved to {results_file}")
     except KeyboardInterrupt:
         warning("\nInterrupted by user")
     finally:
+        info("Cleaning up hijack session...")
         session.cleanup()
+        info("Session closed")
 
 
 # ============================================================================
@@ -1605,8 +1878,15 @@ def bias_probe(ivi_address, phone_address, phone_name, hci):
         ivi_address, phone_address = result
     from blue_tap.attack.bias import BIASAttack
 
+    info(f"Probing BIAS vulnerability on {ivi_address}")
+    info(f"  Impersonating: {phone_address}, Adapter: {hci}")
+    info("Checking SSP support, BT version, and auto-reconnect behavior...")
     attack = BIASAttack(ivi_address, phone_address, phone_name, hci)
-    attack.probe_vulnerability()
+    try:
+        attack.probe_vulnerability()
+        success("BIAS probe complete")
+    except Exception as exc:
+        error(f"BIAS probe failed: {exc}")
 
 
 @bias.command("attack")
@@ -1638,8 +1918,16 @@ def bias_attack(ivi_address, phone_address, phone_name, hci, method):
         ivi_address, phone_address = result
     from blue_tap.attack.bias import BIASAttack
 
+    info(f"Executing BIAS attack against {ivi_address} via {phone_address}")
+    info(f"  Method: {method}, Adapter: {hci}")
+    if phone_name:
+        info(f"  Phone name: {phone_name}")
     attack = BIASAttack(ivi_address, phone_address, phone_name, hci)
-    attack.execute(method)
+    try:
+        attack.execute(method)
+        success("BIAS attack execution complete")
+    except Exception as exc:
+        error(f"BIAS attack failed: {exc}")
 
 
 # ============================================================================
@@ -1658,9 +1946,14 @@ def avrcp_play(address):
     if not address:
         return
     from blue_tap.attack.avrcp import AVRCPController
+    info(f"Connecting AVRCP to {address}...")
     ctrl = AVRCPController(address)
     if ctrl.connect():
+        info(f"Sending PLAY command to {address}...")
         ctrl.play()
+        success("PLAY command sent.")
+    else:
+        error(f"AVRCP connection to {address} failed.")
 
 
 @avrcp.command("pause")
@@ -1671,9 +1964,14 @@ def avrcp_pause(address):
     if not address:
         return
     from blue_tap.attack.avrcp import AVRCPController
+    info(f"Connecting AVRCP to {address}...")
     ctrl = AVRCPController(address)
     if ctrl.connect():
+        info(f"Sending PAUSE command to {address}...")
         ctrl.pause()
+        success("PAUSE command sent.")
+    else:
+        error(f"AVRCP connection to {address} failed.")
 
 
 @avrcp.command("stop")
@@ -1684,9 +1982,14 @@ def avrcp_stop(address):
     if not address:
         return
     from blue_tap.attack.avrcp import AVRCPController
+    info(f"Connecting AVRCP to {address}...")
     ctrl = AVRCPController(address)
     if ctrl.connect():
+        info(f"Sending STOP command to {address}...")
         ctrl.stop()
+        success("STOP command sent.")
+    else:
+        error(f"AVRCP connection to {address} failed.")
 
 
 @avrcp.command("next")
@@ -1697,9 +2000,14 @@ def avrcp_next(address):
     if not address:
         return
     from blue_tap.attack.avrcp import AVRCPController
+    info(f"Connecting AVRCP to {address}...")
     ctrl = AVRCPController(address)
     if ctrl.connect():
+        info(f"Sending NEXT TRACK command to {address}...")
         ctrl.next_track()
+        success("NEXT TRACK command sent.")
+    else:
+        error(f"AVRCP connection to {address} failed.")
 
 
 @avrcp.command("prev")
@@ -1710,9 +2018,14 @@ def avrcp_prev(address):
     if not address:
         return
     from blue_tap.attack.avrcp import AVRCPController
+    info(f"Connecting AVRCP to {address}...")
     ctrl = AVRCPController(address)
     if ctrl.connect():
+        info(f"Sending PREVIOUS TRACK command to {address}...")
         ctrl.previous_track()
+        success("PREVIOUS TRACK command sent.")
+    else:
+        error(f"AVRCP connection to {address} failed.")
 
 
 @avrcp.command("volume")
@@ -1724,9 +2037,14 @@ def avrcp_volume(address, level):
     if not address:
         return
     from blue_tap.attack.avrcp import AVRCPController
+    info(f"Connecting AVRCP to {address}...")
     ctrl = AVRCPController(address)
     if ctrl.connect():
+        info(f"Setting volume to {level} on {address}...")
         ctrl.set_volume(level)
+        success(f"Volume set to {level}.")
+    else:
+        error(f"AVRCP connection to {address} failed.")
 
 
 @avrcp.command("volume-ramp")
@@ -1740,9 +2058,14 @@ def avrcp_volume_ramp(address, start, end, step_ms):
     if not address:
         return
     from blue_tap.attack.avrcp import AVRCPController
+    info(f"Connecting AVRCP to {address}...")
     ctrl = AVRCPController(address)
     if ctrl.connect():
+        info(f"Ramping volume from {start} to {end} (step {step_ms}ms) on {address}...")
         ctrl.volume_ramp(start=start, target=end, step_ms=step_ms)
+        success(f"Volume ramp complete ({start} -> {end}).")
+    else:
+        error(f"AVRCP connection to {address} failed.")
 
 
 @avrcp.command("skip-flood")
@@ -1755,9 +2078,14 @@ def avrcp_skip_flood(address, count, interval):
     if not address:
         return
     from blue_tap.attack.avrcp import AVRCPController
+    info(f"Connecting AVRCP to {address}...")
     ctrl = AVRCPController(address)
     if ctrl.connect():
+        info(f"Starting skip flood: {count} skips at {interval}s interval on {address}...")
         ctrl.skip_flood(count, int(interval * 1000))
+        success(f"Skip flood complete ({count} skips sent).")
+    else:
+        error(f"AVRCP connection to {address} failed.")
 
 
 @avrcp.command("metadata")
@@ -1768,16 +2096,21 @@ def avrcp_metadata(address):
     if not address:
         return
     from blue_tap.attack.avrcp import AVRCPController
+    info(f"Connecting AVRCP to {address}...")
     ctrl = AVRCPController(address)
     if ctrl.connect():
+        info(f"Fetching track metadata from {address}...")
         track = ctrl.get_track_info()
         status = ctrl.get_status()
         console.print(f"[bold cyan]Status:[/bold cyan] {status}")
         if track:
+            success("Track metadata retrieved.")
             for key, val in track.items():
                 console.print(f"  [cyan]{key}:[/cyan] {val}")
         else:
             warning("No track info available")
+    else:
+        error(f"AVRCP connection to {address} failed.")
 
 
 @avrcp.command("monitor")
@@ -1789,8 +2122,11 @@ def avrcp_monitor(address, duration):
     if not address:
         return
     from blue_tap.attack.avrcp import AVRCPController
+    info(f"Connecting AVRCP to {address}...")
     ctrl = AVRCPController(address)
     if ctrl.connect():
+        info(f"Monitoring track changes on {address} for {duration}s (Ctrl+C to stop)...")
+
         def on_change(changed):
             if isinstance(changed, dict):
                 # May receive full props dict or just track dict
@@ -1805,6 +2141,9 @@ def avrcp_monitor(address, duration):
                     console.print(f"[yellow]Status:[/yellow] {changed['Status']}")
 
         ctrl.monitor_metadata(duration, callback=on_change)
+        info("Metadata monitoring ended.")
+    else:
+        error(f"AVRCP connection to {address} failed.")
 
 
 # ============================================================================
@@ -1826,8 +2165,13 @@ def dos_pair_flood(address, count, interval):
         return
     from blue_tap.attack.dos import PairingFlood
     flood = PairingFlood(address)
+    info(f"Starting pairing flood: {count} attempts, {interval}s delay")
     result = flood.flood_pairing_requests(count, interval)
-    console.print(f"[bold]Results:[/bold] {result}")
+    success(f"Flood complete: {result.get('successful', 0)} paired, "
+            f"{result.get('failed', 0)} failed in {result.get('elapsed_seconds', 0):.1f}s "
+            f"({result.get('rate_per_second', 0):.1f} req/s)")
+    from blue_tap.utils.session import log_command
+    log_command("dos_pair_flood", result, category="dos", target=address)
 
 
 @dos.command("name-flood")
@@ -1840,8 +2184,15 @@ def dos_name_flood(address, length):
         return
     from blue_tap.attack.dos import PairingFlood
     flood = PairingFlood(address)
+    info(f"Setting adapter name to {length} bytes and attempting pairing...")
     result = flood.long_name_flood(length)
-    console.print(f"[bold]Results:[/bold] {result}")
+    status = result.get("status", "unknown")
+    if status == "paired":
+        success(f"Long name pairing succeeded ({length} bytes) — target accepted oversized name")
+    else:
+        info(f"Long name pairing result: {status}")
+    from blue_tap.utils.session import log_command
+    log_command("dos_name_flood", result, category="dos", target=address)
 
 
 @dos.command("rate-test")
@@ -1896,22 +2247,29 @@ def dos_l2ping_flood(address, count, size, no_flood):
         return
     from blue_tap.attack.dos import PairingFlood
     flood = PairingFlood(address)
+    mode = "flood" if not no_flood else "normal"
+    info(f"Starting L2CAP ping flood: {count} pings, {size}B payload, {mode} mode")
     result = flood.l2ping_flood(count=count, size=size, flood=not no_flood)
-    for k, v in result.items():
-        info(f"  {k}: {v}")
+    if result.get("error"):
+        error(f"L2ping failed: {result['error']}")
+    else:
+        success(f"L2ping flood complete")
+    from blue_tap.utils.session import log_command
+    log_command("dos_l2ping_flood", result, category="dos", target=address)
 
 
 # ---- Protocol-level DoS attacks (L2CAP, SDP, RFCOMM, OBEX, HFP) ----
 
-@dos.command("l2cap-config-bomb")
+@dos.command("l2cap-storm")
 @click.argument("address", required=False, default=None)
-@click.option("--rounds", default=100, help="Number of config bombs to send")
-def dos_l2cap_config_bomb(address, rounds):
-    """L2CAP config option bomb — force memory allocation via unknown options."""
+@click.option("--rounds", default=100, help="Number of connect/disconnect cycles")
+def dos_l2cap_storm(address, rounds):
+    """L2CAP connection storm — rapid connect/disconnect to exhaust resources."""
     address = resolve_address(address)
     if not address:
         return
     from blue_tap.attack.protocol_dos import L2CAPDoS
+    info(f"Launching L2CAP connection storm against [bold]{address}[/bold] ({rounds} rounds)")
     attack = L2CAPDoS(address)
     result = attack.config_option_bomb(rounds=rounds)
     _show_dos_result(result)
@@ -1919,28 +2277,30 @@ def dos_l2cap_config_bomb(address, rounds):
 
 @dos.command("l2cap-cid-exhaust")
 @click.argument("address", required=False, default=None)
-@click.option("--count", default=200, help="Number of CIDs to exhaust")
+@click.option("--count", default=200, help="Number of parallel connections to hold")
 def dos_l2cap_cid_exhaust(address, count):
-    """L2CAP CID exhaustion — open channels without configuring them."""
+    """L2CAP CID exhaustion — open and hold many parallel connections."""
     address = resolve_address(address)
     if not address:
         return
     from blue_tap.attack.protocol_dos import L2CAPDoS
+    info(f"Launching L2CAP CID exhaustion against [bold]{address}[/bold] ({count} connections)")
     attack = L2CAPDoS(address)
     result = attack.cid_exhaustion(count=count)
     _show_dos_result(result)
 
 
-@dos.command("l2cap-echo-amp")
+@dos.command("l2cap-data-flood")
 @click.argument("address", required=False, default=None)
-@click.option("--count", default=500, help="Number of echo requests")
-@click.option("--size", default=672, help="Echo payload size")
-def dos_l2cap_echo_amp(address, count, size):
-    """L2CAP echo amplification — flood with max-size echo requests."""
+@click.option("--count", default=500, help="Number of packets to send")
+@click.option("--size", default=672, help="Payload size per packet")
+def dos_l2cap_data_flood(address, count, size):
+    """L2CAP data flood — send large malformed SDP requests at max rate."""
     address = resolve_address(address)
     if not address:
         return
     from blue_tap.attack.protocol_dos import L2CAPDoS
+    info(f"Launching L2CAP data flood against [bold]{address}[/bold] ({count} packets, {size}B each)")
     attack = L2CAPDoS(address)
     result = attack.echo_amplification(count=count, payload_size=size)
     _show_dos_result(result)
@@ -1955,6 +2315,7 @@ def dos_sdp_continuation(address, connections):
     if not address:
         return
     from blue_tap.attack.protocol_dos import SDPDoS
+    info(f"Launching SDP continuation exhaustion against [bold]{address}[/bold] ({connections} connections)")
     attack = SDPDoS(address)
     result = attack.continuation_exhaustion(connections=connections)
     _show_dos_result(result)
@@ -1969,6 +2330,7 @@ def dos_sdp_des_bomb(address, depth):
     if not address:
         return
     from blue_tap.attack.protocol_dos import SDPDoS
+    info(f"Launching SDP nested DES bomb against [bold]{address}[/bold] (depth={depth})")
     attack = SDPDoS(address)
     result = attack.nested_des_bomb(depth=depth)
     _show_dos_result(result)
@@ -1983,6 +2345,7 @@ def dos_rfcomm_sabm_flood(address, count):
     if not address:
         return
     from blue_tap.attack.protocol_dos import RFCOMMDoS
+    info(f"Launching RFCOMM SABM flood against [bold]{address}[/bold] ({count} DLCIs)")
     attack = RFCOMMDoS(address)
     result = attack.sabm_flood(count=count)
     _show_dos_result(result)
@@ -1997,6 +2360,7 @@ def dos_rfcomm_mux_flood(address, count):
     if not address:
         return
     from blue_tap.attack.protocol_dos import RFCOMMDoS
+    info(f"Launching RFCOMM mux flood against [bold]{address}[/bold] ({count} Test commands)")
     attack = RFCOMMDoS(address)
     result = attack.mux_command_flood(count=count)
     _show_dos_result(result)
@@ -2011,6 +2375,7 @@ def dos_obex_connect_flood(address, count):
     if not address:
         return
     from blue_tap.attack.protocol_dos import OBEXDoS
+    info(f"Launching OBEX connect flood against [bold]{address}[/bold] (max {count} sessions)")
     attack = OBEXDoS(address)
     result = attack.connect_flood(count=count)
     _show_dos_result(result)
@@ -2026,6 +2391,7 @@ def dos_hfp_at_flood(address, channel, count):
     if not address:
         return
     from blue_tap.attack.protocol_dos import HFPDoS
+    info(f"Launching HFP AT flood against [bold]{address}[/bold] (ch={channel}, {count} commands)")
     attack = HFPDoS(address)
     result = attack.at_command_flood(channel=channel, count=count)
     _show_dos_result(result)
@@ -2040,6 +2406,7 @@ def dos_hfp_slc_confuse(address, channel):
     if not address:
         return
     from blue_tap.attack.protocol_dos import HFPDoS
+    info(f"Launching HFP SLC confusion against [bold]{address}[/bold] (ch={channel})")
     attack = HFPDoS(address)
     result = attack.slc_state_confusion(channel=channel)
     _show_dos_result(result)
@@ -2259,8 +2626,15 @@ def report_cmd(dump_dir, fmt, output):
 
         for entry in session_data.get("attack", []):
             data = entry.get("data", {})
+            cmd = entry.get("command", "")
             if isinstance(data, dict):
-                report.attack_results.update(data)
+                # Namespace new attack types so they don't overwrite each other
+                if cmd in ("key_harvest", "ssp_downgrade", "knob_attack"):
+                    report.attack_results[cmd] = data
+                elif "phases" in data:
+                    report.attack_results.update(data)
+                else:
+                    report.attack_results[cmd or "attack"] = data
 
         for entry in session_data.get("data", []):
             data = entry.get("data", {})
@@ -2339,32 +2713,58 @@ def report_cmd(dump_dir, fmt, output):
 # ============================================================================
 @main.command("auto")
 @click.argument("ivi_mac", required=False, default=None)
-@click.option("-d", "--duration", default=60, help="Scan duration (seconds)")
-@click.option("-o", "--output", default="auto_output", help="Output directory")
+@click.option("-d", "--duration", default=30, help="Phone discovery scan duration (seconds)")
+@click.option("-o", "--output", default="pentest_output", help="Output directory")
 @click.option("-i", "--hci", default="hci0")
-def auto_cmd(ivi_mac, duration, output, hci):
-    """Automated: discover phone, hijack IVI, dump data, report.
+@click.option("--fuzz-duration", default=3600, help="Fuzzing duration in seconds (default: 1 hour)")
+@click.option("--skip-fuzz", is_flag=True, help="Skip protocol fuzzing phase")
+@click.option("--skip-dos", is_flag=True, help="Skip DoS testing phase")
+@click.option("--skip-exploit", is_flag=True, help="Skip hijack/exploitation phase")
+def auto_cmd(ivi_mac, duration, output, hci, fuzz_duration, skip_fuzz, skip_dos, skip_exploit):
+    """Full automated pentest: discovery, fingerprint, recon, vulnscan, exploit, fuzz, DoS, report.
 
     \b
-    Scans for phones near the target IVI, identifies the paired phone,
-    then runs the full hijack chain automatically.
+    Executes a complete 9-phase Bluetooth pentest methodology:
+      1. Discovery      — scan for nearby devices, identify paired phone
+      2. Fingerprinting  — BT version, chipset, profiles, attack surface
+      3. Reconnaissance  — SDP services, RFCOMM channels, L2CAP PSMs
+      4. Vuln Assessment — 20+ CVE and configuration checks
+      5. Pairing Attacks — SSP downgrade probe, KNOB probe
+      6. Exploitation    — hijack (MAC spoof + data extraction)
+      7. Protocol Fuzzing— coverage-guided fuzzing (default: 1 hour)
+      8. DoS Testing     — L2CAP, SDP, RFCOMM, HFP resilience tests
+      9. Report          — HTML + JSON with all findings
 
-    With --session: uses session directory for output and logs all phases.
-    Without --session: uses -o directory (default: auto_output/).
+    \b
+    The coverage-guided fuzzing strategy is used by default — it learns
+    from target responses, adapts mutation focus to productive protocol
+    fields, and tracks protocol state transitions for maximum coverage.
+
+    \b
+    Examples:
+      blue-tap auto AA:BB:CC:DD:EE:FF
+      blue-tap auto AA:BB:CC:DD:EE:FF --fuzz-duration 7200
+      blue-tap auto AA:BB:CC:DD:EE:FF --skip-fuzz --skip-dos
     """
     ivi_mac = resolve_address(ivi_mac, prompt="Select TARGET IVI")
     if not ivi_mac:
         return
-    from blue_tap.attack.auto import AutoDiscovery
+    from blue_tap.attack.auto import AutoPentest
     from blue_tap.utils.session import get_session, log_command
 
-    # Use session directory for output
     session = get_session()
     output = session.get_output_dir("auto") if session else output
 
-    auto = AutoDiscovery(ivi_mac, hci=hci)
+    auto = AutoPentest(ivi_mac, hci=hci)
     try:
-        results = auto.run_auto(output_dir=output, scan_duration=duration)
+        results = auto.run(
+            output_dir=output,
+            scan_duration=duration,
+            fuzz_duration=fuzz_duration,
+            skip_fuzz=skip_fuzz,
+            skip_dos=skip_dos,
+            skip_exploit=skip_exploit,
+        )
         os.makedirs(output, exist_ok=True)
         _save_json(results, os.path.join(output, "auto_results.json"))
         log_command("auto", results, category="attack", target=ivi_mac)

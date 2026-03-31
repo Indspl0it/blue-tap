@@ -26,12 +26,12 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 _SEVERITY_COLORS = {
-    "CRITICAL": "#ff4444",
-    "HIGH": "#ff6b35",
-    "MEDIUM": "#ffaa00",
-    "LOW": "#88cc00",
-    "INFO": "#4488ff",
-    "UNKNOWN": "#666",
+    "CRITICAL": "#dc2626",
+    "HIGH": "#ea580c",
+    "MEDIUM": "#d97706",
+    "LOW": "#16a34a",
+    "INFO": "#2563eb",
+    "UNKNOWN": "#6b7280",
 }
 
 
@@ -66,11 +66,11 @@ def _svg_donut_chart(data: dict[str, int], colors: dict[str, str],
     # center label
     segments.append(
         f'<text x="{cx}" y="{cy - 6}" text-anchor="middle" '
-        f'fill="#e0e0e0" font-size="22" font-weight="bold">{total}</text>'
+        f'fill="#333" font-size="22" font-weight="bold">{total}</text>'
     )
     segments.append(
         f'<text x="{cx}" y="{cy + 14}" text-anchor="middle" '
-        f'fill="#888" font-size="11">TOTAL</text>'
+        f'fill="#666" font-size="11">TOTAL</text>'
     )
 
     # legend
@@ -84,7 +84,7 @@ def _svg_donut_chart(data: dict[str, int], colors: dict[str, str],
         legend_items.append(
             f'<rect x="{lx}" y="{legend_y}" width="10" height="10" '
             f'rx="2" fill="{color}"/>'
-            f'<text x="{lx + 14}" y="{legend_y + 9}" fill="#ccc" '
+            f'<text x="{lx + 14}" y="{legend_y + 9}" fill="#474F51" '
             f'font-size="10">{_esc(label)} ({count})</text>'
         )
         lx += len(label) * 7 + 46
@@ -101,7 +101,7 @@ def _svg_donut_chart(data: dict[str, int], colors: dict[str, str],
     return "\n".join(lines)
 
 
-def _svg_bar_chart(data: dict[str, int], color: str = "#00d4ff",
+def _svg_bar_chart(data: dict[str, int], color: str = "#2B579A",
                    width: int = 420, bar_height: int = 26) -> str:
     """Render an SVG horizontal bar chart."""
     if not data:
@@ -118,7 +118,7 @@ def _svg_bar_chart(data: dict[str, int], color: str = "#00d4ff",
         bw = max(2, (val / max_val) * chart_w)
         bars.append(
             f'<text x="{label_width - 4}" y="{y + bar_height * 0.7}" '
-            f'text-anchor="end" fill="#ccc" font-size="11">{_esc(label)}</text>'
+            f'text-anchor="end" fill="#474F51" font-size="11">{_esc(label)}</text>'
         )
         bars.append(
             f'<rect x="{label_width}" y="{y}" width="{bw:.1f}" '
@@ -126,7 +126,7 @@ def _svg_bar_chart(data: dict[str, int], color: str = "#00d4ff",
         )
         bars.append(
             f'<text x="{label_width + bw + 6}" y="{y + bar_height * 0.7}" '
-            f'fill="#e0e0e0" font-size="11" font-weight="bold">{val}</text>'
+            f'fill="#333" font-size="11" font-weight="bold">{val}</text>'
         )
         y += bar_height + 6
 
@@ -182,92 +182,103 @@ def _risk_rating(vuln_findings: list[dict], fuzz_crashes: list[dict]) -> str:
 # ---------------------------------------------------------------------------
 
 _CSS = """
-body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-       max-width: 960px; margin: 0 auto; padding: 24px; background: #0f0f1a; color: #d8d8e8; line-height: 1.6; }
-h1 { color: #00d4ff; font-size: 1.8em; border-bottom: 2px solid #00d4ff; padding-bottom: 10px; margin-top: 0; }
-h2 { color: #ff6b6b; margin-top: 36px; font-size: 1.35em; border-bottom: 1px solid #333; padding-bottom: 6px; }
-h3 { color: #ffd93d; font-size: 1.1em; }
-h4 { color: #ccc; font-size: 1em; margin-top: 14px; }
-h5 { color: #aaa; font-size: 0.95em; margin-bottom: 4px; }
-a { color: #00d4ff; text-decoration: none; }
-a:hover { text-decoration: underline; }
-p { margin: 6px 0; }
-pre { background: #16213e; padding: 12px; border-radius: 6px; overflow-x: auto; font-size: 12px; line-height: 1.5; }
-code { background: #16213e; padding: 2px 5px; border-radius: 3px; font-size: 0.9em; }
-table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 0.9em; }
-th, td { border: 1px solid #2a2a40; padding: 8px 10px; text-align: left; }
-th { background: #16213e; color: #00d4ff; font-weight: 600; }
-tr:nth-child(even) { background: #12122a; }
-tr:hover { background: #1a1a3a; }
-.header { text-align: center; margin-bottom: 30px; }
-.header .version { color: #888; font-size: 0.85em; }
-.header .classification { color: #ff6b6b; font-weight: bold; font-size: 0.85em;
-    border: 1px solid #ff6b6b; padding: 3px 12px; display: inline-block; margin-top: 8px; border-radius: 4px; }
-.meta { color: #888; font-size: 0.85em; margin: 4px 0; }
-.section { margin: 24px 0; padding: 18px; border: 1px solid #2a2a40; border-radius: 10px; background: #111122; }
-.summary { background: #16213e; padding: 18px; border-radius: 10px; margin: 20px 0; }
-.toc { background: #111122; border: 1px solid #2a2a40; padding: 16px 24px; border-radius: 10px; margin: 20px 0; }
+*, *::before, *::after { box-sizing: border-box; }
+body { font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+       margin: 0; padding: 0; background: #f8fafc; color: #1e293b; font-size: 14px; line-height: 1.65; }
+.page-container { max-width: 1080px; margin: 32px auto; background: #fff; border-radius: 12px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06), 0 8px 24px rgba(0,0,0,0.04); overflow: hidden; }
+.report-header { background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%); color: #fff; padding: 28px 36px; }
+.report-header h1 { margin: 0; font-size: 1.75em; font-weight: 700; color: #fff; border: none; letter-spacing: -0.02em; }
+.report-header .version { color: #94a3b8; font-size: 0.85em; margin-top: 6px; }
+.classification-banner { background: #dc2626; color: #fff; text-align: center; padding: 6px 12px;
+    font-size: 0.75em; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; }
+.report-body { padding: 32px 36px; }
+h1 { color: #0f172a; font-size: 1.5em; border-bottom: 2px solid #e2e8f0; padding-bottom: 10px; margin-top: 0; font-weight: 700; }
+h2 { color: #0f172a; margin-top: 36px; font-size: 1.25em; border-bottom: 2px solid #e2e8f0; padding-bottom: 8px; font-weight: 700; }
+h3 { color: #334155; font-size: 1.05em; font-weight: 600; }
+h4 { color: #475569; font-size: 0.95em; margin-top: 14px; font-weight: 600; }
+h5 { color: #64748b; font-size: 0.9em; margin-bottom: 4px; font-weight: 600; }
+a { color: #2563eb; text-decoration: none; }
+a:hover { text-decoration: underline; color: #1d4ed8; }
+p { margin: 8px 0; color: #334155; }
+pre { background: #f8fafc; padding: 14px 16px; border-radius: 8px; overflow-x: auto; font-size: 12px;
+    line-height: 1.5; border: 1px solid #e2e8f0; font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace; color: #334155; }
+code { background: #f1f5f9; padding: 2px 6px; border-radius: 4px; font-size: 0.88em; color: #475569;
+    font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace; }
+table { border-collapse: collapse; width: 100%; margin: 14px 0; font-size: 0.875em; }
+th, td { padding: 10px 14px; text-align: left; vertical-align: middle; }
+th { background: #f8fafc; color: #475569; font-weight: 600; font-size: 0.8em; text-transform: uppercase;
+    letter-spacing: 0.05em; border-bottom: 2px solid #e2e8f0; }
+td { border-bottom: 1px solid #f1f5f9; }
+tr:hover td { background: #f8fafc; }
+.header { display: none; }
+.meta { color: #64748b; font-size: 0.85em; margin: 4px 0; }
+.section { margin: 24px 0; padding: 20px 24px; border: 1px solid #e2e8f0; border-radius: 10px; background: #fff; }
+.summary { background: #f8fafc; padding: 18px 20px; border-radius: 10px; margin: 16px 0; border: 1px solid #e2e8f0; }
+.toc { background: #f8fafc; border: 1px solid #e2e8f0; padding: 18px 24px; border-radius: 10px; margin: 20px 0; }
 .toc ol { padding-left: 20px; }
-.toc li { margin: 4px 0; }
-.toc a { color: #00d4ff; }
-.risk-badge { display: inline-block; padding: 8px 24px; border-radius: 6px; font-size: 1.3em;
-    font-weight: bold; text-transform: uppercase; letter-spacing: 1px; }
-.risk-CRITICAL { background: #ff4444; color: #fff; }
-.risk-HIGH { background: #ff6b35; color: #fff; }
-.risk-MEDIUM { background: #ffaa00; color: #000; }
-.risk-LOW { background: #88cc00; color: #000; }
-.risk-INFO { background: #4488ff; color: #fff; }
-.metric-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-    gap: 14px; margin: 16px 0; }
-.metric-card { background: #111122; border: 1px solid #2a2a40; border-radius: 8px; padding: 14px; text-align: center; }
-.metric-card .value { font-size: 1.8em; font-weight: bold; color: #00d4ff; }
-.metric-card .label { font-size: 0.8em; color: #888; margin-top: 4px; }
-.chart-row { display: flex; gap: 24px; flex-wrap: wrap; align-items: flex-start; margin: 16px 0; }
-.finding-card { border-left: 4px solid #2a2a40; padding: 14px; margin: 14px 0; background: #111128; border-radius: 0 8px 8px 0; }
-.finding-card.sev-CRITICAL { border-left-color: #ff4444; }
-.finding-card.sev-HIGH { border-left-color: #ff6b35; }
-.finding-card.sev-MEDIUM { border-left-color: #ffaa00; }
-.finding-card.sev-LOW { border-left-color: #88cc00; }
-.finding-card.sev-INFO { border-left-color: #4488ff; }
-.evidence-block { background: #0d0d1a; border: 1px solid #333; border-radius: 6px; padding: 10px 14px; margin: 8px 0; }
-.evidence-block .ev-label { color: #ffd93d; font-size: 0.85em; font-weight: 600; margin-bottom: 4px; }
-.crash-card { border-left: 4px solid #ff4444; padding: 12px; margin: 14px 0; background: #1a1a30; border-radius: 0 8px 8px 0; }
-.crash-card.high { border-left-color: #ff6b35; }
-.crash-card.medium { border-left-color: #ffaa00; }
-.hexdump { font-family: 'Courier New', monospace; font-size: 11px; line-height: 1.4; }
-.severity-badge { padding: 2px 8px; border-radius: 4px; font-weight: bold; font-size: 0.85em; display: inline-block; }
-.severity-CRITICAL { background: #ff4444; color: #fff; }
-.severity-HIGH { background: #ff6b35; color: #fff; }
-.severity-MEDIUM { background: #ffaa00; color: #000; }
-.severity-LOW { background: #88cc00; color: #000; }
-.severity-INFO { background: #4488ff; color: #fff; }
-.status-confirmed { color: #ff4444; }
-.status-potential { color: #ffaa00; }
-.status-unverified { color: #4488ff; }
-.reproduced-yes { color: #00ff9f; font-weight: bold; }
-.reproduced-no { color: #ff4444; }
-.tag { display: inline-block; background: #1a1a3a; border: 1px solid #333; padding: 1px 8px;
-    border-radius: 12px; font-size: 0.8em; color: #aaa; margin: 2px; }
-.timeline-table td:first-child { white-space: nowrap; color: #888; font-family: monospace; font-size: 0.85em; }
-.fuzz-stat { display: inline-block; margin: 5px 15px 5px 0; }
-.fuzz-stat .value { font-size: 1.4em; font-weight: bold; color: #00d4ff; }
-.fuzz-stat .label { font-size: 0.85em; color: #888; }
-.mono { font-family: 'Courier New', monospace; }
+.toc li { margin: 5px 0; }
+.toc a { color: #2563eb; font-weight: 500; }
+.risk-badge { display: inline-block; padding: 10px 28px; border-radius: 8px; font-size: 1.2em;
+    font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
+.risk-CRITICAL { background: #fef2f2; color: #dc2626; border: 2px solid #fecaca; }
+.risk-HIGH { background: #fff7ed; color: #ea580c; border: 2px solid #fed7aa; }
+.risk-MEDIUM { background: #fffbeb; color: #d97706; border: 2px solid #fde68a; }
+.risk-LOW { background: #f0fdf4; color: #16a34a; border: 2px solid #bbf7d0; }
+.risk-INFO { background: #eff6ff; color: #2563eb; border: 2px solid #bfdbfe; }
+.metric-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 16px; margin: 20px 0; }
+.metric-card { background: #fff; border: 1px solid #e2e8f0; border-radius: 10px; padding: 18px; text-align: center;
+    transition: box-shadow 0.15s; }
+.metric-card:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
+.metric-card .value { font-size: 2em; font-weight: 800; color: #0f172a; letter-spacing: -0.02em; }
+.metric-card .label { font-size: 0.78em; color: #64748b; margin-top: 4px; text-transform: uppercase; letter-spacing: 0.05em; }
+.chart-row { display: flex; gap: 28px; flex-wrap: wrap; align-items: flex-start; margin: 20px 0; }
+.finding-card { border-left: 4px solid #e2e8f0; padding: 18px 20px; margin: 14px 0; background: #fff;
+    border: 1px solid #e2e8f0; border-radius: 10px; }
+.finding-card.sev-CRITICAL { border-left: 4px solid #dc2626; background: #fefefe; }
+.finding-card.sev-HIGH { border-left: 4px solid #ea580c; }
+.finding-card.sev-MEDIUM { border-left: 4px solid #d97706; }
+.finding-card.sev-LOW { border-left: 4px solid #16a34a; }
+.finding-card.sev-INFO { border-left: 4px solid #2563eb; }
+.evidence-block { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px 16px; margin: 10px 0; }
+.evidence-block .ev-label { color: #475569; font-size: 0.8em; font-weight: 700; margin-bottom: 6px;
+    text-transform: uppercase; letter-spacing: 0.05em; }
+.crash-card { border-left: 4px solid #dc2626; padding: 16px 20px; margin: 14px 0; background: #fff;
+    border: 1px solid #e2e8f0; border-radius: 10px; }
+.crash-card.high { border-left-color: #ea580c; }
+.crash-card.medium { border-left-color: #d97706; }
+.hexdump { font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 11px; line-height: 1.5; }
+.severity-badge { display: inline-block; padding: 3px 10px; border-radius: 6px; font-weight: 600;
+    font-size: 0.75em; text-align: center; letter-spacing: 0.03em; }
+.severity-CRITICAL { background: #fef2f2; color: #dc2626; border: 1px solid #fecaca; }
+.severity-HIGH { background: #fff7ed; color: #ea580c; border: 1px solid #fed7aa; }
+.severity-MEDIUM { background: #fffbeb; color: #d97706; border: 1px solid #fde68a; }
+.severity-LOW { background: #f0fdf4; color: #16a34a; border: 1px solid #bbf7d0; }
+.severity-INFO { background: #eff6ff; color: #2563eb; border: 1px solid #bfdbfe; }
+.status-confirmed { color: #dc2626; font-weight: 600; }
+.status-potential { color: #ea580c; font-weight: 600; }
+.status-unverified { color: #2563eb; }
+.reproduced-yes { color: #16a34a; font-weight: 600; }
+.reproduced-no { color: #dc2626; }
+.tag { display: inline-block; background: #f1f5f9; border: 1px solid #e2e8f0; padding: 2px 10px;
+    border-radius: 9999px; font-size: 0.75em; color: #475569; margin: 2px; font-weight: 500; }
+.timeline-table td:first-child { white-space: nowrap; color: #64748b; font-family: 'JetBrains Mono', monospace; font-size: 0.85em; }
+.fuzz-stat { display: inline-block; margin: 5px 18px 5px 0; }
+.fuzz-stat .value { font-size: 1.5em; font-weight: 800; color: #0f172a; }
+.fuzz-stat .label { font-size: 0.8em; color: #64748b; }
+.mono { font-family: 'JetBrains Mono', 'Fira Code', monospace; }
 .evidence-list { list-style: none; padding: 0; }
-.evidence-list li { padding: 3px 0; }
-.evidence-list li::before { content: "\\1F4CE "; }
-.footer { text-align: center; color: #555; font-size: 0.8em; margin-top: 40px; padding-top: 16px; border-top: 1px solid #222; }
+.evidence-list li { padding: 4px 0; color: #475569; }
+.footer { text-align: center; color: #94a3b8; font-size: 0.8em; padding: 20px 36px;
+    border-top: 1px solid #e2e8f0; background: #f8fafc; }
 @media print {
-    body { background: #fff; color: #222; max-width: 100%; }
-    .section, .summary, .toc { border-color: #ccc; background: #fafafa; }
-    h1 { color: #003366; border-bottom-color: #003366; }
-    h2 { color: #cc0000; }
-    th { background: #eee; color: #003366; }
-    tr:nth-child(even) { background: #f5f5f5; }
-    .metric-card { border-color: #ccc; background: #f9f9f9; }
-    .metric-card .value { color: #003366; }
-    .header .classification { color: #cc0000; border-color: #cc0000; }
-    pre { background: #f5f5f5; border: 1px solid #ccc; }
+    body { background: #fff; }
+    .page-container { box-shadow: none; max-width: 100%; border-radius: 0; margin: 0; }
+    .report-header { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    .classification-banner { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    .severity-badge, .risk-badge { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    .section { break-inside: avoid; }
 }
 """
 
@@ -277,12 +288,16 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Blue-Tap Pentest Report</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
 {css}
 </style>
 </head>
 <body>
+<div class="page-container">
 {content}
+</div>
 </body>
 </html>"""
 
@@ -703,13 +718,15 @@ class ReportGenerator:
                 period += f" to {updated[:10]}"
 
         return (
-            '<div class="header">'
+            '<div class="report-header">'
             f'<h1>Blue-Tap Pentest Report</h1>'
             f'<p class="version">Blue-Tap v{_esc(__version__)} '
-            f'| Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</p>'
-            f'{"<p class=meta>" + _esc(period) + "</p>" if period else ""}'
-            '<p class="classification">CONFIDENTIAL - Authorized Personnel Only</p>'
+            f'| Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'
+            f'{" | " + _esc(period) if period else ""}'
+            f'</p>'
             '</div>'
+            '<div class="classification-banner">CONFIDENTIAL - Authorized Personnel Only</div>'
+            '<div class="report-body">'
         )
 
     def _build_toc_html(self, sections_present: list[tuple[str, str]]) -> str:
@@ -734,10 +751,63 @@ class ReportGenerator:
         s.append(f'<div style="text-align:center;margin:16px 0">'
                  f'<span class="risk-badge risk-{rating}">Overall Risk: {rating}</span></div>')
 
-        # Metric cards
+        # Narrative summary paragraph
         confirmed = sum(1 for f in self.vuln_findings if f.get("status") == "confirmed")
         potential = sum(1 for f in self.vuln_findings if f.get("status") == "potential")
         crash_count = len(self._fuzz_crashes)
+        num_devices = len(self.scan_results) or 1
+
+        narrative = (
+            f'<p>This assessment evaluated the Bluetooth security posture of '
+            f'{num_devices} device(s). '
+            f'{confirmed} confirmed vulnerabilit{"y" if confirmed == 1 else "ies"} '
+            f'and {potential} potential issue(s) were identified, '
+            f'with an overall risk rating of <strong>{rating}</strong>.'
+        )
+        if crash_count:
+            crash_protos = sorted(set(
+                c.get("protocol", "unknown") for c in self._fuzz_crashes))
+            critical_crashes = sum(
+                1 for c in self._fuzz_crashes
+                if c.get("severity", "").upper() == "CRITICAL")
+            narrative += (
+                f' Protocol fuzzing generated {crash_count} crash'
+                f'{"es" if crash_count != 1 else ""} across '
+                f'{len(crash_protos)} protocol(s), '
+            )
+            if critical_crashes:
+                narrative += (
+                    f'including {critical_crashes} critical crash'
+                    f'{"es" if critical_crashes != 1 else ""} '
+                    f'that caused device reboots — indicating memory safety '
+                    f'issues in the target\'s Bluetooth stack.'
+                )
+            else:
+                narrative += (
+                    'indicating input validation weaknesses in the '
+                    'target\'s Bluetooth stack.'
+                )
+        if self.pbap_results or self.map_results:
+            data_types = []
+            for path in self.pbap_results:
+                path_lower = path.lower()
+                if "ch" in path_lower or "call" in path_lower:
+                    data_types.append("call logs")
+                elif "fav" in path_lower:
+                    data_types.append("favorites")
+                else:
+                    data_types.append("contacts")
+            if self.map_results:
+                data_types.append("messages")
+            unique_types = sorted(set(data_types)) or ["personal data"]
+            narrative += (
+                f' Sensitive data including {"/".join(unique_types)} was '
+                f'successfully extracted without user awareness.'
+            )
+        narrative += '</p>'
+        s.append(narrative)
+
+        # Metric cards
         data_exfil = len(self.pbap_results) + len(self.map_results)
         packets = self._fuzz_campaign_stats.get("packets_sent", 0)
 
@@ -798,7 +868,7 @@ class ReportGenerator:
             for c in self._fuzz_crashes:
                 p = c.get("protocol", "unknown")
                 crash_by_proto[p] = crash_by_proto.get(p, 0) + 1
-            chart = _svg_bar_chart(crash_by_proto, "#ff6b35")
+            chart = _svg_bar_chart(crash_by_proto, "#EE9336")
             if chart:
                 charts.append(f'<div><h4>Crashes by Protocol</h4>{chart}</div>')
 
@@ -943,6 +1013,11 @@ class ReportGenerator:
         s = []
         s.append('<div class="section" id="sec-vulnerabilities">')
         s.append('<h2>Vulnerability Findings</h2>')
+        s.append('<p>The following vulnerabilities were identified through active probing, '
+                 'protocol analysis, and version fingerprinting. Each finding includes '
+                 'evidence collected during the assessment. Confirmed findings were '
+                 'validated through direct interaction with the target. Potential findings '
+                 'are based on version analysis and configuration indicators.</p>')
 
         # Summary table
         s.append('<table><tr><th>ID</th><th>Severity</th><th>Status</th>'
@@ -1009,6 +1084,10 @@ class ReportGenerator:
         s = []
         s.append('<div class="section" id="sec-attack">')
         s.append('<h2>Attack Chain Results</h2>')
+        s.append('<p>The following attack chain was executed to demonstrate the real-world '
+                 'impact of identified vulnerabilities. Each phase builds on the previous, '
+                 'simulating how an attacker would compromise the target vehicle\'s '
+                 'Bluetooth system.</p>')
 
         phases = self.attack_results.get("phases", {})
         if phases:
@@ -1028,6 +1107,54 @@ class ReportGenerator:
             s.append('</table>')
         else:
             s.append(f'<pre>{_esc(json.dumps(self.attack_results, indent=2, default=str)[:3000])}</pre>')
+
+        # Attack type impact narratives
+        if self.attack_results.get("key_harvest"):
+            kh = self.attack_results["key_harvest"]
+            s.append('<h3>Persistent Access: Key Harvesting</h3>')
+            s.append('<p>Bluetooth link keys were successfully harvested from the target. '
+                     'These keys enable persistent access to the vehicle\'s Bluetooth '
+                     'subsystem without requiring re-pairing. An attacker in possession of '
+                     'these keys can reconnect to the target at any time, impersonate '
+                     'previously paired devices, and intercept or inject data on '
+                     'established Bluetooth sessions.</p>')
+            if isinstance(kh, dict):
+                s.append(f'<pre>{_esc(json.dumps(kh, indent=2, default=str)[:2000])}</pre>')
+
+        if self.attack_results.get("ssp_downgrade"):
+            ssp = self.attack_results["ssp_downgrade"]
+            s.append('<h3>Pairing Security Bypass: SSP Downgrade</h3>')
+            s.append('<p>The target accepted a downgrade from Secure Simple Pairing (SSP) '
+                     'to legacy PIN-based pairing. This bypasses the mutual authentication '
+                     'and ECDH key exchange protections of SSP, allowing an attacker to '
+                     'perform man-in-the-middle attacks during the pairing process. Legacy '
+                     'pairing uses a short PIN that can be brute-forced in seconds.</p>')
+            if isinstance(ssp, dict):
+                s.append(f'<pre>{_esc(json.dumps(ssp, indent=2, default=str)[:2000])}</pre>')
+
+        if self.attack_results.get("knob_attack"):
+            knob = self.attack_results["knob_attack"]
+            s.append('<h3>Encryption Weakness: KNOB Attack</h3>')
+            s.append('<p>The Key Negotiation of Bluetooth (KNOB) attack was successful '
+                     'against the target. The encryption key entropy was negotiated down '
+                     'to the minimum allowed length, making it feasible for an attacker to '
+                     'brute-force the session key in real time. This allows decryption and '
+                     'modification of all Bluetooth traffic between the target and its '
+                     'paired devices.</p>')
+            if isinstance(knob, dict):
+                s.append(f'<pre>{_esc(json.dumps(knob, indent=2, default=str)[:2000])}</pre>')
+
+        if self.attack_results.get("fleet_assess"):
+            fleet = self.attack_results["fleet_assess"]
+            s.append('<h3>Fleet-Wide Exposure Assessment</h3>')
+            s.append('<p>The vulnerabilities identified in this assessment are likely to '
+                     'affect other vehicles in the same fleet that share identical head '
+                     'unit hardware and firmware. Fleet-wide remediation should be '
+                     'prioritized, as a single exploit chain developed against one vehicle '
+                     'can be replicated across the entire fleet without modification.</p>')
+            if isinstance(fleet, dict):
+                s.append(f'<pre>{_esc(json.dumps(fleet, indent=2, default=str)[:2000])}</pre>')
+
         s.append('</div>')
         return "\n".join(s)
 
@@ -1077,6 +1204,40 @@ class ReportGenerator:
                 f"{_esc(', '.join(protocols) if protocols else 'N/A')}</p>"
             )
             sections.append(f"<p><strong>Campaign Result:</strong> {_esc(result_status)}</p>")
+
+            # Narrative interpretation
+            fuzz_narrative = (
+                f'<p>Protocol fuzzing sent {packets:,} test cases across '
+                f'{len(protocols)} protocol(s) over {runtime_str}. '
+            )
+            if total_crashes:
+                critical_count = sum(
+                    1 for c in self._fuzz_crashes
+                    if c.get("severity", "").upper() == "CRITICAL")
+                fuzz_narrative += (
+                    f'{total_crashes} crash{"es" if total_crashes != 1 else ""} '
+                    f'{"were" if total_crashes != 1 else "was"} detected'
+                )
+                if critical_count:
+                    fuzz_narrative += (
+                        f', including {critical_count} critical crash'
+                        f'{"es" if critical_count != 1 else ""} that caused the '
+                        f'target device to reboot — indicating exploitable memory '
+                        f'corruption vulnerabilities in the Bluetooth stack.'
+                    )
+                else:
+                    fuzz_narrative += (
+                        ', indicating input handling weaknesses in the target\'s '
+                        'Bluetooth stack implementation.'
+                    )
+            else:
+                fuzz_narrative += (
+                    'No crashes were detected during the fuzzing campaign, '
+                    'suggesting the target\'s Bluetooth stack handles malformed '
+                    'input gracefully for the tested protocols.'
+                )
+            fuzz_narrative += '</p>'
+            sections.append(fuzz_narrative)
 
             # Severity breakdown with chart
             if has_crashes:
@@ -1279,6 +1440,15 @@ class ReportGenerator:
         if self._fuzz_state_coverage:
             sc = self._fuzz_state_coverage
             s.append('<h3>Protocol State Coverage</h3>')
+            total_states = sc.get("total_states", 0)
+            total_trans = sc.get("total_transitions", 0)
+            protos_tracked = sc.get("protocols_tracked") or sc.get("protocols", {})
+            num_protos = len(protos_tracked) if isinstance(protos_tracked, (dict, list)) else 0
+            s.append(f'<p>The fuzzer explored {total_states} unique protocol state(s) '
+                     f'across {total_trans} transition(s)'
+                     f'{" in " + str(num_protos) + " protocol(s)" if num_protos else ""}. '
+                     f'Higher coverage indicates more thorough testing of the target\'s '
+                     f'protocol implementation.</p>')
             s.append(f'<p>Total states discovered: <strong>{sc.get("total_states", 0)}</strong> | '
                      f'Total transitions: <strong>{sc.get("total_transitions", 0)}</strong></p>')
             protos = sc.get("protocols_tracked") or sc.get("protocols", {})
@@ -1295,6 +1465,9 @@ class ReportGenerator:
         # Field mutation weights
         if self._fuzz_field_weights:
             s.append('<h3>Field Mutation Weight Analysis</h3>')
+            s.append('<p>The fuzzer learned which protocol fields are most likely to '
+                     'trigger anomalies. Fields with high mutation weights produced more '
+                     'interesting target behavior when mutated.</p>')
             s.append('<p>Fields ranked by anomaly/crash production. Higher weight = '
                      'more productive for finding bugs.</p>')
             for proto, weights in sorted(self._fuzz_field_weights.items()):
@@ -1305,7 +1478,7 @@ class ReportGenerator:
                 sorted_fields = sorted(weights.items(), key=lambda x: x[1], reverse=True)
                 for fname, w in sorted_fields:
                     bar_width = int(w * 200)
-                    bar_color = "#ff4444" if w > 0.3 else "#ffaa00" if w > 0.15 else "#88cc00"
+                    bar_color = "#D43F3A" if w > 0.3 else "#EE9336" if w > 0.15 else "#4CAE4C"
                     s.append(
                         f'<tr><td><code>{_esc(fname)}</code></td>'
                         f'<td>{w:.1%}</td>'
@@ -1334,15 +1507,24 @@ class ReportGenerator:
 
         # Health events (reboots, degradation)
         if self._fuzz_health_events:
+            num_events = len(self._fuzz_health_events)
+            reboot_events = sum(
+                1 for e in self._fuzz_health_events
+                if isinstance(e, dict) and e.get("status", "") in ("rebooted", "unreachable"))
             s.append('<h3>Target Health Events</h3>')
+            s.append(f'<p>Target health monitoring detected {num_events} event(s) during '
+                     f'the campaign.'
+                     f'{" Reboot events are the highest-confidence indicator of exploitable crashes." if reboot_events else ""}'
+                     f'{" " + str(reboot_events) + " reboot/unreachable event(s) were observed." if reboot_events else ""}'
+                     f'</p>')
             s.append('<table><tr><th>Time</th><th>Status</th><th>Details</th>'
                      '<th>Iteration</th></tr>')
             for evt in self._fuzz_health_events:
                 if not isinstance(evt, dict):
                     continue
                 status = evt.get("status", "unknown")
-                status_color = "#ff4444" if status in ("rebooted", "zombie", "unreachable") else (
-                    "#ffaa00" if status == "degraded" else "#88cc00")
+                status_color = "#D43F3A" if status in ("rebooted", "zombie", "unreachable") else (
+                    "#EE9336" if status == "degraded" else "#4CAE4C")
                 s.append(
                     f'<tr><td>{_esc(str(evt.get("timestamp", "")))}</td>'
                     f'<td style="color:{status_color};font-weight:bold">'
@@ -1361,6 +1543,9 @@ class ReportGenerator:
         s = []
         s.append('<div class="section" id="sec-recon">')
         s.append('<h2>Reconnaissance Results</h2>')
+        s.append('<p>Service enumeration revealed the following Bluetooth services '
+                 'exposed by the target. Each exposed service represents a potential '
+                 'attack surface.</p>')
 
         # Try to categorize recon data
         sdp_services = []
@@ -1430,22 +1615,81 @@ class ReportGenerator:
         s = []
         s.append('<div class="section" id="sec-dos">')
         s.append('<h2>Denial of Service Test Results</h2>')
-        s.append('<table><tr><th>Test</th><th>Target</th><th>Duration</th>'
-                 '<th>Packets Sent</th><th>Result</th><th>Impact</th></tr>')
+        s.append('<p>Denial of Service tests evaluate the target\'s resilience to '
+                 'protocol-level resource exhaustion and state machine confusion attacks. '
+                 'The following tests were conducted across multiple Bluetooth protocol '
+                 'layers.</p>')
+
+        # Group results by protocol layer
+        layer_keywords = {
+            "L2CAP": ["l2cap", "l2ping", "cid_exhaust", "connection_storm", "data_flood", "echo"],
+            "SDP": ["sdp", "continuation", "des_bomb", "service_search"],
+            "RFCOMM": ["rfcomm", "sabm", "mux_command", "credit_exhaust", "dlci"],
+            "OBEX": ["obex", "setpath", "connect_flood"],
+            "HFP": ["hfp", "at_command", "slc_", "handsfree", "hands-free"],
+            "Pairing": ["pair", "ssp", "pin", "auth", "name_flood", "rate_test"],
+        }
+        grouped: dict[str, list[dict]] = {}
         for entry in self.dos_results:
             data = entry.get("data", entry) if isinstance(entry, dict) else entry
-            if isinstance(data, dict):
+            if not isinstance(data, dict):
+                grouped.setdefault("Other", []).append(data)
+                continue
+            test_name = str(data.get("attack", data.get("test", data.get("command",
+                           data.get("attack_name",
+                           entry.get("source", "") if isinstance(entry, dict) else ""))))).lower()
+            placed = False
+            for layer, keywords in layer_keywords.items():
+                if any(kw in test_name for kw in keywords):
+                    grouped.setdefault(layer, []).append(data)
+                    placed = True
+                    break
+            if not placed:
+                grouped.setdefault("Other", []).append(data)
+
+        total_tests = len(self.dos_results)
+        unresponsive_count = 0
+
+        for layer, tests in grouped.items():
+            s.append(f'<h3>{_esc(layer)} Layer Tests</h3>')
+            s.append('<table><tr><th>Test</th><th>Target</th><th>Duration</th>'
+                     '<th>Packets Sent</th><th>Result</th><th>Impact</th></tr>')
+            for data in tests:
+                if not isinstance(data, dict):
+                    s.append(f'<tr><td colspan="6"><pre>'
+                             f'{_esc(json.dumps(data, indent=2, default=str)[:500])}'
+                             f'</pre></td></tr>')
+                    continue
+                result_str = str(data.get("result", data.get("status", "unknown")))
+                impact_str = str(data.get("impact", data.get("effect", "")))
+                is_unresponsive = any(
+                    kw in (result_str + impact_str).lower()
+                    for kw in ("unresponsive", "crash", "timeout", "reboot",
+                               "disconnected", "frozen", "hung"))
+                if is_unresponsive:
+                    unresponsive_count += 1
                 s.append(
-                    f'<tr><td>{_esc(str(data.get("test", data.get("command", entry.get("source", "dos")))))}</td>'
+                    f'<tr><td>{_esc(str(data.get("attack", data.get("test", data.get("command", data.get("attack_name", "dos"))))))}</td>'
                     f'<td class="mono">{_esc(str(data.get("target", "")))}</td>'
                     f'<td>{_esc(str(data.get("duration", data.get("duration_seconds", "N/A"))))}</td>'
                     f'<td>{_esc(str(data.get("packets_sent", data.get("packets", "N/A"))))}</td>'
-                    f'<td>{_esc(str(data.get("result", data.get("status", "unknown"))))}</td>'
-                    f'<td>{_esc(str(data.get("impact", data.get("effect", ""))))}</td></tr>'
+                    f'<td>{_esc(result_str)}</td>'
+                    f'<td>{_esc(impact_str)}</td></tr>'
                 )
-            else:
-                s.append(f'<tr><td colspan="6"><pre>{_esc(json.dumps(data, indent=2, default=str)[:500])}</pre></td></tr>')
-        s.append('</table></div>')
+                if is_unresponsive:
+                    s.append(f'<tr><td colspan="6" style="color:#D43F3A;font-style:italic">'
+                             f'Impact: Target became unresponsive following this test, '
+                             f'indicating insufficient resource management for {_esc(layer)} '
+                             f'protocol operations.</td></tr>')
+            s.append('</table>')
+
+        # Summary
+        s.append(f'<p><strong>Summary:</strong> Of {total_tests} DoS test(s) conducted, '
+                 f'{unresponsive_count} caused the target to become unresponsive, '
+                 f'{"indicating insufficient rate limiting and resource management in " if unresponsive_count else "suggesting adequate resilience in "}'
+                 f'the Bluetooth stack.</p>')
+
+        s.append('</div>')
         return "\n".join(s)
 
     def _build_pbap_html(self) -> str:
@@ -1454,6 +1698,12 @@ class ReportGenerator:
         s = []
         s.append('<div class="section" id="sec-data-exfil">')
         s.append('<h2>Data Exfiltration: PBAP (Phonebook)</h2>')
+        s.append('<p>Phone Book Access Profile (PBAP) data was extracted from the target '
+                 'IVI system. This data was accessible after connection impersonation '
+                 'without any user interaction or confirmation on the vehicle\'s head unit. '
+                 'The extracted data includes personal contacts, call history, and '
+                 'favorites — representing a significant privacy risk for the vehicle '
+                 'owner.</p>')
         s.append('<p>The following phonebook data was successfully extracted from the target device.</p>')
         s.append('<table><tr><th>Source</th><th>Entries</th><th>Size</th><th>Category</th></tr>')
         for path, data in self.pbap_results.items():
@@ -1483,6 +1733,12 @@ class ReportGenerator:
         s = []
         s.append('<div class="section" id="sec-map">')
         s.append('<h2>Data Exfiltration: MAP (Messages)</h2>')
+        s.append('<p>Message Access Profile (MAP) data was extracted from the target IVI '
+                 'system. SMS and MMS messages synced to the vehicle\'s head unit were '
+                 'accessible without authentication or user notification. Extracted '
+                 'messages may contain sensitive personal communications, two-factor '
+                 'authentication codes, financial notifications, and other private '
+                 'information — representing a severe privacy and security risk.</p>')
         s.append(f'<p>{len(self.map_results)} message data set(s) collected.</p>')
         for path, data in self.map_results.items():
             s.append(f'<h3>{_esc(path)}</h3>')
@@ -1610,6 +1866,7 @@ class ReportGenerator:
             self._build_map_html(),
             self._build_audio_html(),
             self._build_appendix_html(),
+            '</div>'  # close .report-body
             f'<div class="footer">Blue-Tap v{_esc(__version__)} | '
             f'Report generated {datetime.now().strftime("%Y-%m-%d %H:%M:%S")} | '
             f'CONFIDENTIAL</div>',

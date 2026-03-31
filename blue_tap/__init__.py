@@ -1,3 +1,3 @@
 """Blue-Tap: Bluetooth/BLE Penetration Testing Toolkit for Automotive IVI Systems."""
 
-__version__ = "2.1.0"
+__version__ = "2.1.1"
