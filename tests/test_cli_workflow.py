@@ -31,5 +31,6 @@ def test_run_is_non_blocking_when_a_step_fails() -> None:
 
         meta = _read_session_meta(Path("."), "wf")
         commands = [entry["command"] for entry in meta["commands"]]
+        # workflow_run logs its own results; session list is read-only
+        # and no longer auto-logged to avoid double-counting
         assert "workflow_run" in commands
-        assert "blue-tap_session_list" in commands

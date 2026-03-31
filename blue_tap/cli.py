@@ -121,18 +121,19 @@ def main(verbose, session_name):
       blue-tap session list                        # see all sessions
       blue-tap report                              # report from latest session
     """
-    import sys
     from blue_tap.utils.output import set_verbosity
     set_verbosity(verbose)
 
-    # Skip session creation for help, read-only commands, and when not needed
-    if '--help' in sys.argv or '-h' in sys.argv:
-        return
+    # Determine the subcommand from Click context (works for both CLI and
+    # in-process invocation via CliRunner or main.make_context).
+    ctx = click.get_current_context()
+    invoked = ctx.invoked_subcommand or ""
 
-    # Commands that don't need a session (read-only or use explicit directory)
+    # Skip session creation for help and read-only commands
+    if not invoked:
+        return
     _NO_SESSION_COMMANDS = {"session", "report", "adapter"}
-    subcommand = sys.argv[1] if len(sys.argv) > 1 else ""
-    if not session_name and subcommand in _NO_SESSION_COMMANDS:
+    if not session_name and invoked in _NO_SESSION_COMMANDS:
         return
 
     # Create session for active commands
@@ -2914,7 +2915,12 @@ def session_list():
 @click.argument("name")
 def session_show(name):
     """Show details of a session."""
+    import os as _os
     from blue_tap.utils.session import Session
+    meta_path = _os.path.join(".", "sessions", name, "session.json")
+    if not _os.path.exists(meta_path):
+        error(f"Session '{name}' not found")
+        return
     try:
         s = Session(name)
         summary = s.summary()

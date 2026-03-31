@@ -656,7 +656,7 @@ class ReportGenerator:
         if os.path.isdir(fuzz_dir):
             self.load_fuzz_from_session(dump_dir)
 
-        for root, dirs, files in os.walk(dump_dir):
+        for root, _dirs, files in os.walk(dump_dir):
             for fname in files:
                 fpath = os.path.join(root, fname)
                 rel = os.path.relpath(fpath, dump_dir)
