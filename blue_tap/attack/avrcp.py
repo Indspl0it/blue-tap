@@ -89,6 +89,11 @@ class AVRCPController:
             error("dbus-fast not installed. Install: pip install dbus-fast")
             return False
 
+        if _run_async(self._async_connect()):
+            return True
+        # Retry once after backoff
+        warning("AVRCP connection failed, retrying in 2s...")
+        time.sleep(2)
         return _run_async(self._async_connect())
 
     async def _async_connect(self) -> bool:
@@ -121,6 +126,12 @@ class AVRCPController:
                     success(f"AVRCP connected: {path}")
                 except Exception as e:
                     error(f"Failed to get player interface: {e}")
+                    if self._bus:
+                        try:
+                            self._bus.disconnect()
+                        except Exception:
+                            pass
+                        self._bus = None
                     return False
 
                 await self._find_transport(objects, dev_prefix)
@@ -296,7 +307,8 @@ class AVRCPController:
             if result:
                 info(f"Player settings: {result}")
             return result
-        except Exception:
+        except Exception as e:
+            warning(f"Could not read player settings: {e}")
             return {}
 
     def set_repeat(self, mode: str) -> bool:
@@ -343,13 +355,20 @@ class AVRCPController:
         if not self.set_volume(start):
             return False
 
-        for level in range(start + 1, target + 1):
+        if start < target:
+            vol_range = range(start + 1, target + 1)
+        elif start > target:
+            vol_range = range(start - 1, target - 1, -1)
+        else:
+            return True  # Already at target
+
+        for level in vol_range:
             if not self.set_volume(level):
-                warning(f"Ramp stopped at {level}")
+                warning(f"Volume ramp failed at level {level}")
                 return False
             time.sleep(delay)
 
-        success(f"Volume ramp complete: {target}/127")
+        success(f"Volume ramp complete: {start} → {target}")
         return True
 
     def skip_flood(self, count: int = 100, interval_ms: int = 100) -> bool:
@@ -359,6 +378,7 @@ class AVRCPController:
 
     async def _async_skip_flood(self, count: int, interval_ms: int) -> bool:
         """Async skip flood — single event loop for all skips."""
+        interval_ms = max(10, interval_ms)  # Prevent CPU spin on zero/sub-ms
         delay = interval_ms / 1000.0
         sent = 0
         for i in range(count):
@@ -448,7 +468,7 @@ class AVRCPController:
                     callback(changed)
             if "Status" in changed:
                 info(f"Status changed: {changed['Status']}")
-            return False
+            return True
 
         bus.add_message_handler(message_handler)
 

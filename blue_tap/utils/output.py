@@ -438,7 +438,8 @@ def channel_table(results: list[dict], title: str = "Channel Scan") -> Table:
         "open": "[bt.green]● OPEN[/bt.green]",
         "auth_required": "[bt.yellow]◐ AUTH REQ[/bt.yellow]",
         "closed": "[bt.dim]○ closed[/bt.dim]",
-        "timeout": "[bt.red]◌ timeout[/bt.red]",
+        "timeout": "[bt.orange]◌ timeout[/bt.orange]",
+        "host_unreachable": "[bt.red]✖ unreachable[/bt.red]",
     }
 
     for r in results:

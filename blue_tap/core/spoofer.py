@@ -23,12 +23,22 @@ def save_original_mac(hci: str):
         try:
             with open(_ORIGINAL_MAC_FILE) as f:
                 data = json.load(f)
-        except (json.JSONDecodeError, OSError):
-            pass
+        except json.JSONDecodeError:
+            warning(f"MAC backup file corrupted — backing up and starting fresh")
+            try:
+                import shutil
+                shutil.copy2(_ORIGINAL_MAC_FILE, _ORIGINAL_MAC_FILE + ".bak")
+            except OSError:
+                pass
+            data = {}
+        except OSError:
+            data = {}
     if hci not in data:  # Only save if not already stored (idempotent)
         data[hci] = addr
-        with open(_ORIGINAL_MAC_FILE, "w") as f:
-            json.dump(data, f)
+        tmp_path = _ORIGINAL_MAC_FILE + ".tmp"
+        with open(tmp_path, "w") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp_path, _ORIGINAL_MAC_FILE)
         info(f"Saved original MAC for {hci}: {addr}")
 
 
@@ -102,9 +112,13 @@ def spoof_bdaddr(hci: str, target_mac: str) -> bool:
         return False
 
     # Reset adapter to apply
+    import time
     run_cmd(["sudo", "hciconfig", hci, "reset"])
+    time.sleep(1)
     run_cmd(["sudo", "hciconfig", hci, "down"])
+    time.sleep(1)
     run_cmd(["sudo", "hciconfig", hci, "up"])
+    time.sleep(1)  # Give adapter time to stabilize
 
     # Verify
     new_addr = get_adapter_address(hci)
@@ -181,22 +195,33 @@ def spoof_btmgmt(hci: str, target_mac: str) -> bool:
     ]
 
     # Power down first
-    run_cmd(["sudo", "btmgmt", "--index", idx, "power", "off"])
+    power_off = run_cmd(["sudo", "btmgmt", "--index", idx, "power", "off"])
+    if power_off.returncode != 0:
+        error(f"btmgmt power off failed: {power_off.stderr.strip()}")
+        return False
 
     # Try public-addr first (changes BD_ADDR for BR/EDR + BLE public)
-    result = run_cmd(["sudo", "btmgmt", "--index", idx, "public-addr", target_mac])
-    combined = (result.stdout + result.stderr).lower()
-    public_failed = result.returncode != 0 or any(p in combined for p in rejection_patterns)
+    try:
+        result = run_cmd(["sudo", "btmgmt", "--index", idx, "public-addr", target_mac])
+        combined = (result.stdout + result.stderr).lower()
+        public_failed = result.returncode != 0 or any(p in combined for p in rejection_patterns)
 
-    if public_failed:
-        warning(f"btmgmt public-addr not supported: {result.stderr.strip() or result.stdout.strip()}")
-        # static-addr only sets BLE random address, not the BD_ADDR visible in
-        # hciconfig. It won't help for BR/EDR spoofing so skip it to avoid
-        # false hope.
-        info("static-addr only affects BLE random address, skipping for BR/EDR spoof")
-
-    # Power back on
-    run_cmd(["sudo", "btmgmt", "--index", idx, "power", "on"])
+        if public_failed:
+            warning(f"btmgmt public-addr not supported: {result.stderr.strip() or result.stdout.strip()}")
+            # static-addr only sets BLE random address, not the BD_ADDR visible in
+            # hciconfig. It won't help for BR/EDR spoofing so skip it to avoid
+            # false hope.
+            info("static-addr only affects BLE random address, skipping for BR/EDR spoof")
+    finally:
+        # Power back on — always runs even if public-addr fails
+        import time
+        power_on = run_cmd(["sudo", "btmgmt", "--index", idx, "power", "on"])
+        if power_on.returncode != 0:
+            warning(f"btmgmt power on failed — retrying in 2s...")
+            time.sleep(2)
+            power_on = run_cmd(["sudo", "btmgmt", "--index", idx, "power", "on"])
+            if power_on.returncode != 0:
+                error(f"Adapter {hci} may be stuck in DOWN state — run: sudo hciconfig {hci} up")
 
     if public_failed:
         warning("btmgmt method not supported on this adapter")
@@ -273,8 +298,8 @@ def clone_device_identity(hci: str, target_mac: str, target_name: str,
                 failed.append("name")
             if not class_ok:
                 failed.append("class")
-            warning(f"Identity clone partial: MAC spoofed but {', '.join(failed)} set failed")
-            return True  # MAC is spoofed, which is the critical part
+            error(f"Identity clone incomplete: MAC spoofed but {', '.join(failed)} failed — IVI may reject connection")
+            return False
     except Exception as e:
         error(f"Identity clone partial failure: {e}")
         return False

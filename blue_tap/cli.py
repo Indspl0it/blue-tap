@@ -4,9 +4,31 @@ import json
 import os
 import re
 
-import click
+import rich_click as click
 from rich.table import Table
 from rich.panel import Panel
+
+# ── Rich-Click Configuration ─────────────────────────────────────────
+click.rich_click.USE_RICH_MARKUP = True
+click.rich_click.MAX_WIDTH = 120
+click.rich_click.USE_CLICK_SHORT_HELP = False
+click.rich_click.SHOW_ARGUMENTS = True
+click.rich_click.GROUP_ARGUMENTS_OPTIONS = True
+click.rich_click.STYLE_OPTION = "bold cyan"
+click.rich_click.STYLE_ARGUMENT = "bold cyan"
+click.rich_click.STYLE_COMMAND = "bold"
+
+# Command grouping — pentest flow order
+click.rich_click.COMMAND_GROUPS = {
+    "python -m blue_tap.cli": [
+        {"name": "Discovery & Reconnaissance", "commands": ["scan", "recon", "adapter"]},
+        {"name": "Assessment", "commands": ["vulnscan", "fleet"]},
+        {"name": "Exploitation", "commands": ["hijack", "bias", "knob", "ssp-downgrade", "spoof"]},
+        {"name": "Data Extraction & Audio", "commands": ["pbap", "map", "at", "opp", "hfp", "audio", "avrcp"]},
+        {"name": "Fuzzing & Stress Testing", "commands": ["fuzz", "dos"]},
+        {"name": "Reporting & Automation", "commands": ["session", "report", "auto", "run"]},
+    ],
+}
 
 from blue_tap import __version__
 from blue_tap.utils.output import (
@@ -78,7 +100,7 @@ def _infer_category(command_path: str) -> str:
     return "general"
 
 
-class LoggedCommand(click.Command):
+class LoggedCommand(click.RichCommand):
     """Click command with automatic session logging for every invocation."""
 
     def invoke(self, ctx):
@@ -87,7 +109,7 @@ class LoggedCommand(click.Command):
         return super().invoke(ctx)
 
 
-class LoggedGroup(click.Group):
+class LoggedGroup(click.RichGroup):
     """Click group that propagates logged command/group classes."""
 
     command_class = LoggedCommand
@@ -397,6 +419,9 @@ def recon_gatt(address, output):
             if char.get("value_hex"):
                 console.print(f"    Value: {char['value_hex']} | {char.get('value_str', '')}")
 
+    from blue_tap.utils.session import log_command
+    log_command("gatt_enum", services, category="recon", target=address)
+
     if output:
         _save_json(services, output)
 
@@ -478,8 +503,9 @@ def recon_ssp(address):
 @recon.command("rfcomm-scan")
 @click.argument("address", required=False, default=None)
 @click.option("-t", "--timeout", default=2.0, help="Timeout per channel")
+@click.option("--retries", default=1, help="Retries per channel on timeout")
 @click.option("-o", "--output", default=None, help="Output file (JSON)")
-def recon_rfcomm_scan(address, timeout, output):
+def recon_rfcomm_scan(address, timeout, retries, output):
     """Scan all RFCOMM channels (1-30) for hidden services."""
     address = resolve_address(address)
     if not address:
@@ -488,7 +514,7 @@ def recon_rfcomm_scan(address, timeout, output):
 
     info(f"Scanning RFCOMM channels 1-30 on [bold]{address}[/bold] (timeout={timeout}s)...")
     scanner = RFCOMMScanner(address)
-    results = scanner.scan_all_channels(timeout_per_ch=timeout)
+    results = scanner.scan_all_channels(timeout_per_ch=timeout, max_retries=retries)
 
     # Show open/interesting channels only
     interesting = [r for r in results if r["status"] != "closed"]
@@ -498,7 +524,10 @@ def recon_rfcomm_scan(address, timeout, output):
         warning("No open RFCOMM channels found")
 
     open_channels = [r for r in results if r["status"] == "open"]
-    info(f"Scanned 30 channels: {len(open_channels)} open")
+    info(f"Scanned {len(results)} channels: {len(open_channels)} open")
+
+    from blue_tap.utils.session import log_command
+    log_command("rfcomm_scan", results, category="recon", target=address)
 
     if output:
         # Serialize (strip raw_response bytes for JSON)
@@ -511,8 +540,9 @@ def recon_rfcomm_scan(address, timeout, output):
 @click.argument("address", required=False, default=None)
 @click.option("--dynamic", is_flag=True, help="Also scan dynamic PSM range")
 @click.option("-t", "--timeout", default=1.0, help="Timeout per PSM")
+@click.option("--workers", default=10, help="Parallel workers for dynamic scan")
 @click.option("-o", "--output", default=None, help="Output file (JSON)")
-def recon_l2cap_scan(address, dynamic, timeout, output):
+def recon_l2cap_scan(address, dynamic, timeout, workers, output):
     """Scan L2CAP PSM values for open services."""
     address = resolve_address(address)
     if not address:
@@ -526,7 +556,7 @@ def recon_l2cap_scan(address, dynamic, timeout, output):
 
     if dynamic:
         info("  Scanning dynamic PSM range...")
-        results.extend(scanner.scan_dynamic_psms(timeout=timeout))
+        results.extend(scanner.scan_dynamic_psms(timeout=timeout, workers=workers))
 
     if results:
         console.print(channel_table(results, title="L2CAP Scan Results"))
@@ -534,6 +564,9 @@ def recon_l2cap_scan(address, dynamic, timeout, output):
     open_psms = [r for r in results if r["status"] in ("open", "auth_required")]
     if not open_psms:
         warning("No open L2CAP PSMs found")
+
+    from blue_tap.utils.session import log_command
+    log_command("l2cap_scan", results, category="recon", target=address)
 
     if output:
         _save_json(results, output)
@@ -734,11 +767,18 @@ def spoof_mac(target_mac, hci, method):
         return
     info(f"Spoofing adapter {hci} MAC to {target_mac} (method={method})")
     from blue_tap.core.spoofer import spoof_address
+    ok = False
     try:
-        spoof_address(hci, target_mac, method)
-        success(f"MAC address changed to {target_mac} on {hci}")
+        ok = spoof_address(hci, target_mac, method)
+        if ok:
+            success(f"MAC address changed to {target_mac} on {hci}")
+        else:
+            error(f"MAC spoof failed — address not changed on {hci}")
     except Exception as exc:
         error(f"MAC spoof failed: {exc}")
+
+    from blue_tap.utils.session import log_command
+    log_command("spoof_mac", {"target_mac": target_mac, "hci": hci, "method": method, "success": ok}, category="attack")
 
 
 @spoof.command("clone")
@@ -758,14 +798,21 @@ def spoof_clone(target_mac, target_name, hci, device_class):
     info(f"Cloning device identity from {target_mac} on adapter {hci}")
     info(f"  MAC: {target_mac}, Name: {target_name}, Class: {device_class}")
     from blue_tap.core.spoofer import clone_device_identity
+    ok = False
     try:
         info("Step 1/3: Spoofing MAC address...")
         info("Step 2/3: Setting device name...")
         info("Step 3/3: Setting device class...")
-        clone_device_identity(hci, target_mac, target_name, device_class)
-        success(f"Identity clone complete: now impersonating {target_name} ({target_mac})")
+        ok = clone_device_identity(hci, target_mac, target_name, device_class)
+        if ok:
+            success(f"Identity clone complete: now impersonating {target_name} ({target_mac})")
+        else:
+            error(f"Identity clone failed — device identity not changed on {hci}")
     except Exception as exc:
         error(f"Identity clone failed: {exc}")
+
+    from blue_tap.utils.session import log_command
+    log_command("spoof_clone", {"target_mac": target_mac, "target_name": target_name, "device_class": device_class, "success": ok}, category="attack")
 
 
 @spoof.command("restore")
@@ -776,11 +823,18 @@ def spoof_restore(hci, method):
     """Restore adapter to its original MAC address."""
     info(f"Restoring original MAC address on adapter {hci} (method={method})")
     from blue_tap.core.spoofer import restore_original_mac
+    ok = False
     try:
-        restore_original_mac(hci, method)
-        success(f"Original MAC restored on {hci}")
+        ok = restore_original_mac(hci, method)
+        if ok:
+            success(f"Original MAC restored on {hci}")
+        else:
+            error(f"MAC restore failed — original address not restored on {hci}")
     except Exception as exc:
         error(f"MAC restore failed: {exc}")
+
+    from blue_tap.utils.session import log_command
+    log_command("spoof_restore", {"hci": hci, "method": method, "success": ok}, category="attack")
 
 
 # ============================================================================
@@ -1038,6 +1092,8 @@ def hfp_connect(address, channel):
                     client.send_at(cmd)
             except (EOFError, KeyboardInterrupt):
                 break
+        from blue_tap.utils.session import log_command
+        log_command("hfp_connect", {"channel": channel}, category="attack", target=address)
         client.disconnect()
         info("HFP session closed.")
     else:
@@ -1078,6 +1134,8 @@ def hfp_capture(address, channel, output, duration):
             success(f"Audio saved to {output} ({size} bytes)")
         else:
             warning(f"Capture completed but output file {output} not found.")
+        from blue_tap.utils.session import log_command
+        log_command("hfp_capture", {"output": output, "duration": duration}, category="audio", target=address)
         client.disconnect()
         info("HFP session closed.")
     else:
@@ -1112,6 +1170,8 @@ def hfp_inject(address, audio_file, channel):
         info(f"Injecting audio from {audio_file} into call on {address}...")
         client.inject_audio(audio_file)
         success("Audio injection complete.")
+        from blue_tap.utils.session import log_command
+        log_command("hfp_inject", {"audio_file": audio_file}, category="attack", target=address)
         client.disconnect()
         info("HFP session closed.")
     else:
@@ -1145,6 +1205,8 @@ def hfp_at(address, command, channel):
         result = client.send_at(command)
         console.print(f"[yellow]{result}[/yellow]")
         success("AT command sent.")
+        from blue_tap.utils.session import log_command
+        log_command("hfp_at", {"command": command, "response": result}, category="attack", target=address)
         client.disconnect()
         info("HFP session closed.")
     else:
@@ -1323,6 +1385,8 @@ def audio_record_mic(mac, output, duration, no_setup):
         success(f"Recording saved to {output} ({size} bytes)")
     else:
         warning(f"Recording completed but output file {output} not found.")
+    from blue_tap.utils.session import log_command
+    log_command("audio_record_mic", {"output": output, "duration": duration}, category="audio", target=mac)
 
 
 @audio.command("live")
@@ -1354,6 +1418,8 @@ def audio_play(mac, audio_file, volume):
     info(f"Playing {audio_file} through car speakers on {mac} (volume {volume}%)...")
     play_to_car(mac, audio_file, volume)
     success("Audio playback complete.")
+    from blue_tap.utils.session import log_command
+    log_command("audio_play", {"audio_file": audio_file, "volume": volume}, category="attack", target=mac)
 
 
 @audio.command("loopback")
@@ -1368,6 +1434,8 @@ def audio_loopback(mac, mic_source):
     src_str = mic_source if mic_source else "auto-detected"
     info(f"Starting loopback: routing laptop mic ({src_str}) to car speakers on {mac}...")
     stream_mic_to_car(mac, mic_source)
+    from blue_tap.utils.session import log_command
+    log_command("audio_loopback", {"address": mac}, category="attack", target=mac)
     info("Loopback session ended.")
 
 
@@ -1398,6 +1466,8 @@ def audio_capture_a2dp(mac, output, duration):
         success(f"A2DP capture saved to {output} ({size} bytes)")
     else:
         warning(f"Capture completed but output file {output} not found.")
+    from blue_tap.utils.session import log_command
+    log_command("audio_capture_a2dp", {"output": output, "duration": duration}, category="audio", target=mac)
 
 
 @audio.command("profile")
@@ -1697,7 +1767,9 @@ def at_snarf(address, memory, entry_range):
 @click.argument("address", required=False, default=None)
 @click.option("-i", "--hci", default="hci0")
 @click.option("-o", "--output", default=None, help="Output file (JSON)")
-def vulnscan(address, hci, output):
+@click.option("--active", is_flag=True, help="Enable active/invasive checks (BIAS probe, PIN lockout)")
+@click.option("--phone", default=None, help="Paired phone MAC for BIAS probe (prompted if --active)")
+def vulnscan(address, hci, output, active, phone):
     """Scan target for vulnerabilities and attack-surface indicators.
 
     \b
@@ -1705,14 +1777,36 @@ def vulnscan(address, hci, output):
     RFCOMM probe), KNOB, BLURtooth, BIAS, BlueBorne, pairing method,
     writable GATT characteristics. Findings are classified as confirmed,
     potential, or unverified with confidence ratings.
+
+    \b
+    Use --active to enable invasive checks (BIAS auto-reconnect probe,
+    PIN lockout detection). BIAS probe requires the paired phone's MAC —
+    provide via --phone or select interactively from discovered devices.
     """
     address = resolve_address(address)
     if not address:
         return
+
+    # For active BIAS probe, we need the paired phone's MAC
+    phone_address = None
+    if active:
+        if phone:
+            phone_address = resolve_address(phone, prompt="Verify phone address")
+        else:
+            info("Active BIAS probe needs the paired phone's MAC address.")
+            info("Select the phone that is normally paired with the target device.")
+            from blue_tap.utils.interactive import pick_device
+            phone_address = pick_device(
+                prompt="Select paired PHONE for BIAS probe",
+                scan_duration=8, hci=hci,
+            )
+            if not phone_address:
+                warning("No phone selected — BIAS auto-reconnect test will be skipped")
+
     from blue_tap.attack.vuln_scanner import scan_vulnerabilities
     info(f"Starting vulnerability assessment on [bold]{address}[/bold]...")
     info("  Running 20+ checks: SSP, KNOB, BIAS, BlueBorne, BLURtooth, BLUFFS, PerfektBlue, BrakTooth...")
-    findings = scan_vulnerabilities(address, hci)
+    findings = scan_vulnerabilities(address, hci, active=active, phone_address=phone_address)
 
     confirmed = sum(1 for f in findings if f.get("status") == "confirmed")
     potential = sum(1 for f in findings if f.get("status") == "potential")
@@ -1819,6 +1913,8 @@ def hijack(ivi_address, phone_address, phone_name, hci, output_dir,
             os.makedirs(output_dir, exist_ok=True)
             _save_json(results, os.path.join(output_dir, "attack_results.json"))
             success(f"BIAS attack results saved to {output_dir}/attack_results.json")
+            from blue_tap.utils.session import log_command
+            log_command("hijack", results, category="attack", target=ivi_address)
         else:
             info("Running full attack chain (recon → impersonate → connect → dump → audio)...")
             results = session.run_full_attack()
@@ -1827,12 +1923,17 @@ def hijack(ivi_address, phone_address, phone_name, hci, output_dir,
             results_file = os.path.join(output_dir, "attack_results.json")
             _save_json(results, results_file)
             success(f"Full attack complete — results saved to {results_file}")
+            from blue_tap.utils.session import log_command
+            log_command("hijack", results, category="attack", target=ivi_address)
     except KeyboardInterrupt:
         warning("\nInterrupted by user")
     finally:
-        info("Cleaning up hijack session...")
-        session.cleanup()
-        info("Session closed")
+        try:
+            info("Cleaning up hijack session...")
+            session.cleanup()
+            info("Session closed")
+        except Exception as e:
+            error(f"Cleanup error: {e}")
 
 
 # ============================================================================
@@ -1870,6 +1971,8 @@ def bias_probe(ivi_address, phone_address, phone_name, hci):
     try:
         attack.probe_vulnerability()
         success("BIAS probe complete")
+        from blue_tap.utils.session import log_command
+        log_command("bias_probe", {"ivi_address": ivi_address, "phone_address": phone_address}, category="attack", target=ivi_address)
     except Exception as exc:
         error(f"BIAS probe failed: {exc}")
 
@@ -1911,6 +2014,8 @@ def bias_attack(ivi_address, phone_address, phone_name, hci, method):
     try:
         attack.execute(method)
         success("BIAS attack execution complete")
+        from blue_tap.utils.session import log_command
+        log_command("bias_attack", {"ivi_address": ivi_address, "phone_address": phone_address, "method": method}, category="attack", target=ivi_address)
     except Exception as exc:
         error(f"BIAS attack failed: {exc}")
 
@@ -1933,12 +2038,17 @@ def avrcp_play(address):
     from blue_tap.attack.avrcp import AVRCPController
     info(f"Connecting AVRCP to {address}...")
     ctrl = AVRCPController(address)
-    if ctrl.connect():
+    if not ctrl.connect():
+        error(f"AVRCP connection to {address} failed.")
+        return
+    try:
         info(f"Sending PLAY command to {address}...")
         ctrl.play()
         success("PLAY command sent.")
-    else:
-        error(f"AVRCP connection to {address} failed.")
+        from blue_tap.utils.session import log_command
+        log_command("avrcp_play", {"address": address, "action": "play"}, category="attack", target=address)
+    finally:
+        ctrl.disconnect()
 
 
 @avrcp.command("pause")
@@ -1951,12 +2061,17 @@ def avrcp_pause(address):
     from blue_tap.attack.avrcp import AVRCPController
     info(f"Connecting AVRCP to {address}...")
     ctrl = AVRCPController(address)
-    if ctrl.connect():
+    if not ctrl.connect():
+        error(f"AVRCP connection to {address} failed.")
+        return
+    try:
         info(f"Sending PAUSE command to {address}...")
         ctrl.pause()
         success("PAUSE command sent.")
-    else:
-        error(f"AVRCP connection to {address} failed.")
+        from blue_tap.utils.session import log_command
+        log_command("avrcp_pause", {"address": address, "action": "pause"}, category="attack", target=address)
+    finally:
+        ctrl.disconnect()
 
 
 @avrcp.command("stop")
@@ -1969,12 +2084,17 @@ def avrcp_stop(address):
     from blue_tap.attack.avrcp import AVRCPController
     info(f"Connecting AVRCP to {address}...")
     ctrl = AVRCPController(address)
-    if ctrl.connect():
+    if not ctrl.connect():
+        error(f"AVRCP connection to {address} failed.")
+        return
+    try:
         info(f"Sending STOP command to {address}...")
         ctrl.stop()
         success("STOP command sent.")
-    else:
-        error(f"AVRCP connection to {address} failed.")
+        from blue_tap.utils.session import log_command
+        log_command("avrcp_stop", {"address": address, "action": "stop"}, category="attack", target=address)
+    finally:
+        ctrl.disconnect()
 
 
 @avrcp.command("next")
@@ -1987,12 +2107,17 @@ def avrcp_next(address):
     from blue_tap.attack.avrcp import AVRCPController
     info(f"Connecting AVRCP to {address}...")
     ctrl = AVRCPController(address)
-    if ctrl.connect():
+    if not ctrl.connect():
+        error(f"AVRCP connection to {address} failed.")
+        return
+    try:
         info(f"Sending NEXT TRACK command to {address}...")
         ctrl.next_track()
         success("NEXT TRACK command sent.")
-    else:
-        error(f"AVRCP connection to {address} failed.")
+        from blue_tap.utils.session import log_command
+        log_command("avrcp_next", {"address": address, "action": "next"}, category="attack", target=address)
+    finally:
+        ctrl.disconnect()
 
 
 @avrcp.command("prev")
@@ -2005,12 +2130,17 @@ def avrcp_prev(address):
     from blue_tap.attack.avrcp import AVRCPController
     info(f"Connecting AVRCP to {address}...")
     ctrl = AVRCPController(address)
-    if ctrl.connect():
+    if not ctrl.connect():
+        error(f"AVRCP connection to {address} failed.")
+        return
+    try:
         info(f"Sending PREVIOUS TRACK command to {address}...")
         ctrl.previous_track()
         success("PREVIOUS TRACK command sent.")
-    else:
-        error(f"AVRCP connection to {address} failed.")
+        from blue_tap.utils.session import log_command
+        log_command("avrcp_prev", {"address": address, "action": "prev"}, category="attack", target=address)
+    finally:
+        ctrl.disconnect()
 
 
 @avrcp.command("volume")
@@ -2024,12 +2154,17 @@ def avrcp_volume(address, level):
     from blue_tap.attack.avrcp import AVRCPController
     info(f"Connecting AVRCP to {address}...")
     ctrl = AVRCPController(address)
-    if ctrl.connect():
+    if not ctrl.connect():
+        error(f"AVRCP connection to {address} failed.")
+        return
+    try:
         info(f"Setting volume to {level} on {address}...")
         ctrl.set_volume(level)
         success(f"Volume set to {level}.")
-    else:
-        error(f"AVRCP connection to {address} failed.")
+        from blue_tap.utils.session import log_command
+        log_command("avrcp_volume", {"address": address, "action": "set_volume", "level": level}, category="attack", target=address)
+    finally:
+        ctrl.disconnect()
 
 
 @avrcp.command("volume-ramp")
@@ -2045,12 +2180,17 @@ def avrcp_volume_ramp(address, start, end, step_ms):
     from blue_tap.attack.avrcp import AVRCPController
     info(f"Connecting AVRCP to {address}...")
     ctrl = AVRCPController(address)
-    if ctrl.connect():
+    if not ctrl.connect():
+        error(f"AVRCP connection to {address} failed.")
+        return
+    try:
         info(f"Ramping volume from {start} to {end} (step {step_ms}ms) on {address}...")
         ctrl.volume_ramp(start=start, target=end, step_ms=step_ms)
         success(f"Volume ramp complete ({start} -> {end}).")
-    else:
-        error(f"AVRCP connection to {address} failed.")
+        from blue_tap.utils.session import log_command
+        log_command("avrcp_volume_ramp", {"address": address, "action": "volume_ramp", "start": start, "end": end, "step_ms": step_ms}, category="attack", target=address)
+    finally:
+        ctrl.disconnect()
 
 
 @avrcp.command("skip-flood")
@@ -2065,12 +2205,17 @@ def avrcp_skip_flood(address, count, interval):
     from blue_tap.attack.avrcp import AVRCPController
     info(f"Connecting AVRCP to {address}...")
     ctrl = AVRCPController(address)
-    if ctrl.connect():
+    if not ctrl.connect():
+        error(f"AVRCP connection to {address} failed.")
+        return
+    try:
         info(f"Starting skip flood: {count} skips at {interval}s interval on {address}...")
         ctrl.skip_flood(count, int(interval * 1000))
         success(f"Skip flood complete ({count} skips sent).")
-    else:
-        error(f"AVRCP connection to {address} failed.")
+        from blue_tap.utils.session import log_command
+        log_command("avrcp_skip_flood", {"address": address, "action": "skip_flood", "count": count, "interval": interval}, category="attack", target=address)
+    finally:
+        ctrl.disconnect()
 
 
 @avrcp.command("metadata")
@@ -2083,7 +2228,10 @@ def avrcp_metadata(address):
     from blue_tap.attack.avrcp import AVRCPController
     info(f"Connecting AVRCP to {address}...")
     ctrl = AVRCPController(address)
-    if ctrl.connect():
+    if not ctrl.connect():
+        error(f"AVRCP connection to {address} failed.")
+        return
+    try:
         info(f"Fetching track metadata from {address}...")
         track = ctrl.get_track_info()
         status = ctrl.get_status()
@@ -2094,8 +2242,10 @@ def avrcp_metadata(address):
                 console.print(f"  [cyan]{key}:[/cyan] {val}")
         else:
             warning("No track info available")
-    else:
-        error(f"AVRCP connection to {address} failed.")
+        from blue_tap.utils.session import log_command
+        log_command("avrcp_metadata", {"address": address, "action": "metadata", "track": track, "status": status}, category="attack", target=address)
+    finally:
+        ctrl.disconnect()
 
 
 @avrcp.command("monitor")
@@ -2109,7 +2259,10 @@ def avrcp_monitor(address, duration):
     from blue_tap.attack.avrcp import AVRCPController
     info(f"Connecting AVRCP to {address}...")
     ctrl = AVRCPController(address)
-    if ctrl.connect():
+    if not ctrl.connect():
+        error(f"AVRCP connection to {address} failed.")
+        return
+    try:
         info(f"Monitoring track changes on {address} for {duration}s (Ctrl+C to stop)...")
 
         def on_change(changed):
@@ -2127,8 +2280,10 @@ def avrcp_monitor(address, duration):
 
         ctrl.monitor_metadata(duration, callback=on_change)
         info("Metadata monitoring ended.")
-    else:
-        error(f"AVRCP connection to {address} failed.")
+        from blue_tap.utils.session import log_command
+        log_command("avrcp_monitor", {"address": address, "action": "monitor", "duration": duration}, category="attack", target=address)
+    finally:
+        ctrl.disconnect()
 
 
 # ============================================================================
@@ -2614,7 +2769,7 @@ def report_cmd(dump_dir, fmt, output):
             cmd = entry.get("command", "")
             if isinstance(data, dict):
                 # Namespace new attack types so they don't overwrite each other
-                if cmd in ("key_harvest", "ssp_downgrade", "knob_attack"):
+                if cmd in ("ssp_downgrade", "knob_attack"):
                     report.attack_results[cmd] = data
                 elif "phases" in data:
                     report.attack_results.update(data)
@@ -2733,6 +2888,12 @@ def auto_cmd(ivi_mac, duration, output, hci, fuzz_duration, skip_fuzz, skip_dos,
     """
     ivi_mac = resolve_address(ivi_mac, prompt="Select TARGET IVI")
     if not ivi_mac:
+        return
+    if fuzz_duration <= 0:
+        error("--fuzz-duration must be a positive number")
+        return
+    if duration <= 0:
+        error("--duration must be a positive number")
         return
     from blue_tap.attack.auto import AutoPentest
     from blue_tap.utils.session import get_session, log_command
@@ -2950,148 +3111,6 @@ def session_show(name):
 
 
 # ============================================================================
-# KEYS - Link Key Harvest & Persistent Access
-# ============================================================================
-@main.group()
-def keys():
-    """Link key harvest, storage, and persistent reconnection."""
-
-
-@keys.command("harvest")
-@click.argument("address", required=False, default=None)
-@click.option("-d", "--duration", default=300, type=int,
-              help="Capture duration in seconds (default: 300)")
-@click.option("-i", "--hci", default="hci0")
-def keys_harvest(address, duration, hci):
-    """Capture a pairing exchange and extract the link key.
-
-    \b
-    Starts HCI packet capture, waits for the target to pair,
-    then extracts and stores the link key for later reconnection.
-
-    \b
-    Usage:
-      1. Run this command
-      2. Initiate pairing from the target device (or trigger it separately)
-      3. Wait for capture to detect the pairing exchange
-      4. Link key is stored in the session key database
-    """
-    address = resolve_address(address)
-    if not address:
-        return
-    from blue_tap.attack.key_harvest import KeyHarvester
-    from blue_tap.utils.session import get_session
-
-    session = get_session()
-    session_dir = session.dir if session else "."
-
-    harvester = KeyHarvester(hci=hci, session_dir=session_dir)
-    info(f"Starting link key harvest for [bold]{address}[/bold]")
-    info(f"Capturing for up to {duration}s — initiate pairing on the target now")
-
-    result = harvester.harvest(address, duration=duration)
-    if result:
-        success(f"Link key captured: {result.get('link_key', '?')[:8]}...")
-        success(f"Stored in key database for persistent access")
-        if session:
-            from blue_tap.utils.session import log_command
-            log_command("key_harvest", result, category="attack", target=address)
-    else:
-        warning("No link key captured — pairing may not have occurred during capture window")
-
-
-@keys.command("list")
-def keys_list():
-    """List all stored link keys."""
-    from blue_tap.attack.key_harvest import KeyDatabase
-    from blue_tap.utils.session import get_session
-
-    session = get_session()
-    session_dir = session.dir if session else "."
-    db_path = os.path.join(session_dir, "keys", "key_db.json")
-
-    db = KeyDatabase(db_path)
-    all_keys = db.list_all()
-
-    if not all_keys:
-        info("No stored link keys")
-        return
-
-    from rich.table import Table
-    table = Table(title="Stored Link Keys")
-    table.add_column("Device", style="bold")
-    table.add_column("Key (preview)")
-    table.add_column("Type")
-    table.add_column("Captured")
-    table.add_column("Verified", justify="center")
-    table.add_column("Source")
-
-    for entry in all_keys:
-        key_preview = entry.get("link_key", "")[:16] + "..."
-        verified = "[green]yes[/green]" if entry.get("verified") else "[dim]no[/dim]"
-        table.add_row(
-            entry.get("mac", "?"),
-            key_preview,
-            str(entry.get("key_type", "?")),
-            entry.get("captured_at", "?")[:19],
-            verified,
-            entry.get("source", "?"),
-        )
-    console.print(table)
-
-
-@keys.command("reconnect")
-@click.argument("address", required=False, default=None)
-@click.option("-i", "--hci", default="hci0")
-def keys_reconnect(address, hci):
-    """Reconnect to a device using a previously stored link key.
-
-    \b
-    Injects the stored key into BlueZ and attempts connection
-    without re-pairing — proving persistent access.
-    """
-    address = resolve_address(address)
-    if not address:
-        return
-    from blue_tap.attack.key_harvest import KeyHarvester
-    from blue_tap.utils.session import get_session
-
-    session = get_session()
-    session_dir = session.dir if session else "."
-
-    harvester = KeyHarvester(hci=hci, session_dir=session_dir)
-    info(f"Attempting reconnection to [bold]{address}[/bold] using stored key")
-
-    if harvester.reconnect(address):
-        success("Reconnected using stored link key — persistent access confirmed")
-    else:
-        error("Reconnection failed — key may be expired or device re-paired")
-
-
-@keys.command("verify")
-@click.argument("address", required=False, default=None)
-@click.option("-i", "--hci", default="hci0")
-def keys_verify(address, hci):
-    """Verify a stored link key is still valid."""
-    address = resolve_address(address)
-    if not address:
-        return
-    from blue_tap.attack.key_harvest import KeyHarvester
-    from blue_tap.utils.session import get_session
-
-    session = get_session()
-    session_dir = session.dir if session else "."
-
-    harvester = KeyHarvester(hci=hci, session_dir=session_dir)
-    info(f"Verifying stored key for [bold]{address}[/bold]")
-
-    if harvester.verify_key(address):
-        success("Key is valid — device still accepts it")
-    else:
-        warning("Key verification failed — device may have re-paired or rotated keys")
-
-
-# ============================================================================
 # SSP-DOWNGRADE - Force Legacy Pairing
 # ============================================================================
 @main.group("ssp-downgrade")
@@ -3164,6 +3183,10 @@ def ssp_attack(address, hci, pin_start, pin_end, delay):
     if not address:
         return
     from blue_tap.attack.ssp_downgrade import SSPDowngradeAttack
+
+    if pin_start > pin_end:
+        error(f"--pin-start ({pin_start}) must be <= --pin-end ({pin_end})")
+        return
 
     attack = SSPDowngradeAttack(address, hci=hci)
     info(f"Starting SSP downgrade attack on [bold]{address}[/bold]")
@@ -3404,7 +3427,8 @@ def fleet_assess(duration, hci, all_devices):
 @click.option("-i", "--hci", default="hci0")
 @click.option("-o", "--output", default=None, help="Output file path")
 @click.option("-f", "--format", "fmt", default="html", type=click.Choice(["html", "json"]))
-def fleet_report(duration, hci, output, fmt):
+@click.option("--all-devices", is_flag=True, help="Assess all devices, not just IVIs")
+def fleet_report(duration, hci, output, fmt, all_devices):
     """Generate a consolidated fleet assessment report."""
     from blue_tap.attack.fleet import FleetAssessment
 
@@ -3416,9 +3440,15 @@ def fleet_report(duration, hci, output, fmt):
         warning("No devices discovered")
         return
 
-    ivi_targets = [d["address"] for d in devices if d.get("classification") == "ivi"]
-    if ivi_targets:
-        assessment.assess(targets=ivi_targets)
+    if all_devices:
+        targets = [d["address"] for d in devices]
+    else:
+        targets = [d["address"] for d in devices if d.get("classification") == "ivi"]
+
+    if targets:
+        assessment.assess(targets=targets)
+    else:
+        warning("No devices to assess")
 
     report_data = assessment.report()
 
@@ -3434,6 +3464,9 @@ def fleet_report(duration, hci, output, fmt):
             if findings:
                 rpt.add_vuln_findings(findings)
         rpt.generate_html(out_path)
+
+    from blue_tap.utils.session import log_command
+    log_command("fleet_report", report_data, category="vuln")
 
 
 # ============================================================================

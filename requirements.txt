@@ -9,6 +9,7 @@
 
 click>=8.1
 rich>=13.0
+rich-click>=1.8
 bleak>=0.21
 dbus-fast>=2.0
 scapy>=2.5

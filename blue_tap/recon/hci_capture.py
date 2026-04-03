@@ -45,6 +45,21 @@ class HCICapture:
             error("btmon not found — install bluez-utils")
             return False
 
+        # Check for stale PID file / already running capture
+        if os.path.exists(self.PID_FILE):
+            pgid, pid, _ = self._read_pid_file()
+            if pid is not None:
+                try:
+                    os.kill(pid, 0)  # Check if process exists
+                    warning("btmon capture already running — stop it first with capture-stop")
+                    return False
+                except OSError:
+                    # Process is dead, clean up stale PID file
+                    try:
+                        os.unlink(self.PID_FILE)
+                    except OSError:
+                        pass
+
         try:
             cmd = ["sudo", "btmon"]
             if pcap:
@@ -79,12 +94,17 @@ class HCICapture:
             # Persist PID (process group ID) so a separate stop invocation
             # can find and kill the entire process group
             os.makedirs(self._PID_DIR, exist_ok=True)
-            with open(self.PID_FILE, "w") as pf:
-                json.dump({
-                    "pgid": os.getpgid(self.process.pid),
-                    "pid": self.process.pid,
-                    "output_file": output_file,
-                }, pf)
+            pid_data = json.dumps({
+                "pgid": os.getpgid(self.process.pid),
+                "pid": self.process.pid,
+                "output_file": output_file,
+                "started_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            })
+            # Atomic write: write to temp file then rename
+            tmp_pid = self.PID_FILE + ".tmp"
+            with open(tmp_pid, "w") as pf:
+                pf.write(pid_data)
+            os.replace(tmp_pid, self.PID_FILE)
 
             info(f"btmon capture started -> {output_file}"
                  f"{' (btsnoop/pcap)' if pcap else ''}")
@@ -160,6 +180,27 @@ class HCICapture:
 
         success("btmon capture stopped")
         return self.output_file or ""
+
+    def status(self) -> dict:
+        """Get capture status including runtime and output size."""
+        running = self.is_running()
+        result = {"running": running, "output_file": None, "size_bytes": 0, "started_at": None}
+
+        try:
+            with open(self.PID_FILE) as pf:
+                data = json.load(pf)
+            result["output_file"] = data.get("output_file")
+            result["started_at"] = data.get("started_at")
+        except (OSError, json.JSONDecodeError):
+            pass
+
+        if result["output_file"]:
+            try:
+                result["size_bytes"] = os.path.getsize(result["output_file"])
+            except OSError:
+                pass
+
+        return result
 
     def is_running(self) -> bool:
         """Check whether btmon is still running."""

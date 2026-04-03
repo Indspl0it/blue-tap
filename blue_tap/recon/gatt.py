@@ -2,7 +2,7 @@
 
 import asyncio
 
-from blue_tap.utils.output import info, success, error
+from blue_tap.utils.output import info, success, error, warning
 
 
 # Standard GATT Service UUIDs (Bluetooth SIG assigned)
@@ -12,15 +12,11 @@ GATT_SERVICE_UUIDS = {
     "0000180a-0000-1000-8000-00805f9b34fb": "Device Information",
     "0000180f-0000-1000-8000-00805f9b34fb": "Battery Service",
     "00001812-0000-1000-8000-00805f9b34fb": "HID (Human Interface Device)",
-    "0000180d-0000-1000-8000-00805f9b34fb": "Heart Rate",
-    "00001810-0000-1000-8000-00805f9b34fb": "Blood Pressure",
-    "00001809-0000-1000-8000-00805f9b34fb": "Health Thermometer",
-    "00001816-0000-1000-8000-00805f9b34fb": "Cycling Speed and Cadence",
-    "00001808-0000-1000-8000-00805f9b34fb": "Glucose",
     "00001802-0000-1000-8000-00805f9b34fb": "Immediate Alert",
     "00001803-0000-1000-8000-00805f9b34fb": "Link Loss",
     "00001804-0000-1000-8000-00805f9b34fb": "Tx Power",
-    "0000181c-0000-1000-8000-00805f9b34fb": "User Data",
+    "0000181e-0000-1000-8000-00805f9b34fb": "Bond Management",
+    "00001824-0000-1000-8000-00805f9b34fb": "Transport Discovery",
     "0000fef5-0000-1000-8000-00805f9b34fb": "Dialog Semiconductor",
 }
 
@@ -38,6 +34,9 @@ GATT_CHAR_UUIDS = {
     "00002a28-0000-1000-8000-00805f9b34fb": "Software Revision String",
     "00002a29-0000-1000-8000-00805f9b34fb": "Manufacturer Name String",
     "00002a50-0000-1000-8000-00805f9b34fb": "PnP ID",
+    "00002a05-0000-1000-8000-00805f9b34fb": "Service Changed",
+    "00002a06-0000-1000-8000-00805f9b34fb": "Alert Level",
+    "00002a07-0000-1000-8000-00805f9b34fb": "Tx Power Level",
 }
 
 # Automotive-relevant BLE service UUIDs (vendor-specific)
@@ -90,114 +89,139 @@ async def enumerate_services(address: str) -> list[dict]:
 
     info(f"Connecting to {address} for GATT enumeration...")
 
-    try:
-        async with BleakClient(address, timeout=15.0) as client:
-            if not client.is_connected:
-                error(f"Failed to connect to {address}")
-                return []
+    max_retries = 2
+    for attempt in range(max_retries + 1):
+        try:
+            async with BleakClient(address, timeout=15.0) as client:
+                if not client.is_connected:
+                    error(f"Failed to connect to {address}")
+                    return []
 
-            success(f"Connected to {address}")
-            services_list = []
+                success(f"Connected to {address}")
+                services_list = []
 
-            for service in client.services:
-                svc_name = lookup_uuid(service.uuid) or service.description or "Unknown Service"
-                auto_category = classify_automotive_service(service.uuid, svc_name)
+                for service in client.services:
+                    svc_name = lookup_uuid(service.uuid) or service.description or "Unknown Service"
+                    auto_category = classify_automotive_service(service.uuid, svc_name)
 
-                svc_info = {
-                    "uuid": service.uuid,
-                    "handle": service.handle,
-                    "description": svc_name,
-                    "is_standard": bool(lookup_uuid(service.uuid)),
-                    "automotive_category": auto_category,
-                    "characteristics": [],
-                }
-
-                for char in service.characteristics:
-                    char_name = lookup_uuid(char.uuid) or char.description or "Unknown"
-                    char_info = {
-                        "uuid": char.uuid,
-                        "handle": char.handle,
-                        "description": char_name,
-                        "properties": char.properties,
-                        "value": None,
-                        "security_hint": _infer_security(char.properties),
+                    svc_info = {
+                        "uuid": service.uuid,
+                        "handle": service.handle,
+                        "description": svc_name,
+                        "is_standard": bool(lookup_uuid(service.uuid)),
+                        "automotive_category": auto_category,
+                        "characteristics": [],
                     }
 
-                    # Try to read if readable
-                    if "read" in char.properties:
-                        try:
-                            data = await client.read_gatt_char(char.uuid)
-                            char_info["value_hex"] = data.hex()
-                            char_info["value_str"] = _decode_value(data, char.uuid)
-                        except Exception as e:
-                            err_str = str(e).lower()
-                            if "auth" in err_str or "encrypt" in err_str or "security" in err_str:
-                                char_info["value_hex"] = "auth_required"
-                                char_info["security_hint"] = "encrypted/authenticated"
-                            elif "not permitted" in err_str or "denied" in err_str:
-                                char_info["value_hex"] = "access_denied"
-                                char_info["security_hint"] = "access_denied"
-                            else:
-                                char_info["value_hex"] = "read_error"
+                    for char in service.characteristics:
+                        char_name = lookup_uuid(char.uuid) or char.description or "Unknown"
+                        char_info = {
+                            "uuid": char.uuid,
+                            "handle": char.handle,
+                            "description": char_name,
+                            "properties": char.properties,
+                            "value": None,
+                            "security_hint": _infer_security(char.properties),
+                        }
 
-                    # List descriptors
-                    char_info["descriptors"] = [
-                        {"uuid": d.uuid, "handle": d.handle,
-                         "description": lookup_uuid(d.uuid) or ""}
-                        for d in char.descriptors
-                    ]
+                        # Try to read if readable
+                        if "read" in char.properties:
+                            try:
+                                data = await client.read_gatt_char(char.uuid)
+                                char_info["value_hex"] = data.hex()
+                                char_info["value_str"] = _decode_value(data, char.uuid)
+                            except Exception as e:
+                                err_str = str(e).lower()
+                                if "auth" in err_str or "encrypt" in err_str or "security" in err_str:
+                                    char_info["value_hex"] = "auth_required"
+                                    char_info["security_hint"] = "encrypted/authenticated"
+                                elif "not permitted" in err_str or "denied" in err_str:
+                                    char_info["value_hex"] = "access_denied"
+                                    char_info["security_hint"] = "access_denied"
+                                else:
+                                    char_info["value_hex"] = "read_error"
 
-                    svc_info["characteristics"].append(char_info)
+                        # List descriptors
+                        char_info["descriptors"] = [
+                            {"uuid": d.uuid, "handle": d.handle,
+                             "description": lookup_uuid(d.uuid) or ""}
+                            for d in char.descriptors
+                        ]
 
-                services_list.append(svc_info)
+                        svc_info["characteristics"].append(char_info)
 
-            success(f"Enumerated {len(services_list)} GATT service(s)")
+                    services_list.append(svc_info)
 
-            # Summary of findings
-            auto_services = [s for s in services_list if s.get("automotive_category")]
-            if auto_services:
-                for s in auto_services:
-                    info(f"  Automotive: {s['description']} ({s['automotive_category']})")
+                success(f"Enumerated {len(services_list)} GATT service(s)")
 
-            auth_chars = sum(
-                1 for s in services_list for c in s["characteristics"]
-                if c.get("security_hint") in ("encrypted/authenticated", "access_denied")
-            )
-            if auth_chars:
-                info(f"  {auth_chars} characteristic(s) require authentication")
+                # Summary of findings
+                auto_services = [s for s in services_list if s.get("automotive_category")]
+                if auto_services:
+                    for s in auto_services:
+                        info(f"  Automotive: {s['description']} ({s['automotive_category']})")
 
-            return services_list
+                auth_chars = sum(
+                    1 for s in services_list for c in s["characteristics"]
+                    if c.get("security_hint") in ("encrypted/authenticated", "access_denied")
+                )
+                if auth_chars:
+                    info(f"  {auth_chars} characteristic(s) require authentication")
 
-    except Exception as e:
-        err_str = str(e)
-        if "not found" in err_str.lower() or "not discovered" in err_str.lower():
-            error(f"Device {address} not found. Run a BLE scan first.")
-        elif "timeout" in err_str.lower():
-            error(f"Connection to {address} timed out. Device may be out of range.")
-        else:
-            error(f"GATT enumeration failed: {e}")
-        return []
+                return services_list
+
+        except Exception as e:
+            err_str = str(e).lower()
+            if "not found" in err_str or "not discovered" in err_str:
+                error(f"Device {address} not found. Run a BLE scan first.")
+                return []
+            if attempt < max_retries:
+                wait = (attempt + 1) * 2
+                warning(f"GATT enumeration failed ({e}), retrying in {wait}s...")
+                await asyncio.sleep(wait)
+                continue
+            if "timeout" in err_str:
+                error(f"Connection to {address} timed out after {max_retries + 1} attempts.")
+            else:
+                error(f"GATT enumeration failed: {e}")
+            return []
+
+    return []
 
 
 def _infer_security(properties: list[str]) -> str:
-    """Infer security requirements from characteristic properties."""
-    props = [p.lower() for p in properties]
+    """Infer security requirements from characteristic properties.
+
+    Uses the combination of properties to estimate the security posture:
+    - authenticated-signed-writes → requires signing (MITM protection)
+    - write but no write-without-response → likely requires pairing
+    - notify/indicate without read → may be protected
+    - write-without-response only → typically open
+    """
+    props = {p.lower() for p in properties}
+
     if "authenticated-signed-writes" in props:
         return "signed_write"
-    # If only write-without-response, likely no auth needed
+    if "write" in props and "write-without-response" not in props:
+        return "likely_paired"
     if "write-without-response" in props and "write" not in props:
         return "open"
+    if props == {"read"}:
+        return "read_only"
+    if "notify" in props or "indicate" in props:
+        if "read" not in props:
+            return "notify_only"
     return "unknown"
 
 
 def _decode_value(data: bytes, uuid: str) -> str:
     """Try to decode a characteristic value intelligently based on UUID."""
+    uuid_short = uuid[:8].lower()
+
     # String-type characteristics (Device Info service)
     string_uuids = {
         "00002a00", "00002a24", "00002a25", "00002a26",
         "00002a27", "00002a28", "00002a29",
     }
-    uuid_short = uuid[:8].lower()
     if uuid_short in string_uuids:
         try:
             return data.decode("utf-8").rstrip("\x00")
@@ -216,6 +240,45 @@ def _decode_value(data: bytes, uuid: str) -> str:
         pid = int.from_bytes(data[3:5], "little")
         ver = int.from_bytes(data[5:7], "little")
         return f"Source={src} VID=0x{vid:04x} PID=0x{pid:04x} Ver={ver}"
+
+    # Alert Level (uint8: 0=None, 1=Mild, 2=High) — used by Immediate Alert / Link Loss
+    if uuid_short == "00002a06" and len(data) == 1:
+        levels = {0: "No Alert", 1: "Mild Alert", 2: "High Alert"}
+        return levels.get(data[0], f"Unknown ({data[0]})")
+
+    # Tx Power Level (int8 dBm) — used for proximity/distance estimation
+    if uuid_short == "00002a07" and len(data) == 1:
+        tx = int.from_bytes(data, "little", signed=True)
+        return f"{tx} dBm"
+
+    # Appearance (uint16 enum) — identifies device type (phone, headset, car kit, etc.)
+    if uuid_short == "00002a01" and len(data) >= 2:
+        appearance = int.from_bytes(data[:2], "little")
+        appearances = {
+            0: "Unknown", 64: "Phone", 128: "Computer",
+            192: "Watch", 320: "Display",
+            384: "Remote Control",
+            640: "Media Player",
+            960: "HID", 961: "Keyboard", 962: "Mouse",
+            # Audio categories (BLE Audio / headsets / earbuds)
+            941: "Earbud", 942: "Headset", 943: "Headphones",
+            944: "Speaker", 945: "Soundbar",
+        }
+        return appearances.get(appearance, f"Category 0x{appearance:04x}")
+
+    # Connection Parameters
+    if uuid_short == "00002a04" and len(data) >= 8:
+        min_int = int.from_bytes(data[0:2], "little") * 1.25
+        max_int = int.from_bytes(data[2:4], "little") * 1.25
+        latency = int.from_bytes(data[4:6], "little")
+        timeout = int.from_bytes(data[6:8], "little") * 10
+        return f"Interval={min_int:.1f}-{max_int:.1f}ms Latency={latency} Timeout={timeout}ms"
+
+    # System ID
+    if uuid_short == "00002a23" and len(data) >= 8:
+        mfr = int.from_bytes(data[0:5], "little")
+        oui = int.from_bytes(data[5:8], "little")
+        return f"Manufacturer=0x{mfr:010x} OUI=0x{oui:06x}"
 
     # Default: printable ASCII or hex
     return "".join(chr(b) if 32 <= b <= 126 else "." for b in data)

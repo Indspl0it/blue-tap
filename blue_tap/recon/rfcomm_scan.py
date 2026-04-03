@@ -3,7 +3,7 @@
 import errno
 import socket
 
-from blue_tap.utils.output import info, success, error, warning
+from blue_tap.utils.output import info, success, error, warning, verbose
 
 
 class RFCOMMScanner:
@@ -17,8 +17,17 @@ class RFCOMMScanner:
         self._local_addr: str | None = None
 
     def scan_all_channels(self, timeout_per_ch: float = 2.0,
-                            hci: str = "hci0") -> list[dict]:
+                            hci: str = "hci0",
+                            max_retries: int = 1,
+                            unreachable_threshold: int = 3) -> list[dict]:
         """Try connecting to RFCOMM channels 1-30.
+
+        Args:
+            timeout_per_ch: Timeout per channel probe in seconds.
+            hci: HCI adapter to use.
+            max_retries: Number of retries for timeout/transient failures.
+            unreachable_threshold: Abort after this many consecutive
+                host_unreachable results (0 = never abort).
 
         Returns a list of dicts with keys: channel, status, response_type.
         Status is one of: open, closed, timeout, host_unreachable.
@@ -30,25 +39,54 @@ class RFCOMMScanner:
 
         info(f"Scanning RFCOMM channels 1-{self.MAX_CHANNEL} on {self.address}...")
         results = []
+        consecutive_unreachable = 0
 
         for ch in range(1, self.MAX_CHANNEL + 1):
-            result = self.probe_channel(ch, timeout=timeout_per_ch)
+            result = self._probe_with_retry(ch, timeout_per_ch, max_retries)
             tag = result["status"]
+
             if tag == "open":
                 success(f"  Channel {ch:>2}: OPEN ({result['response_type']})")
+                consecutive_unreachable = 0
             elif tag == "timeout":
                 warning(f"  Channel {ch:>2}: TIMEOUT")
+                consecutive_unreachable = 0
+            elif tag == "closed":
+                consecutive_unreachable = 0
             elif tag == "host_unreachable":
-                error(f"  Channel {ch:>2}: HOST UNREACHABLE — device may be out of range")
-                # No point continuing if device is gone
-                results.append(result)
-                warning("Aborting scan — device unreachable")
-                break
+                consecutive_unreachable += 1
+                error(f"  Channel {ch:>2}: HOST UNREACHABLE")
+                if unreachable_threshold > 0 and consecutive_unreachable >= unreachable_threshold:
+                    results.append(result)
+                    warning(
+                        f"Aborting scan — {unreachable_threshold} consecutive "
+                        f"unreachable probes (device likely out of range)"
+                    )
+                    break
+
             results.append(result)
+
+            # Progress feedback (visible with -v)
+            if ch % 5 == 0:
+                verbose(f"Progress: {ch}/{self.MAX_CHANNEL} channels scanned")
 
         open_count = sum(1 for r in results if r["status"] == "open")
         success(f"Scan complete — {open_count} open channel(s) found")
         return results
+
+    def _probe_with_retry(self, channel: int, timeout: float,
+                           max_retries: int) -> dict:
+        """Probe a channel with retry on transient failures."""
+        last_result = None
+        for attempt in range(max_retries + 1):
+            result = self.probe_channel(channel, timeout)
+            if result["status"] != "timeout":
+                return result
+            last_result = result
+            if attempt < max_retries:
+                import time
+                time.sleep(0.5)
+        return last_result
 
     def probe_channel(self, channel: int, timeout: float = 2.0) -> dict:
         """Connect to a single RFCOMM channel and classify the response.

@@ -5,6 +5,63 @@ All notable changes to Blue-Tap are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] - 2026-04-04
+
+### Added
+
+- **Active BIAS vulnerability probe** in vulnscan with `--active --phone` flags — spoofs as paired phone to test auto-reconnect
+- **Parallel vulnerability analysis** — version/feature checks run in ThreadPoolExecutor (cuts scan time ~60%)
+- **KNOB real brute-force** — XOR decryption against captured ACL data with L2CAP header validation (replaces fake enumeration)
+- **ACL traffic capture** for KNOB — 60-second capture windows via hcidump with user-prompted extensions (up to 5 min)
+- **IVI confidence scoring** in fingerprint — normalized profile matching with 0.0-1.0 confidence float
+- **Codec auto-detection** in HFP — detects CVSD (8kHz) vs mSBC (16kHz) from SLC negotiation
+- **Sample rate auto-detection** in A2DP — queries PulseAudio source info instead of hardcoded 44100
+- **PulseAudio loopback tracking** — module ID stored for reliable cleanup via `stop_loopback`
+- **Session logging** added to RFCOMM scan, L2CAP scan, GATT enum, all HFP/A2DP/AVRCP/spoof/hijack/BIAS CLI commands
+- **Adapter management** in README — `adapter list/info/up/down/reset/set-name/set-class` documented
+- **OPP** in README — `opp push` and `opp vcard` documented under Data Extraction
+- **2,109 unit tests** across 13 new test files (66% line coverage)
+
+### Improved
+
+- **Scanner**: complete device class tables (Computer, Peripheral, Wearable), BLE manufacturer DB expanded to 32 vendors, name resolution retry
+- **SDP**: retry on transient failures, batch UUID search, robust parser for sdptool format variants
+- **GATT**: connection retry with backoff, security inference (likely_paired/read_only/notify_only), expanded value decoders
+- **RFCOMM/L2CAP**: retry logic, consecutive-unreachable threshold, parallel dynamic scan (`--workers`), progress via verbose logging
+- **HCI Capture**: stale PID detection, atomic PID writes, `status()` method
+- **Fingerprint**: profile density signal, structured attack surface via profile ID dict, BrakTooth/SweynTooth/SPP/PBAP vuln hints
+- **Vuln Scanner**: timeout constants consolidated, hcitool retry wrapper, BlueZ version via bluetoothd, OBEX response codes expanded, BrakTooth word-boundary matching with all CVEs reported
+- **Hijack**: phase gate (MAC verification before connect), abort on impersonate failure, connect retry, per-step cleanup isolation
+- **SSP Downgrade**: `lockout_detected` flag, PIN range validation, process cleanup in finally blocks
+- **BIAS**: try/finally for adapter reset, TimeoutExpired handling in subprocess calls
+- **HFP**: SLC BRSF/indicator parsing crash guards, silent_call timing fix, SCO socket leak fix, empty WAV detection
+- **A2DP**: pactl parsing guards, capture validation on timeout, profile switch retry, mic restore safety
+- **AVRCP**: D-Bus disconnect in all CLI finally blocks, volume ramp works both directions, skip flood 10ms minimum, connection retry, get_player_settings warns on error
+- **MAC Spoofing**: CLI checks return values, btmgmt power commands return-code checked, sleep between adapter reset/down/up, atomic MAC save with corruption recovery
+- **Auto Pentest**: skipped phases tracked with reason, proper DoS module imports, timestamped reports, duration validation
+- **Fleet**: `--all-devices` on fleet report, narrowed exception handling, CoD parse warning
+- **CLI**: migrated to rich-click — full descriptions without truncation, commands grouped by pentest phase, `max_width=120`
+- **README**: features reordered by pentest flow (14 sections), workflows rewritten (8 workflows), command reference in collapsible block
+
+### Fixed
+
+- `scan_classic` double error message on adapter failure
+- `clone_device_identity` returned True on partial failure — now returns False
+- `run_full_attack` continued after impersonate failure — now aborts
+- `connect_ivi` subprocess TimeoutExpired unhandled — now caught with pairing cleanup
+- `brute_force_key` returned fabricated "found" key — now performs real decryption
+- `probe_vulnerability` (BIAS) left adapter spoofed on crash — now try/finally
+- `setup_audio` SCO socket leaked on final retry failure — now closed
+- Encryption enforcement socket leaked on setsockopt failure — now closed
+- BrakTooth `break` after first chipset match — now reports all matching families
+- `negotiate_codec` parsing crash on truncated +BCS response — now guarded
+- RFCOMM `connect()` socket leaked on retry — now closed before retry
+- Fleet report missing `log_command` — now logged
+
+### Removed
+
+- **Link Key Harvest** feature (`key_harvest.py`, `keys` CLI group, report narrative)
+
 ## [2.1.1] - 2026-03-31
 
 ### Added
@@ -117,7 +174,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rich terminal UI with styled output, tables, panels
 - Live fuzzing dashboard with keyboard controls
 
-[2.1.1]: https://github.com/Indspl0it/blue-tap/compare/v2.1.0...HEAD
+[2.2.0]: https://github.com/Indspl0it/blue-tap/compare/v2.1.1...HEAD
+[2.1.1]: https://github.com/Indspl0it/blue-tap/compare/v2.1.0...v2.1.1
 [2.1.0]: https://github.com/Indspl0it/blue-tap/compare/v2.0.0...v2.1.0
 [2.0.1]: https://github.com/Indspl0it/blue-tap/compare/v2.0.0...v2.0.1
 [2.0.0]: https://github.com/Indspl0it/blue-tap/releases/tag/v2.0.0

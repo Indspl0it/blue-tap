@@ -1108,18 +1108,6 @@ class ReportGenerator:
             s.append(f'<pre>{_esc(json.dumps(self.attack_results, indent=2, default=str)[:3000])}</pre>')
 
         # Attack type impact narratives
-        if self.attack_results.get("key_harvest"):
-            kh = self.attack_results["key_harvest"]
-            s.append('<h3>Persistent Access: Key Harvesting</h3>')
-            s.append('<p>Bluetooth link keys were successfully harvested from the target. '
-                     'These keys enable persistent access to the vehicle\'s Bluetooth '
-                     'subsystem without requiring re-pairing. An attacker in possession of '
-                     'these keys can reconnect to the target at any time, impersonate '
-                     'previously paired devices, and intercept or inject data on '
-                     'established Bluetooth sessions.</p>')
-            if isinstance(kh, dict):
-                s.append(f'<pre>{_esc(json.dumps(kh, indent=2, default=str)[:2000])}</pre>')
-
         if self.attack_results.get("ssp_downgrade"):
             ssp = self.attack_results["ssp_downgrade"]
             s.append('<h3>Pairing Security Bypass: SSP Downgrade</h3>')

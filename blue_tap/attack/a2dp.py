@@ -23,7 +23,9 @@ import wave
 import datetime
 
 from blue_tap.utils.bt_helpers import run_cmd, check_tool
-from blue_tap.utils.output import info, success, error, warning, console
+from blue_tap.utils.output import info, success, error, warning, verbose, console
+
+_active_loopback_id: str | None = None
 
 
 def mac_to_pa_id(mac: str) -> str:
@@ -69,10 +71,14 @@ def set_profile_hfp(mac: str) -> bool:
     """
     card = bt_card_name(mac)
     info(f"Setting {card} to HFP (headset-head-unit) profile...")
-    result = run_cmd(["pactl", "set-card-profile", card, "headset-head-unit"])
-    if result.returncode == 0:
-        success("Profile set to HFP (headset-head-unit)")
-        return True
+    for attempt in range(2):
+        result = run_cmd(["pactl", "set-card-profile", card, "headset-head-unit"])
+        if result.returncode == 0:
+            success("Profile set to HFP (headset-head-unit)")
+            return True
+        if attempt == 0:
+            warning("Profile switch to HFP failed, retrying in 1s...")
+            time.sleep(1)
     error(f"Failed to set HFP profile: {result.stderr.strip()}")
     return False
 
@@ -84,10 +90,14 @@ def set_profile_a2dp(mac: str) -> bool:
     """
     card = bt_card_name(mac)
     info(f"Setting {card} to A2DP (a2dp-sink) profile...")
-    result = run_cmd(["pactl", "set-card-profile", card, "a2dp-sink"])
-    if result.returncode == 0:
-        success("Profile set to A2DP (a2dp-sink)")
-        return True
+    for attempt in range(2):
+        result = run_cmd(["pactl", "set-card-profile", card, "a2dp-sink"])
+        if result.returncode == 0:
+            success("Profile set to A2DP (a2dp-sink)")
+            return True
+        if attempt == 0:
+            warning("Profile switch to A2DP failed, retrying in 1s...")
+            time.sleep(1)
     error(f"Failed to set A2DP profile: {result.stderr.strip()}")
     return False
 
@@ -190,11 +200,14 @@ def list_bt_audio_sources() -> list[dict]:
         for line in result.stdout.splitlines():
             if "bluez" in line.lower():
                 parts = line.split("\t")
+                if len(parts) < 5:
+                    verbose(f"Skipping malformed pactl line: {line}")
+                    continue
                 sources.append({
-                    "id": parts[0] if len(parts) > 0 else "",
-                    "name": parts[1] if len(parts) > 1 else "",
-                    "driver": parts[2] if len(parts) > 2 else "",
-                    "state": parts[4].strip() if len(parts) > 4 else "",
+                    "id": parts[0],
+                    "name": parts[1],
+                    "driver": parts[2],
+                    "state": parts[4].strip(),
                 })
     return sources
 
@@ -207,10 +220,13 @@ def list_bt_audio_sinks() -> list[dict]:
         for line in result.stdout.splitlines():
             if "bluez" in line.lower():
                 parts = line.split("\t")
+                if len(parts) < 3:
+                    verbose(f"Skipping malformed pactl line: {line}")
+                    continue
                 sinks.append({
-                    "id": parts[0] if len(parts) > 0 else "",
-                    "name": parts[1] if len(parts) > 1 else "",
-                    "driver": parts[2] if len(parts) > 2 else "",
+                    "id": parts[0],
+                    "name": parts[1],
+                    "driver": parts[2],
                 })
     return sinks
 
@@ -311,11 +327,17 @@ def record_car_mic(mac: str, output_file: str = "car_mic.wav",
     except Exception as e:
         error(f"Recording failed: {e}")
         if auto_setup:
-            unmute_laptop_mic()
+            try:
+                unmute_laptop_mic()
+            except Exception:
+                warning("Failed to restore laptop microphone — run 'audio restart' to fix")
         return ""
 
     if auto_setup:
-        unmute_laptop_mic()
+        try:
+            unmute_laptop_mic()
+        except Exception:
+            warning("Failed to restore laptop microphone — run 'audio restart' to fix")
 
     if os.path.exists(output_file):
         size = os.path.getsize(output_file)
@@ -441,6 +463,7 @@ def stream_mic_to_car(mac: str, mic_source: str | None = None) -> bool:
     set_profile_a2dp(mac)
     time.sleep(1)
 
+    global _active_loopback_id
     info(f"Routing {mic_source} -> {sink}")
     info("Use 'blue-tap a2dp loopback-stop' to disconnect")
     result = run_cmd([
@@ -448,7 +471,10 @@ def stream_mic_to_car(mac: str, mic_source: str | None = None) -> bool:
         f"source={mic_source}", f"sink={sink}",
     ])
     if result.returncode == 0:
-        success(f"Loopback active (module id: {result.stdout.strip()})")
+        module_id = result.stdout.strip()
+        if module_id.isdigit():
+            _active_loopback_id = module_id
+        success(f"Loopback active (module id: {module_id})")
         return True
     error(f"Loopback failed: {result.stderr.strip()}")
     return False
@@ -461,7 +487,17 @@ def stop_loopback() -> bool:
     index. This works on both PulseAudio and PipeWire (unload-by-name
     only works on PulseAudio).
     """
-    # First try by name (works on PulseAudio)
+    global _active_loopback_id
+    # Try stored module ID first (most precise)
+    if _active_loopback_id is not None:
+        result = run_cmd(["pactl", "unload-module", _active_loopback_id])
+        if result.returncode == 0:
+            _active_loopback_id = None
+            success("Loopback module unloaded")
+            return True
+        _active_loopback_id = None
+
+    # Try by name (works on PulseAudio)
     result = run_cmd(["pactl", "unload-module", "module-loopback"])
     if result.returncode == 0:
         success("All loopback modules unloaded")
@@ -493,6 +529,28 @@ def stop_loopback() -> bool:
 # ============================================================================
 # A2DP Capture (Media Stream from IVI)
 # ============================================================================
+
+def _detect_source_rate(source_name: str) -> int:
+    """Detect sample rate of a PulseAudio source."""
+    result = run_cmd(["pactl", "list", "sources"])
+    if result.returncode != 0:
+        return 44100  # safe default
+
+    in_target = False
+    for line in result.stdout.splitlines():
+        if source_name in line:
+            in_target = True
+        elif in_target and "Sample Specification:" in line:
+            # Format: "Sample Specification: s16le 2ch 44100Hz"
+            rate_match = re.search(r"(\d+)Hz", line)
+            if rate_match:
+                return int(rate_match.group(1))
+            break
+        elif in_target and line.strip() == "":
+            break  # Left the target source block
+
+    return 44100  # default
+
 
 def inject_tts(mac: str, text: str, lang: str = "en",
                output_file: str = "/tmp/blue_tap_tts.wav") -> bool:
@@ -561,10 +619,13 @@ def record_navigation_audio(mac: str, output_file: str = "nav_audio.wav",
         error("parecord not found. Install: apt install pulseaudio-utils")
         return ""
 
+    rate = _detect_source_rate(source)
+    info(f"Detected source sample rate: {rate}Hz")
+
     cmd = [
         "parecord",
         f"--device={source}",
-        "--rate=44100",
+        f"--rate={rate}",
         "--channels=2",
         "--format=s16le",
         "--file-format=wav",
@@ -616,12 +677,13 @@ def capture_a2dp(mac: str | None = None, output_file: str = "a2dp_capture.wav",
                 info(f"Available sources:\n{result.stdout}")
             return ""
 
-    info(f"Capturing A2DP for {duration}s: {source} -> {output_file}")
+    rate = _detect_source_rate(source)
+    info(f"Capturing A2DP for {duration}s: {source} -> {output_file} ({rate}Hz)")
 
     cmd = [
         "parecord",
         f"--device={source}",
-        "--rate=44100",
+        f"--rate={rate}",
         "--channels=2",
         "--format=s16le",
         "--file-format=wav",
@@ -637,8 +699,19 @@ def capture_a2dp(mac: str | None = None, output_file: str = "a2dp_capture.wav",
         success(f"Captured A2DP audio -> {output_file}")
         return output_file
     except subprocess.TimeoutExpired:
-        proc.kill()
-        return output_file
+        try:
+            proc.terminate()
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=3)
+        # Validate output has actual content
+        if os.path.exists(output_file) and os.path.getsize(output_file) > 44:
+            # 44 bytes = WAV header only, no audio data
+            return output_file
+        else:
+            warning(f"Capture file is empty or missing: {output_file}")
+            return ""
     except Exception as e:
         error(f"A2DP capture failed: {e}")
         return ""

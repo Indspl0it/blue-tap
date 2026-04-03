@@ -121,6 +121,13 @@ class AutoPentest:
             skip_dos: Skip the DoS testing phase.
             skip_exploit: Skip the exploitation/hijack phase.
         """
+        if fuzz_duration <= 0:
+            fuzz_duration = 3600  # fallback to default
+            warning("Invalid fuzz duration — using default 1 hour")
+        if scan_duration <= 0:
+            scan_duration = 30  # fallback to default
+            warning("Invalid scan duration — using default 30 seconds")
+
         os.makedirs(output_dir, exist_ok=True)
         results = {"target": self.ivi_address, "status": "started", "phases": {}}
         start_time = time.time()
@@ -271,8 +278,10 @@ class AutoPentest:
 
             _phase("exploitation", results, _exploit)
         else:
+            reason = "no phone discovered" if not phone_addr else "user requested"
             info("Phase 6: Exploitation skipped" +
                  (" (no phone discovered)" if not phone_addr else " (--skip-exploit)"))
+            results["phases"]["exploitation"] = {"status": "skipped", "reason": reason, "_elapsed_seconds": 0}
 
         # ── Phase 7: Protocol Fuzzing ───────────────────────────────
         if not skip_fuzz:
@@ -309,6 +318,7 @@ class AutoPentest:
             _phase("fuzzing", results, _fuzz)
         else:
             info("Phase 7: Protocol fuzzing skipped (--skip-fuzz)")
+            results["phases"]["fuzzing"] = {"status": "skipped", "_elapsed_seconds": 0}
 
         # ── Phase 8: DoS Testing ────────────────────────────────────
         if not skip_dos:
@@ -317,17 +327,24 @@ class AutoPentest:
             def _dos():
                 dos_results = []
 
+                from blue_tap.attack.protocol_dos import L2CAPDoS, SDPDoS, RFCOMMDoS, HFPDoS
+
+                l2cap = L2CAPDoS(self.ivi_address)
+                sdp = SDPDoS(self.ivi_address)
+                rfcomm = RFCOMMDoS(self.ivi_address)
+                hfp = HFPDoS(self.ivi_address)
+
                 tests = [
                     ("L2CAP connection storm", "l2cap_connection_storm",
-                     lambda: __import__("blue_tap.attack.protocol_dos", fromlist=["L2CAPDoS"]).L2CAPDoS(self.ivi_address).config_option_bomb(rounds=50)),
+                     lambda: l2cap.config_option_bomb(rounds=50)),
                     ("L2CAP CID exhaustion", "cid_exhaustion",
-                     lambda: __import__("blue_tap.attack.protocol_dos", fromlist=["L2CAPDoS"]).L2CAPDoS(self.ivi_address).cid_exhaustion(count=100)),
+                     lambda: l2cap.cid_exhaustion(count=100)),
                     ("SDP continuation exhaustion", "sdp_continuation",
-                     lambda: __import__("blue_tap.attack.protocol_dos", fromlist=["SDPDoS"]).SDPDoS(self.ivi_address).continuation_exhaustion(connections=5)),
+                     lambda: sdp.continuation_exhaustion(connections=5)),
                     ("RFCOMM SABM flood", "rfcomm_sabm",
-                     lambda: __import__("blue_tap.attack.protocol_dos", fromlist=["RFCOMMDoS"]).RFCOMMDoS(self.ivi_address).sabm_flood(count=30)),
+                     lambda: rfcomm.sabm_flood(count=30)),
                     ("HFP AT command flood", "hfp_at_flood",
-                     lambda: __import__("blue_tap.attack.protocol_dos", fromlist=["HFPDoS"]).HFPDoS(self.ivi_address).at_command_flood(count=1000)),
+                     lambda: hfp.at_command_flood(count=1000)),
                 ]
 
                 unresponsive = 0
@@ -358,6 +375,7 @@ class AutoPentest:
             _phase("dos_testing", results, _dos)
         else:
             info("Phase 8: DoS testing skipped (--skip-dos)")
+            results["phases"]["dos_testing"] = {"status": "skipped", "_elapsed_seconds": 0}
 
         # ── Phase 9: Report Generation ──────────────────────────────
         section("Phase 9: Report Generation", style="bt.green")
@@ -401,12 +419,25 @@ class AutoPentest:
                 ],
             })
 
-            html_path = os.path.join(output_dir, "report.html")
-            json_path = os.path.join(output_dir, "report.json")
+            from datetime import datetime
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            html_path = os.path.join(output_dir, f"report_{ts}.html")
+            json_path = os.path.join(output_dir, f"report_{ts}.json")
             report.generate_html(html_path)
             report.generate_json(json_path)
             info(f"  HTML: {html_path}")
             info(f"  JSON: {json_path}")
+
+            # Also create a "latest" copy for easy access
+            import shutil
+            latest_html = os.path.join(output_dir, "report.html")
+            latest_json = os.path.join(output_dir, "report.json")
+            try:
+                shutil.copy2(html_path, latest_html)
+                shutil.copy2(json_path, latest_json)
+            except OSError:
+                pass
+
             return {"status": "success", "html": html_path, "json": json_path}
 
         _phase("report", results, _report)
@@ -416,9 +447,11 @@ class AutoPentest:
         results["total_time_seconds"] = round(total_time, 1)
 
         passed = sum(1 for p in results["phases"].values()
-                     if isinstance(p, dict) and p.get("status") != "failed")
+                     if isinstance(p, dict) and p.get("status") == "success")
         failed = sum(1 for p in results["phases"].values()
                      if isinstance(p, dict) and p.get("status") == "failed")
+        skipped = sum(1 for p in results["phases"].values()
+                      if isinstance(p, dict) and p.get("status") == "skipped")
         total = len(results["phases"])
 
         if failed == 0:
@@ -432,8 +465,9 @@ class AutoPentest:
             color = "red"
 
         console.print()
+        skip_msg = f", {skipped} skipped" if skipped else ""
         console.rule(f"[bold {color}]Pentest {results['status'].title()} "
-                     f"({passed}/{total} phases, {total_time/60:.1f} minutes)")
+                     f"({passed}/{total} phases{skip_msg}, {total_time/60:.1f} minutes)")
 
         return results
 

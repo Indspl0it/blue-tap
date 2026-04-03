@@ -78,6 +78,8 @@ class DeviceClassifier:
             try:
                 cod = int(raw_class, 16) if isinstance(raw_class, str) else int(raw_class)
             except (ValueError, TypeError):
+                from blue_tap.utils.output import verbose
+                verbose(f"Could not parse device class: {raw_class}")
                 cod = 0
 
             major = cod & 0x1F00
@@ -248,9 +250,13 @@ class FleetAssessment:
                 success(f"  {addr}: {device_result['risk_rating']} "
                         f"({len(findings)} finding(s))")
 
-            except Exception as exc:
+            except (OSError, TimeoutError, ConnectionError, ValueError) as exc:
                 device_result["error"] = str(exc)
                 error(f"  {addr}: assessment failed — {exc}")
+            except Exception as exc:
+                device_result["error"] = f"unexpected: {exc}"
+                error(f"  {addr}: unexpected error during assessment — {exc}")
+                warning(f"  This may indicate a bug — please report with: blue-tap --version")
 
             results.append(device_result)
 

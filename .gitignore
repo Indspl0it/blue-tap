@@ -1,6 +1,8 @@
 __pycache__/
 *.pyc
 *.pyo
+*.pptx
+~$*
 *.egg-info/
 dist/
 build/
@@ -9,8 +11,7 @@ build/
 *.pdf
 *.log
 *.pid
-.claude/cache/
-.claude/tsc-cache/
+.claude/
 target/received/*
 !target/received/.gitkeep
 target/.ivi_profile

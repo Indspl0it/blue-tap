@@ -6,24 +6,41 @@ from blue_tap.utils.bt_helpers import run_cmd, PROFILE_UUIDS
 from blue_tap.utils.output import info, success, error, warning
 
 
-def browse_services(address: str, hci: str = "hci0") -> list[dict]:
+def browse_services(address: str, hci: str = "hci0",
+                    retries: int = 2) -> list[dict]:
     """Browse all SDP services on a remote device.
 
     This reveals which Bluetooth profiles the IVI/phone supports:
     PBAP, MAP, HFP, A2DP, AVRCP, OPP, SPP, etc.
+
+    Retries on transient failures (connection reset, timeout).
     """
     from blue_tap.utils.bt_helpers import ensure_adapter_ready
     if not ensure_adapter_ready(hci):
         return []
 
     info(f"Browsing SDP services on {address}...")
-    result = run_cmd(["sdptool", "browse", address], timeout=30)
 
-    if result.returncode != 0:
+    for attempt in range(retries + 1):
+        result = run_cmd(["sdptool", "browse", address], timeout=30)
+
+        if result.returncode == 0:
+            return parse_sdp_output(result.stdout)
+
+        stderr = result.stderr.strip().lower()
+        # Transient failures worth retrying
+        if any(hint in stderr for hint in ("reset", "timeout", "resource temporarily")):
+            if attempt < retries:
+                import time
+                warning(f"SDP browse attempt {attempt + 1} failed, retrying...")
+                time.sleep(2)
+                continue
+
         error(f"SDP browse failed: {result.stderr.strip()}")
         return []
 
-    return parse_sdp_output(result.stdout)
+    error(f"SDP browse failed after {retries + 1} attempts")
+    return []
 
 
 def parse_sdp_output(output: str) -> list[dict]:
@@ -131,6 +148,11 @@ def parse_sdp_output(output: str) -> list[dict]:
         elif "GOEP" in line and current:
             current.setdefault("protocols", []).append("GOEP")
 
+        # Handle bare attribute lines with hex values (sdptool format variance)
+        elif line.startswith("Attribute") and current:
+            # e.g., "Attribute (0x0311) - uint16: 0x0001"
+            pass  # preserve current service, don't break state
+
     if current:
         services.append(current)
 
@@ -185,6 +207,34 @@ def search_service(address: str, uuid: str) -> list[dict]:
     if result.returncode != 0:
         return []
     return parse_sdp_output(result.stdout)
+
+
+def search_services_batch(address: str, uuids: list[str]) -> dict[str, list[dict]]:
+    """Search for multiple service UUIDs in a single pass.
+
+    More efficient than calling search_service() repeatedly when you need
+    to check several profiles.
+
+    Returns:
+        Dict mapping UUID to list of matching service records.
+    """
+    results = {}
+    # First try a full browse (1 connection, all services)
+    all_services = browse_services(address)
+    if all_services:
+        for uuid in uuids:
+            uuid_lower = uuid.lower()
+            matched = [
+                s for s in all_services
+                if uuid_lower in " ".join(s.get("class_ids", [])).lower()
+                or uuid_lower in s.get("profile", "").lower()
+            ]
+            results[uuid] = matched
+    else:
+        # Fallback: individual searches
+        for uuid in uuids:
+            results[uuid] = search_service(address, uuid)
+    return results
 
 
 def check_ssp(address: str, hci: str = "hci0") -> bool | None:

@@ -4,7 +4,7 @@ import asyncio
 import re
 
 from blue_tap.utils.bt_helpers import run_cmd
-from blue_tap.utils.output import info, success, error
+from blue_tap.utils.output import info, success, error, verbose
 
 
 # ============================================================================
@@ -53,6 +53,41 @@ AV_MINOR_CLASSES = {
     0x0F: "Video Display + Loudspeaker",
 }
 
+# Minor classes for Computer (major=0x01)
+COMPUTER_MINOR_CLASSES = {
+    0x00: "Uncategorized",
+    0x01: "Desktop Workstation",
+    0x02: "Server-class Computer",
+    0x03: "Laptop",
+    0x04: "Handheld PC/PDA",
+    0x05: "Palm-size PC/PDA",
+    0x06: "Wearable Computer",
+    0x07: "Tablet",
+}
+
+# Minor classes for Peripheral (major=0x05)
+PERIPHERAL_MINOR_CLASSES = {
+    0x00: "Uncategorized",
+    0x01: "Joystick",
+    0x02: "Gamepad",
+    0x03: "Remote Control",
+    0x04: "Sensing Device",
+    0x05: "Digitizer Tablet",
+    0x06: "Card Reader",
+    0x07: "Digital Pen",
+    0x08: "Handheld Scanner",
+    0x09: "Handheld Gestural Input",
+}
+
+# Minor classes for Wearable (major=0x07)
+WEARABLE_MINOR_CLASSES = {
+    0x01: "Wristwatch",
+    0x02: "Pager",
+    0x03: "Jacket",
+    0x04: "Helmet",
+    0x05: "Glasses",
+}
+
 # Major Service Classes (bits 23-13 of CoD)
 SERVICE_CLASS_BITS = {
     13: "Limited Discoverable",
@@ -90,10 +125,16 @@ def parse_device_class(cod_str: str) -> dict:
 
     # Get minor class based on major
     minor = "Unknown"
-    if major_num == 0x02:
+    if major_num == 0x01:
+        minor = COMPUTER_MINOR_CLASSES.get(minor_num, f"Unknown (0x{minor_num:02x})")
+    elif major_num == 0x02:
         minor = PHONE_MINOR_CLASSES.get(minor_num, f"Unknown (0x{minor_num:02x})")
     elif major_num == 0x04:
         minor = AV_MINOR_CLASSES.get(minor_num, f"Unknown (0x{minor_num:02x})")
+    elif major_num == 0x05:
+        minor = PERIPHERAL_MINOR_CLASSES.get(minor_num, f"Unknown (0x{minor_num:02x})")
+    elif major_num == 0x07:
+        minor = WEARABLE_MINOR_CLASSES.get(minor_num, f"Unknown (0x{minor_num:02x})")
 
     # Parse service class bits
     services = []
@@ -205,8 +246,6 @@ def scan_classic(duration: int = 10, hci: str = "hci0") -> list[dict]:
         error(f"Classic scan failed: {scan_result.stderr.strip()}")
         return []
 
-    # Try to get RSSI for discovered devices via hcitool rssi (requires connection)
-    # This is optional — skip if devices aren't connected
     devices = list(device_map.values())
 
     # Resolve names for devices found only via inquiry
@@ -214,7 +253,10 @@ def scan_classic(duration: int = 10, hci: str = "hci0") -> list[dict]:
         if not dev.get("name") or dev["name"] == "":
             dev["name"] = resolve_name(dev["address"], hci)
 
-    success(f"Found {len(devices)} Classic device(s)")
+    if not devices:
+        info("Scan completed — no devices in range")
+    else:
+        success(f"Found {len(devices)} Classic device(s)")
     return devices
 
 
@@ -307,6 +349,22 @@ _BLE_MANUFACTURERS = {
     0x038F: "Harman International",
     0x0087: "Denso",
     0x02E5: "Bosch",
+    0x00D2: "Dialog Semiconductor",
+    0x0171: "Amazon",
+    0x022B: "Fitbit",
+    0x0499: "Ruuvi",
+    0x02FF: "Bose",
+    0x0302: "JBL (Harman)",
+    0x0094: "Realtek",
+    0x00CD: "Microchip (Atmel)",
+    0x0047: "Intel",
+    0x0038: "Renesas",
+    0x004F: "Continental Automotive",
+    0x0080: "Mitsumi",
+    0x02D5: "Peloton",
+    0x03DA: "Sonos",
+    0x0226: "Dyson",
+    0x02AC: "Tesla",
 }
 
 
@@ -325,7 +383,12 @@ def scan_ble_sync(duration: int = 10, passive: bool = False, adapter: str = "") 
 # ============================================================================
 
 def scan_all(duration: int = 10, hci: str = "hci0") -> list[dict]:
-    """Scan both Classic and BLE, merge and deduplicate results."""
+    """Scan both Classic and BLE, merge and deduplicate results.
+
+    Classic scan runs first (uses hcitool), then BLE scan (uses bleak).
+    Both are needed sequentially because bleak requires the main thread
+    event loop on Linux (D-Bus).
+    """
     classic = scan_classic(duration, hci)
     ble = scan_ble_sync(duration, adapter=hci)
 
@@ -360,9 +423,13 @@ def scan_all(duration: int = 10, hci: str = "hci0") -> list[dict]:
 # Name Resolution
 # ============================================================================
 
-def resolve_name(address: str, hci: str = "hci0") -> str:
-    """Resolve the friendly name of a BT device."""
-    result = run_cmd(["hcitool", "-i", hci, "name", address], timeout=10)
-    if result.returncode == 0 and result.stdout.strip():
-        return result.stdout.strip()
+def resolve_name(address: str, hci: str = "hci0", retries: int = 2) -> str:
+    """Resolve the friendly name of a BT device with retry."""
+    for attempt in range(retries + 1):
+        result = run_cmd(["hcitool", "-i", hci, "name", address], timeout=10)
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+        if attempt < retries:
+            import time
+            time.sleep(1)
     return "Unknown"

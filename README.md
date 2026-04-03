@@ -17,19 +17,17 @@
   - [Discovery and Scanning](#1-discovery-and-scanning)
   - [Reconnaissance](#2-reconnaissance)
   - [Vulnerability Assessment](#3-vulnerability-assessment)
-  - [Data Extraction](#4-data-extraction-pbap--map--at)
-  - [Connection Hijacking](#5-connection-hijacking)
-  - [Audio Interception](#6-audio-interception-hfp--a2dp)
-  - [AVRCP Media Control](#7-avrcp-media-control)
-  - [Protocol Fuzzing](#8-protocol-fuzzing)
-  - [Denial of Service](#9-denial-of-service)
-  - [MAC Spoofing](#10-mac-address-spoofing)
-  - [Automation and Orchestration](#11-automation-and-orchestration)
-  - [Link Key Harvest](#12-link-key-harvest-and-persistent-access)
-  - [SSP Downgrade](#13-ssp-downgrade-attack)
-  - [KNOB Attack](#14-knob-attack-cve-2019-9506)
-  - [Fleet-Wide Assessment](#15-fleet-wide-assessment)
-  - [Session Management and Reporting](#16-session-management-and-reporting)
+  - [Connection Hijacking and BIAS](#4-connection-hijacking-and-bias)
+  - [KNOB Attack](#5-knob-attack-cve-2019-9506)
+  - [SSP Downgrade](#6-ssp-downgrade-attack)
+  - [Data Extraction (PBAP / MAP / AT / OPP)](#7-data-extraction-pbap--map--at--opp)
+  - [Audio Interception (HFP / A2DP)](#8-audio-interception-hfp--a2dp)
+  - [AVRCP Media Control](#9-avrcp-media-control)
+  - [Protocol Fuzzing](#10-protocol-fuzzing)
+  - [Denial of Service](#11-denial-of-service)
+  - [MAC Spoofing and Adapter Management](#12-mac-spoofing-and-adapter-management)
+  - [Session Management and Reporting](#13-session-management-and-reporting)
+  - [Automation and Orchestration](#14-automation-and-orchestration)
 - [Quick Start](#quick-start)
 - [Usage Guide](#usage-guide)
 - [Workflows](#workflows)
@@ -52,7 +50,6 @@ Blue-Tap is a Bluetooth/BLE penetration testing toolkit built for automotive IVI
 - **Assesses vulnerabilities** with 20+ evidence-based checks covering known CVEs (KNOB, BLURtooth, BIAS, BlueBorne, PerfektBlue, BrakTooth, BLUFFS, Invalid Curve, SweynTooth) and configuration weaknesses. Each finding includes severity, confidence, CVE reference, evidence, and remediation.
 - **Extracts data** via PBAP (phonebook, call logs, favorites), MAP (SMS/MMS/email messages), AT commands (IMEI, IMSI, phonebook, SMS), and OBEX Object Push — all without user awareness on the IVI.
 - **Hijacks connections** by impersonating a paired phone (MAC + name + device class cloning) to access the IVI without re-pairing. Supports BIAS (CVE-2020-10135) role-switch authentication bypass for devices that validate link keys.
-- **Harvests link keys** from captured pairing exchanges and stores them for persistent reconnection — proving that a single intercepted pairing gives indefinite access to the vehicle.
 - **Downgrades pairing security** by forcing SSP to legacy PIN mode and brute-forcing the PIN (0000-9999), or executing the KNOB attack (CVE-2019-9506) to negotiate minimum encryption key entropy.
 - **Intercepts audio** through HFP (call audio capture, DTMF injection, call control — dial, answer, hangup, hold) and A2DP (media stream capture, microphone eavesdropping, audio playback injection).
 - **Controls media** via AVRCP — play, pause, skip, volume manipulation, metadata surveillance. Skip flooding and volume ramp for DoS demonstration.
@@ -282,7 +279,6 @@ cli.py ────────────────────────�
   │   ├── protocol_dos.py  ← L2CAP/SDP/RFCOMM/OBEX/HFP protocol-level DoS
   │   ├── opp.py           ← socket(RFCOMM) + OBEX Push
   │   ├── pin_brute.py     ← D-Bus pairing agent
-  │   ├── key_harvest.py   ← HCI capture + link key extraction + key DB
   │   ├── ssp_downgrade.py ← IO cap manipulation + PIN brute force
   │   ├── knob.py          ← CVE-2019-9506 key negotiation + brute force
   │   └── fleet.py         ← device classification + fleet-wide vuln scan
@@ -318,41 +314,44 @@ cli.py ────────────────────────�
 
 ### 1. Discovery and Scanning
 
-Passive and active discovery of Bluetooth Classic and BLE devices in range.
+Passive and active discovery of Bluetooth Classic and BLE devices in range with full device class decoding and manufacturer identification.
 
 | Command | Description |
 |---------|-------------|
-| `blue-tap scan classic` | Bluetooth Classic inquiry scan — discovers BR/EDR devices, shows name, MAC, device class, RSSI |
+| `blue-tap scan classic` | Bluetooth Classic inquiry scan — discovers BR/EDR devices, shows name, MAC, device class |
 | `blue-tap scan ble` | BLE scan using bleak — discovers LE advertisers, shows name, MAC, services, manufacturer data |
 | `blue-tap scan ble --passive` | Passive BLE scan (no SCAN_REQ sent) — stealthier, only collects advertisement data |
-| `blue-tap scan all` | Simultaneous Classic + BLE scan |
+| `blue-tap scan all` | Combined Classic + BLE scan with automatic dual-mode device merging |
 
 **Key capabilities:**
-- Device class decoding (identifies Car Audio, Hands-Free, Phone, Computer, etc.)
-- RSSI signal strength display for proximity estimation
+- Full device class decoding: Computer (Desktop/Laptop/Tablet), Phone (Cellular/Smartphone), Audio/Video (Car Audio, Headset, Headphones, Speaker), Peripheral (Remote/Gamepad), Wearable (Wristwatch/Glasses)
+- BLE manufacturer identification (30+ vendors: Apple, Samsung, Tesla, Bose, Harman, Continental, etc.)
+- RSSI signal strength with distance estimation (log-distance path loss model)
+- Name resolution with retry logic for flaky Classic BT connections
 - JSON output (`-o results.json`) for scripted pipelines
 - Configurable scan duration (`-d 30` for 30 seconds)
 - Adapter selection (`-i hci1`) for multi-adapter setups
+- All scan results logged to session for report generation
 
 ---
 
 ### 2. Reconnaissance
 
-Deep service enumeration, device fingerprinting, and radio-level capture.
+Deep service enumeration, device fingerprinting, and radio-level capture. All recon commands support session logging and JSON output.
 
 | Command | Description |
 |---------|-------------|
-| `blue-tap recon sdp <MAC>` | Browse all SDP service records — profiles, channels, UUIDs, provider strings |
-| `blue-tap recon fingerprint <MAC>` | Device fingerprinting — BT version, LMP features, chipset, manufacturer, capabilities |
-| `blue-tap recon rfcomm-scan <MAC>` | Brute-force scan RFCOMM channels 1-30 for open/hidden services |
-| `blue-tap recon l2cap-scan <MAC>` | Scan well-known L2CAP PSMs for open services; `--dynamic` adds dynamic range |
-| `blue-tap recon gatt <MAC>` | BLE GATT service/characteristic enumeration with read/write/notify properties |
+| `blue-tap recon sdp <MAC>` | Browse all SDP service records — profiles, channels, UUIDs, provider strings. Retries on transient failures. |
+| `blue-tap recon fingerprint <MAC>` | Device fingerprinting — BT version, LMP features, chipset, IVI confidence scoring, normalized attack surface mapping, vulnerability hints (KNOB, BIAS, BrakTooth, SweynTooth, BlueBorne) |
+| `blue-tap recon rfcomm-scan <MAC>` | Scan RFCOMM channels 1-30 with retry logic (`--retries N`), consecutive-unreachable abort threshold, AT/OBEX/raw response classification |
+| `blue-tap recon l2cap-scan <MAC>` | Scan well-known L2CAP PSMs; `--dynamic` adds parallel scanning of dynamic range with configurable workers (`--workers 10`) |
+| `blue-tap recon gatt <MAC>` | BLE GATT enumeration with connection retry, security posture inference (open/paired/signed/encrypted), automotive service detection, value decoding (Battery, PnP ID, Appearance, Tx Power, Connection Params) |
 | `blue-tap recon ssp <MAC>` | Check if device supports Secure Simple Pairing |
 | `blue-tap recon pairing-mode <MAC>` | Detect pairing mode (Legacy PIN vs SSP) and IO capabilities |
-| `blue-tap recon capture-start` | Start HCI traffic capture via btmon (saves btsnoop format) |
+| `blue-tap recon capture-start` | Start HCI traffic capture via btmon (stale PID detection, atomic state file) |
 | `blue-tap recon capture-stop` | Stop btmon capture |
 
-**Advanced radio reconnaissance (requires specialized hardware):**
+**Reconnaissance (requires specialized hardware):**
 
 | Command | Hardware | Description |
 |---------|----------|-------------|
@@ -369,12 +368,16 @@ Deep service enumeration, device fingerprinting, and radio-level capture.
 
 ### 3. Vulnerability Assessment
 
-Evidence-based vulnerability scanner with 20+ checks covering known CVEs, protocol weaknesses, and configuration issues. Each finding includes severity, CVE reference, impact description, remediation guidance, status (confirmed/potential/unverified), and confidence rating.
+Vulnerability scanner with 20+ checks covering known CVEs, protocol weaknesses, and configuration issues. Each finding includes severity, CVE reference, impact description, remediation guidance, status (confirmed/potential/unverified), and confidence rating. Version/feature checks run in parallel for speed; active connection checks run sequentially. All checks include automatic retry on transient failures.
 
 ```
-blue-tap vulnscan <MAC>
-blue-tap vulnscan <MAC> -o findings.json
+blue-tap vulnscan <MAC>                                # Standard scan (passive + heuristic checks)
+blue-tap vulnscan <MAC> --active                       # Include invasive checks (BIAS probe, PIN lockout)
+blue-tap vulnscan <MAC> --active --phone <PHONE_MAC>   # BIAS probe with known paired phone
+blue-tap vulnscan <MAC> -o findings.json               # Export findings to JSON
 ```
+
+**`--active` mode:** Enables invasive checks that modify adapter state or send pairing attempts. The BIAS auto-reconnect probe requires the paired phone's MAC — provide via `--phone` or select interactively from a device scan. Without `--active`, BIAS and PIN lockout checks are skipped (noted in output).
 
 **Vulnerability checks performed:**
 
@@ -387,28 +390,88 @@ blue-tap vulnscan <MAC> -o findings.json
 | BLUFFS | CVE-2023-24023 | Session key derivation downgrade (BT 4.2-5.4) |
 | PIN Pairing Bypass | CVE-2020-26555 | BR/EDR impersonation via PIN response spoofing |
 | Invalid Curve | CVE-2018-5383 | ECDH public key validation skip in SSP/SC (BT 4.2-5.0) |
-| BIAS | CVE-2020-10135 | Authentication bypass via role-switch during reconnection |
-| BlueBorne | CVE-2017-1000251 | L2CAP configuration response buffer overflow (kernel < 4.13.1) |
+| BIAS | CVE-2020-10135 | Authentication bypass via role-switch — passive version check + active auto-reconnect probe (`--active`) |
+| BlueBorne | CVE-2017-1000251 | BlueZ version check via `bluetoothd --version` (primary) or SDP string (fallback) |
+| BrakTooth | 25 CVEs | Chipset-specific LMP/baseband vulns — word-boundary matching against all known vulnerable chipsets (ESP32, Cypress, CSR, Intel, Qualcomm), reports all applicable CVEs |
 | Pairing Method | — | Legacy PIN vs SSP Just Works vs MITM-protected |
 | Writable GATT | — | BLE characteristics writable without authentication (OTA update, diagnostics) |
-| BrakTooth Chipset | — | Chipset identification for BrakTooth family vulnerabilities |
 | EATT Support | — | Enhanced ATT channel support and L2CAP CoC configuration |
 | Hidden RFCOMM | — | RFCOMM channels open but not advertised in SDP |
-| Encryption Enforcement | — | Services accessible without mandatory encryption |
-| PIN Lockout | — | Absence of rate limiting on pairing attempts |
+| Encryption Enforcement | — | Services accessible without mandatory encryption (OBEX response codes: 0xA0 success, 0xC1/0xC3 unauthorized, 0xC0/0xD0 error) |
+| PIN Lockout | — | Absence of rate limiting on pairing attempts (`--active` only — sends 2 test attempts) |
 | Device Class | — | Identifies Car Audio / Hands-Free device class (IVI indicator) |
 | LMP Features | — | Feature flag analysis (encryption, SC, LE, dual-mode) |
-| Authorization Model | — | Service authorization policy (trust-on-first-use, per-service, etc.) |
-| Automotive Diagnostics | — | OBD/UDS/diagnostic service exposure via Bluetooth |
+| Authorization Model | — | OBEX authorization probing for PBAP/MAP with full response code handling |
+| Automotive Diagnostics | — | OBD/UDS/diagnostic/CAN bus service exposure via Bluetooth SPP/DUN |
 
-**Finding classification:**
-- **Status:** `confirmed` (directly observed), `potential` (version/heuristic based), `unverified` (requires active exploit)
-- **Confidence:** `high`, `medium`, `low`
-- **Severity:** `CRITICAL`, `HIGH`, `MEDIUM`, `LOW`, `INFO`
 
 ---
 
-### 4. Data Extraction (PBAP / MAP / AT)
+### 4. Connection Hijacking and BIAS
+
+Full IVI takeover by impersonating the target's phone. Includes connection retry logic, per-phase rollback on failure, and adapter state verification before each phase transition.
+
+```
+blue-tap hijack <IVI_MAC> <PHONE_MAC>
+blue-tap hijack <IVI_MAC> <PHONE_MAC> --phone-name "John's iPhone"
+blue-tap hijack <IVI_MAC> <PHONE_MAC> --bias          # Use BIAS CVE-2020-10135
+blue-tap hijack <IVI_MAC> <PHONE_MAC> --recon-only     # Recon phase only
+blue-tap hijack <IVI_MAC> <PHONE_MAC> --skip-audio     # Skip HFP setup
+```
+
+**Attack phases:**
+1. **Recon** — Fingerprint IVI, enumerate SDP services, identify PBAP/MAP/HFP/AVRCP channels
+2. **Impersonate** — Spoof MAC address, adapter name, and device class to match the phone. Fails fast if identity clone is incomplete (MAC spoofed but name/class failed — IVI would reject)
+3. **Phase Gate** — Verifies adapter MAC matches target phone before proceeding. Warns if impersonation may not have taken effect
+4. **Connect** — Connect to IVI via bluetoothctl with automatic retry on timeout. Catches `TimeoutExpired` and cleans up partial pairing state
+5. **PBAP/MAP Extract** — Download phonebook, call history, and SMS/MMS messages
+6. **Audio Setup** — Establish HFP Service Level Connection for call interception
+
+
+**BIAS mode (`--bias`):** When the IVI validates link keys and rejects simple MAC spoofing, the BIAS attack (CVE-2020-10135) exploits a role-switch during reconnection to bypass authentication entirely.
+
+---
+
+### 5. KNOB Attack (CVE-2019-9506)
+
+Negotiate minimum encryption key entropy, then brute force the reduced key space. Brute-force performs actual XOR decryption against captured ACL data with L2CAP header validation — not a demonstration, a real key recovery attack.
+
+```bash
+blue-tap knob probe <MAC>                              # Check KNOB vulnerability
+blue-tap knob attack <MAC>                             # Full KNOB chain: negotiate + brute force
+blue-tap knob attack <MAC> --key-size 1                # Force 1-byte key (256 candidates)
+```
+
+**Attack phases:**
+1. **Probe** — Check BT version (KNOB affects 2.1-5.0 pre-patch), read current encryption key size if connected, note firmware patch uncertainty
+2. **Negotiate** — Set minimum encryption key size via InternalBlue LMP injection (Broadcom/Cypress) or btmgmt fallback, verify setting took effect, restore adapter defaults after test
+3. **Brute force** — Capture encrypted ACL traffic from active connection (60s windows, up to 5 minutes with user-prompted extensions), XOR-decrypt each candidate, validate against L2CAP header structure (length field + CID range). Rich progress bar shows enumeration progress.
+
+Note: Full LMP-level manipulation requires InternalBlue (Broadcom/Cypress chipset). The btmgmt fallback only controls local adapter preferences. HCI response parsing uses multiple regex patterns for cross-chipset compatibility.
+
+---
+
+### 6. SSP Downgrade Attack
+
+Force a device from Secure Simple Pairing to legacy PIN mode, then brute force the PIN. Includes lockout detection (3 consecutive timeouts → abort), PIN range validation, and process cleanup to prevent leaked bluetoothctl processes.
+
+```bash
+blue-tap ssp-downgrade probe <MAC>                     # Check if target is vulnerable
+blue-tap ssp-downgrade attack <MAC>                    # Downgrade + auto brute force (0000-9999)
+blue-tap ssp-downgrade attack <MAC> --pin-start 0 --pin-end 9999  # Full PIN range
+blue-tap ssp-downgrade attack <MAC> --delay 1.0        # Slower to avoid lockout
+```
+
+**Attack phases:**
+1. Set local adapter IO capability to NoInputNoOutput
+2. Disable SSP on local adapter (btmgmt with hciconfig fallback)
+3. Remove existing pairing with target
+4. Initiate pairing — target falls back to legacy PIN mode
+5. Brute force PIN with progress logging every 100 attempts, lockout detection (3 consecutive timeouts), and `lockout_detected` flag in results
+
+---
+
+### 7. Data Extraction (PBAP / MAP / AT / OPP)
 
 #### PBAP — Phone Book Access Profile
 
@@ -461,37 +524,22 @@ blue-tap at snarf <MAC>                    # External bluesnarfer binary
 - `AT+CBC` — Battery status
 - `AT+CSQ` — Signal strength
 
----
+#### OPP — Object Push Profile
 
-### 5. Connection Hijacking
-
-Full IVI takeover by impersonating the owner's phone.
+Push files to the IVI via OBEX Object Push.
 
 ```
-blue-tap hijack <IVI_MAC> <PHONE_MAC>
-blue-tap hijack <IVI_MAC> <PHONE_MAC> --phone-name "John's iPhone"
-blue-tap hijack <IVI_MAC> <PHONE_MAC> --bias          # Use BIAS CVE-2020-10135
-blue-tap hijack <IVI_MAC> <PHONE_MAC> --recon-only     # Recon phase only
-blue-tap hijack <IVI_MAC> <PHONE_MAC> --skip-audio     # Skip HFP setup
+blue-tap opp push <MAC> <file>               # Push any file to device
+blue-tap opp vcard <MAC> -n "Test" -p "+1234" # Push a crafted vCard
 ```
-
-**Attack phases:**
-1. **Recon** — Fingerprint IVI, enumerate SDP services, identify profiles and channels
-2. **Impersonate** — Spoof attacker's MAC address, adapter name, and device class to match the phone
-3. **Connect** — Connect to IVI as the spoofed phone; IVI sees a bonded device and auto-authorizes
-4. **PBAP Extract** — Download phonebook and call history via OBEX PBAP
-5. **MAP Extract** — Download SMS/MMS messages via OBEX MAP
-6. **Audio Setup** — Establish HFP Service Level Connection for call interception
-
-**BIAS mode (`--bias`):** When the IVI validates link keys and rejects simple MAC spoofing, the BIAS attack (CVE-2020-10135) exploits a role-switch during reconnection to bypass authentication entirely.
 
 ---
 
-### 6. Audio Interception (HFP / A2DP)
+### 8. Audio Interception (HFP / A2DP)
 
 #### HFP — Hands-Free Profile
 
-Call audio capture and injection over SCO (Synchronous Connection-Oriented) links.
+Call audio capture and injection over SCO (Synchronous Connection-Oriented) links. Includes connection retry with backoff, automatic codec negotiation (CVSD 8kHz / mSBC 16kHz wideband), and tolerant AT response parsing. All operations logged to session.
 
 ```
 blue-tap hfp connect <MAC>                # Establish Service Level Connection (SLC)
@@ -504,9 +552,16 @@ blue-tap hfp redial <MAC>                 # Redial last number
 blue-tap hfp voice <MAC> --activate       # Trigger voice assistant
 ```
 
+**Key capabilities:**
+- RFCOMM and SCO connections retry once with 2s backoff on transient failure
+- SLC handshake parsing is resilient to malformed AG responses (graceful degradation instead of crash)
+- Codec negotiation detects CVSD vs mSBC — audio capture automatically uses the correct sample rate
+- Silent call with proper timing (1.5s delay between dial and mute to avoid race condition)
+- Empty audio capture detected early — returns failure instead of writing empty WAV file
+
 #### A2DP — Advanced Audio Distribution
 
-Media stream capture, microphone eavesdropping, and audio injection via PulseAudio.
+Media stream capture, microphone eavesdropping, and audio injection via PulseAudio/PipeWire. Profile switching retries on failure. Sample rate auto-detected from PulseAudio source info (not hardcoded). Loopback modules tracked for reliable cleanup.
 
 ```
 blue-tap audio devices                     # List Bluetooth audio sources/sinks
@@ -517,7 +572,7 @@ blue-tap audio live <MAC>                  # Live eavesdrop: car mic → laptop 
 blue-tap audio capture <MAC>               # Capture A2DP media stream to WAV
 blue-tap audio play <MAC> file.mp3         # Play file through car speakers
 blue-tap audio loopback <MAC>              # Route laptop mic → car speakers
-blue-tap audio loopback-stop               # Stop loopback
+blue-tap audio loopback-stop               # Stop loopback (cleans up PA module)
 blue-tap audio diagnose <MAC>              # Diagnose Bluetooth audio issues
 blue-tap audio list                        # List captured audio files
 blue-tap audio playback <file>             # Play captured file locally
@@ -526,9 +581,9 @@ blue-tap audio review                      # Interactive audio file review
 
 ---
 
-### 7. AVRCP Media Control
+### 9. AVRCP Media Control
 
-Audio/Video Remote Control Profile attacks.
+Audio/Video Remote Control Profile attacks via D-Bus (BlueZ MediaPlayer1 interface). Includes connection retry with 2s backoff, proper D-Bus resource cleanup, and all operations logged to session for reporting.
 
 ```
 blue-tap avrcp play <MAC>                  # Send play command
@@ -538,15 +593,17 @@ blue-tap avrcp next <MAC>                  # Skip to next track
 blue-tap avrcp prev <MAC>                  # Skip to previous track
 blue-tap avrcp volume <MAC> -l 127         # Set volume to max
 blue-tap avrcp volume-ramp <MAC> --start 0 --end 127 --step 5
-                                           # Gradual volume escalation attack
-blue-tap avrcp skip-flood <MAC> -n 100     # Rapid track skip injection
-blue-tap avrcp metadata <MAC>              # Show current track metadata
+                                           # Gradual volume escalation (works both up AND down)
+blue-tap avrcp skip-flood <MAC> -n 100     # Rapid track skip injection (min 10ms interval)
+blue-tap avrcp metadata <MAC>              # Show current track metadata + active player app
 blue-tap avrcp monitor <MAC>               # Monitor track changes in real-time
 ```
 
+**Capabilities:** Playback control, absolute volume set (0-127), bidirectional volume ramp, fast-forward/rewind, repeat/shuffle mode, metadata surveillance (title, artist, album, active app name), track change monitoring via D-Bus signal subscription, skip flood DoS.
+
 ---
 
-### 8. Protocol Fuzzing
+### 10. Protocol Fuzzing
 
 Response-guided, state-aware fuzzing engine designed for discovering 0-day vulnerabilities in automotive IVI Bluetooth stacks. Works purely over-the-air with standard hardware — no firmware access, no special dongles, no target instrumentation required.
 
@@ -799,7 +856,7 @@ Campaign results feed directly into the pentest report (`blue-tap report`):
 
 ---
 
-### 9. Denial of Service
+### 11. Denial of Service
 
 15 protocol-level DoS attacks targeting different layers of the Bluetooth stack.
 
@@ -835,155 +892,36 @@ blue-tap dos hfp-slc-confuse <MAC>                     # HFP SLC state machine c
 
 ---
 
-### 10. MAC Address Spoofing
+### 12. MAC Spoofing and Adapter Management
+
+#### MAC Address Spoofing
+
+Three spoofing methods with automatic fallback (bdaddr → spooftooph → btmgmt). Hardware rejection detection with 8+ patterns per method. Persistent MAC save/restore with atomic JSON writes and corruption recovery. All operations logged to session.
 
 ```
-blue-tap spoof mac <TARGET_MAC>                        # Change adapter MAC address
-blue-tap spoof clone <MAC>                             # Full identity clone: MAC + name + device class
-blue-tap spoof restore                                 # Restore original MAC
+blue-tap spoof mac <TARGET_MAC>                        # Change adapter MAC address (auto-selects method)
+blue-tap spoof mac <TARGET_MAC> -m bdaddr              # Force specific method
+blue-tap spoof clone <MAC> -n "iPhone 15"              # Full identity clone: MAC + name + device class
+blue-tap spoof restore                                 # Restore original MAC from saved state
 ```
 
----
+**Adapter safety:** Power commands are return-code checked — adapter won't be left in DOWN state. Sleep timing between reset/down/up prevents race conditions. Original MAC backed up atomically before first spoof; corruption recovery preserves the backup.
 
-### 11. Automation and Orchestration
-
-#### Auto Mode — Full 9-Phase Pentest
-
-Executes a complete Bluetooth penetration test methodology in a single command:
-
-| Phase | Name | What It Does |
-|:-----:|------|-------------|
-| 1 | Discovery | Scan for nearby devices, identify the phone paired with the IVI |
-| 2 | Fingerprinting | BT version, chipset, manufacturer, profiles, attack surface |
-| 3 | Reconnaissance | SDP services, RFCOMM channels 1-30, L2CAP PSMs |
-| 4 | Vuln Assessment | 20+ CVE and configuration checks |
-| 5 | Pairing Attacks | SSP downgrade probe, KNOB (CVE-2019-9506) probe |
-| 6 | Exploitation | Hijack: MAC spoof + identity clone + PBAP/MAP extraction |
-| 7 | Protocol Fuzzing | Coverage-guided fuzzing across sdp, rfcomm, l2cap, ble-att (default: 1 hour) |
-| 8 | DoS Testing | L2CAP storm, CID exhaustion, SDP continuation, RFCOMM SABM, HFP AT flood |
-| 9 | Report | HTML + JSON with all findings, evidence, and fuzzing intelligence |
-
-The **coverage-guided** fuzzing strategy is used by default — it learns from target responses, adapts mutation focus to productive protocol fields, tracks protocol state transitions, and detects behavioral anomalies. This provides maximum code path exploration with zero manual configuration.
-
-```bash
-blue-tap auto <IVI_MAC>                                # Full 9-phase pentest (1hr fuzz)
-blue-tap auto <IVI_MAC> --fuzz-duration 7200           # 2 hour fuzzing phase
-blue-tap auto <IVI_MAC> --skip-fuzz                    # Skip fuzzing (faster assessment)
-blue-tap auto <IVI_MAC> --skip-dos                     # Skip DoS tests
-blue-tap auto <IVI_MAC> --skip-fuzz --skip-dos         # Quick: recon + vuln + exploit only
-blue-tap auto <IVI_MAC> -d 60                          # 60-second phone discovery window
-blue-tap auto <IVI_MAC> -o ./pentest_output/           # Custom output directory
-```
-
-Each phase runs independently — a failure in one phase does not stop subsequent phases. Results from all phases feed into the final HTML/JSON report.
-
-#### Run Mode (Playbook)
-
-Execute multiple commands in sequence with a single invocation.
+#### Adapter Management
 
 ```
-# Inline commands
-blue-tap -s assessment run \
-  "scan classic" \
-  "recon fingerprint TARGET" \
-  "recon sdp TARGET" \
-  "vulnscan TARGET" \
-  "report"
-
-# Playbook file (one command per line)
-blue-tap -s assessment run --playbook pentest.txt
-```
-
-`TARGET` is a placeholder — you'll be prompted to select a discovered device.
-
-**Example playbook (`pentest.txt`):**
-```
-scan classic
-recon fingerprint TARGET
-recon sdp TARGET
-recon rfcomm-scan TARGET
-recon l2cap-scan TARGET
-vulnscan TARGET
-pbap dump TARGET
-map dump TARGET
-report
+blue-tap adapter list                                  # List all Bluetooth adapters with chipset info
+blue-tap adapter info <hci>                            # Detailed adapter info (features, capabilities)
+blue-tap adapter up <hci>                              # Bring adapter up
+blue-tap adapter down <hci>                            # Bring adapter down
+blue-tap adapter reset <hci>                           # Reset adapter
+blue-tap adapter set-name <hci> <name>                 # Set adapter friendly name
+blue-tap adapter set-class <hci> <class>               # Set device class (e.g., 0x5a020c for phone)
 ```
 
 ---
 
-### 12. Link Key Harvest and Persistent Access
-
-Capture pairing exchanges, extract link keys, and reconnect to devices without re-pairing — proving persistent access.
-
-```bash
-blue-tap keys harvest <MAC>                            # Capture pairing + extract link key
-blue-tap keys harvest <MAC> -d 600                     # 10 minute capture window
-blue-tap keys list                                     # Show all stored keys
-blue-tap keys verify <MAC>                             # Verify stored key still works
-blue-tap keys reconnect <MAC>                          # Reconnect using stored key (no re-pairing)
-```
-
-**How it works:** Starts HCI packet capture, waits for a pairing exchange with the target, extracts the link key via tshark, and stores it in a persistent key database. Later, `keys reconnect` injects the stored key into BlueZ and connects without any pairing UI — demonstrating that a single intercepted pairing gives indefinite access.
-
----
-
-### 13. SSP Downgrade Attack
-
-Force a device from Secure Simple Pairing to legacy PIN mode, then brute force the PIN.
-
-```bash
-blue-tap ssp-downgrade probe <MAC>                     # Check if target is vulnerable
-blue-tap ssp-downgrade attack <MAC>                    # Downgrade + auto brute force
-blue-tap ssp-downgrade attack <MAC> --pin-start 0 --pin-end 9999  # Full PIN range
-blue-tap ssp-downgrade attack <MAC> --delay 1.0        # Slower to avoid lockout
-```
-
-**Attack phases:**
-1. Set local adapter IO capability to NoInputNoOutput
-2. Disable SSP on local adapter
-3. Remove existing pairing with target
-4. Initiate pairing — target falls back to legacy PIN mode
-5. Brute force PIN (0000-9999) with lockout detection
-
----
-
-### 14. KNOB Attack (CVE-2019-9506)
-
-Negotiate minimum encryption key entropy, then brute force the reduced key space.
-
-```bash
-blue-tap knob probe <MAC>                              # Check KNOB vulnerability
-blue-tap knob attack <MAC>                             # Full KNOB chain: negotiate + brute force
-blue-tap knob attack <MAC> --key-size 1                # Force 1-byte key (256 candidates)
-```
-
-**Attack phases:**
-1. Check BT version (KNOB affects 2.1-5.0 pre-patch)
-2. Negotiate encryption key to minimum bytes (via InternalBlue LMP injection or btmgmt fallback)
-3. Brute force the reduced key space (256 candidates for 1-byte key)
-
-Note: Full LMP-level manipulation requires InternalBlue (Broadcom/Cypress chipset). Without it, the btmgmt approach has limited effectiveness.
-
----
-
-### 15. Fleet-Wide Assessment
-
-Scan all nearby Bluetooth devices, classify them, and run vulnerability assessments.
-
-```bash
-blue-tap fleet scan                                    # Discover + classify all nearby devices
-blue-tap fleet scan -d 30                              # 30-second scan window
-blue-tap fleet assess                                  # Scan + vuln-assess all IVIs
-blue-tap fleet assess --all-devices                    # Assess everything, not just IVIs
-blue-tap fleet report                                  # Full fleet report (scan + assess + HTML)
-blue-tap fleet report -f json -o fleet.json            # JSON output
-```
-
-**Device classification:** Automatically categorizes each device as IVI, phone, headset, computer, wearable, or unknown — based on Bluetooth device class, name heuristics (car OEMs, head-unit vendors), and service UUIDs.
-
----
-
-### 16. Session Management and Reporting
+### 13. Session Management and Reporting
 
 #### Sessions
 
@@ -1026,6 +964,70 @@ blue-tap report -f html -o report.html       # HTML format (default)
 - Extracted data summary (contact count, message count, call history)
 - Fuzzing campaign results with crash cards (hex dumps, reproducibility status)
 - Dark-themed, standalone HTML (no external dependencies)
+
+---
+
+### 14. Automation and Orchestration
+
+#### Auto Mode — Full 9-Phase Pentest
+
+Executes a complete Bluetooth penetration test methodology in a single command. Resilient by design — each phase runs independently, failures are logged and skipped, never abort. Skipped phases are tracked in results with explicit reason. Reports are timestamped to avoid overwriting previous runs.
+
+| Phase | Name | What It Does |
+|:-----:|------|-------------|
+| 1 | Discovery | Scan for nearby devices, identify the phone paired with the IVI |
+| 2 | Fingerprinting | BT version, chipset, manufacturer, profiles, attack surface |
+| 3 | Reconnaissance | SDP services, RFCOMM channels 1-30, L2CAP PSMs |
+| 4 | Vuln Assessment | 20+ CVE and configuration checks (parallel local analysis + sequential active probes) |
+| 5 | Pairing Attacks | SSP downgrade probe, KNOB (CVE-2019-9506) probe |
+| 6 | Exploitation | Hijack: MAC spoof + identity clone + PBAP/MAP extraction (skipped if no phone found) |
+| 7 | Protocol Fuzzing | Coverage-guided fuzzing across sdp, rfcomm, l2cap, ble-att (default: 1 hour) |
+| 8 | DoS Testing | L2CAP storm, CID exhaustion, SDP continuation, RFCOMM SABM, HFP AT flood |
+| 9 | Report | Timestamped HTML + JSON with all findings, evidence, and fuzzing intelligence |
+
+```bash
+blue-tap auto <IVI_MAC>                                # Full 9-phase pentest (1hr fuzz)
+blue-tap auto <IVI_MAC> --fuzz-duration 7200           # 2 hour fuzzing phase
+blue-tap auto <IVI_MAC> --skip-fuzz                    # Skip fuzzing (faster assessment)
+blue-tap auto <IVI_MAC> --skip-dos                     # Skip DoS tests
+blue-tap auto <IVI_MAC> --skip-fuzz --skip-dos         # Quick: recon + vuln + exploit only
+blue-tap auto <IVI_MAC> -d 60                          # 60-second phone discovery window
+blue-tap auto <IVI_MAC> -o ./pentest_output/           # Custom output directory
+```
+
+**Phase tracking:** Skipped phases appear in results with `"status": "skipped"` and a reason (e.g., "no phone discovered", "user requested"). Summary shows passed/failed/skipped counts. Duration parameters are validated (must be positive). Reports are saved as `report_YYYYMMDD_HHMMSS.html` with a `report.html` latest copy for convenience.
+
+#### Run Mode (Playbook)
+
+Execute multiple commands in sequence with a single invocation.
+
+```
+# Inline commands
+blue-tap -s assessment run \
+  "scan classic" \
+  "recon fingerprint TARGET" \
+  "recon sdp TARGET" \
+  "vulnscan TARGET" \
+  "report"
+
+# Playbook file (one command per line)
+blue-tap -s assessment run --playbook pentest.txt
+```
+
+`TARGET` is a placeholder — you'll be prompted to select a discovered device.
+
+**Example playbook (`pentest.txt`):**
+```
+scan classic
+recon fingerprint TARGET
+recon sdp TARGET
+recon rfcomm-scan TARGET
+recon l2cap-scan TARGET
+vulnscan TARGET
+pbap dump TARGET
+map dump TARGET
+report
+```
 
 ---
 
@@ -1122,31 +1124,83 @@ Options:
 
 ### Command Reference
 
-```
-blue-tap --help
+<details>
+<summary><strong>blue-tap --help</strong> (click to expand)</summary>
 
-Commands:
-  adapter   HCI Bluetooth adapter management
-  at        AT command data extraction via RFCOMM
-  audio     Audio capture, injection, and eavesdropping via PulseAudio
-  auto      Automated: discover phone, hijack IVI, dump data, report
-  avrcp     AVRCP media control and attacks
-  bias      BIAS attack — bypass authentication via role-switch (CVE-2020-10135)
-  dos       DoS attacks and pairing abuse
-  fuzz      Protocol fuzzing — campaign mode, legacy fuzzers, crash management
-  hfp       Hands-Free Profile — call audio interception and injection
-  hijack    Full IVI hijack: spoof phone identity and extract data
-  map       Message Access Profile — download SMS/MMS messages
-  opp       Object Push Profile — push files to IVI
-  pbap      Phone Book Access Profile — download phonebook and call logs
-  recon     Service enumeration and device fingerprinting
-  report    Generate pentest report from the current session
-  run       Execute multiple blue-tap commands in sequence
-  scan      Discover Bluetooth Classic and BLE devices
-  session   Manage assessment sessions
-  spoof     MAC address spoofing and device impersonation
-  vulnscan  Scan target for vulnerabilities and attack-surface indicators
 ```
+  ██████╗ ██╗     ██╗   ██╗███████╗ ████████╗ █████╗ ██████╗
+  ██╔══██╗██║     ██║   ██║██╔════╝ ╚══██╔══╝██╔══██╗██╔══██╗
+  ██████╔╝██║     ██║   ██║█████╗      ██║   ███████║██████╔╝
+  ██╔══██╗██║     ██║   ██║██╔══╝      ██║   ██╔══██║██╔═══╝
+  ██████╔╝███████╗╚██████╔╝███████╗    ██║   ██║  ██║██║
+  ╚═════╝ ╚══════╝ ╚═════╝ ╚══════╝    ╚═╝   ╚═╝  ╚═╝╚═╝
+  ─────── Bluetooth/BLE Automotive IVI Pentest Toolkit ───────
+
+ Usage: blue-tap [OPTIONS] COMMAND [ARGS]...
+
+ Quick start:
+   blue-tap adapter list                        # check adapters
+   blue-tap scan classic                        # discover devices
+   blue-tap vulnscan AA:BB:CC:DD:EE:FF          # vulnerability scan
+   blue-tap hijack IVI_MAC PHONE_MAC            # full attack chain
+
+ Sessions (automatic — all output is always saved):
+   blue-tap scan classic                        # auto-session created
+   blue-tap -s mytest scan classic              # named session
+   blue-tap -s mytest vulnscan TARGET           # resume named session
+   blue-tap session list                        # see all sessions
+   blue-tap report                              # report from latest session
+
+╭─ Options ────────────────────────────────────────────────────────────────────╮
+│ --version                     Show the version and exit.                     │
+│ --verbose  -v  INTEGER RANGE  Verbosity: -v verbose, -vv debug               │
+│ --session  -s  TEXT           Session name (default: auto-generated from     │
+│                               date/time). Use to resume a previous session.  │
+│ --help                        Show this message and exit.                    │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Discovery & Reconnaissance ─────────────────────────────────────────────────╮
+│ scan              Discover Bluetooth Classic and BLE devices.                │
+│ recon             Service enumeration and device fingerprinting.             │
+│ adapter           HCI Bluetooth adapter management.                          │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Assessment ─────────────────────────────────────────────────────────────────╮
+│ vulnscan   Scan target for vulnerabilities and attack-surface indicators.    │
+│ fleet      Fleet-wide Bluetooth assessment — scan, classify, assess          │
+│            multiple devices.                                                 │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Exploitation ───────────────────────────────────────────────────────────────╮
+│ hijack          Full IVI hijack: spoof phone identity and extract data.      │
+│ bias            BIAS attack — bypass authentication via role-switch          │
+│                 (CVE-2020-10135).                                            │
+│ knob            KNOB attack — negotiate minimum encryption key size          │
+│                 (CVE-2019-9506).                                             │
+│ ssp-downgrade   SSP downgrade attack — force legacy PIN pairing.             │
+│ spoof           MAC address spoofing and device impersonation.               │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Data Extraction & Audio ────────────────────────────────────────────────────╮
+│ pbap    Phone Book Access Profile - download phonebook and call logs.        │
+│ map     Message Access Profile - download SMS/MMS messages.                  │
+│ at      AT command data extraction via RFCOMM (bluesnarfer alternative).     │
+│ opp     Object Push Profile - push files to IVI.                             │
+│ hfp     Hands-Free Profile - call audio interception and injection.          │
+│ audio   Audio capture, injection, and eavesdropping via PulseAudio.          │
+│ avrcp   AVRCP media control and attacks.                                     │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Fuzzing & Stress Testing ───────────────────────────────────────────────────╮
+│ fuzz   Protocol fuzzing -- campaign mode, legacy fuzzers, and crash          │
+│        management.                                                           │
+│ dos    DoS attacks and pairing abuse.                                        │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Reporting & Automation ─────────────────────────────────────────────────────╮
+│ session   Manage assessment sessions.                                        │
+│ report    Generate pentest report from the current session.                  │
+│ auto      Full automated pentest: discovery, fingerprint, recon, vulnscan,   │
+│           exploit, fuzz, DoS, report.                                        │
+│ run       Execute multiple blue-tap commands in sequence.                    │
+╰──────────────────────────────────────────────────────────────────────────────╯
+```
+
+</details>
 
 ### Getting Help for Any Command
 
@@ -1164,132 +1218,158 @@ blue-tap recon --help                       # All recon subcommands
 
 ## Workflows
 
-### Workflow 1: Quick IVI Assessment
+### Workflow 1: Quick Assessment
 
-Minimal assessment — discovery, fingerprinting, vulnerability scan.
+Discover, fingerprint, and scan for vulnerabilities in under 5 minutes.
 
 ```bash
-# Start a named session
-blue-tap -s quick-assessment scan classic
-# Note the IVI MAC address from scan results
-
-blue-tap -s quick-assessment recon sdp AA:BB:CC:DD:EE:FF
-blue-tap -s quick-assessment recon fingerprint AA:BB:CC:DD:EE:FF
-blue-tap -s quick-assessment vulnscan AA:BB:CC:DD:EE:FF
-blue-tap -s quick-assessment report
+blue-tap -s quick scan classic
+blue-tap -s quick recon fingerprint AA:BB:CC:DD:EE:FF
+blue-tap -s quick vulnscan AA:BB:CC:DD:EE:FF
+blue-tap -s quick report
 ```
 
-### Workflow 2: Full IVI Penetration Test
+### Workflow 2: Full Penetration Test (Automated)
 
-**Option A — Automated (recommended):**
-
-All 9 phases in a single command. Coverage-guided fuzzing runs for 1 hour by default.
+Single command runs all 9 phases: discovery, fingerprint, recon, vuln assessment, pairing attacks, exploitation, fuzzing, DoS, and report generation.
 
 ```bash
-blue-tap -s full-pentest auto AA:BB:CC:DD:EE:FF
+blue-tap -s pentest auto AA:BB:CC:DD:EE:FF
 ```
 
-**Option B — Manual (full control):**
+Skip phases you don't need:
 
 ```bash
-# Phase 1: Discovery and reconnaissance
-blue-tap -s full-pentest scan classic
-blue-tap -s full-pentest scan ble
-blue-tap -s full-pentest recon sdp AA:BB:CC:DD:EE:FF
-blue-tap -s full-pentest recon fingerprint AA:BB:CC:DD:EE:FF
-blue-tap -s full-pentest recon rfcomm-scan AA:BB:CC:DD:EE:FF
-blue-tap -s full-pentest recon l2cap-scan AA:BB:CC:DD:EE:FF
-blue-tap -s full-pentest recon gatt AA:BB:CC:DD:EE:FF
-blue-tap -s full-pentest recon pairing-mode AA:BB:CC:DD:EE:FF
-
-# Phase 2: Vulnerability assessment
-blue-tap -s full-pentest vulnscan AA:BB:CC:DD:EE:FF
-
-# Phase 3: Pairing attacks
-blue-tap -s full-pentest ssp-downgrade probe AA:BB:CC:DD:EE:FF
-blue-tap -s full-pentest knob probe AA:BB:CC:DD:EE:FF
-
-# Phase 4: Data extraction
-blue-tap -s full-pentest pbap dump AA:BB:CC:DD:EE:FF
-blue-tap -s full-pentest map dump AA:BB:CC:DD:EE:FF
-blue-tap -s full-pentest at dump AA:BB:CC:DD:EE:FF
-
-# Phase 5: Connection hijack (if phone MAC known)
-blue-tap -s full-pentest hijack AA:BB:CC:DD:EE:FF CC:DD:EE:FF:00:11
-
-# Phase 5: Protocol fuzzing
-blue-tap -s full-pentest fuzz campaign AA:BB:CC:DD:EE:FF \
-  --duration 30m --strategy targeted --capture
-
-# Phase 6: Protocol fuzzing (1 hour, coverage-guided)
-blue-tap -s full-pentest fuzz campaign AA:BB:CC:DD:EE:FF \
-  --strategy coverage --duration 1h --capture
-
-# Phase 7: DoS testing
-blue-tap -s full-pentest dos l2cap-storm AA:BB:CC:DD:EE:FF
-blue-tap -s full-pentest dos rfcomm-sabm-flood AA:BB:CC:DD:EE:FF
-blue-tap -s full-pentest dos hfp-at-flood AA:BB:CC:DD:EE:FF
-
-# Phase 8: Report
-blue-tap -s full-pentest report -f html
+blue-tap -s pentest auto AA:BB:CC:DD:EE:FF --skip-fuzz --skip-dos    # Quick: recon + exploit only
+blue-tap -s pentest auto AA:BB:CC:DD:EE:FF --fuzz-duration 7200      # 2-hour fuzz instead of 1
 ```
 
-### Workflow 3: Hijack and Extract
+### Workflow 3: Full Penetration Test (Manual)
 
-Targeted attack — impersonate the owner's phone and steal data.
+Step-by-step with full control over each phase.
 
 ```bash
-# 1. Find the IVI and paired phone
-blue-tap scan classic        # Find "SYNC" or similar car name
-blue-tap scan classic        # Run again; note phones near the car
+# 1. Discovery
+blue-tap -s pentest scan classic
+blue-tap -s pentest scan ble
 
-# 2. Enumerate the IVI
+# 2. Reconnaissance
+blue-tap -s pentest recon sdp AA:BB:CC:DD:EE:FF
+blue-tap -s pentest recon fingerprint AA:BB:CC:DD:EE:FF
+blue-tap -s pentest recon rfcomm-scan AA:BB:CC:DD:EE:FF
+blue-tap -s pentest recon l2cap-scan AA:BB:CC:DD:EE:FF
+blue-tap -s pentest recon gatt AA:BB:CC:DD:EE:FF
+
+# 3. Vulnerability assessment (with active BIAS probe)
+blue-tap -s pentest vulnscan AA:BB:CC:DD:EE:FF --active --phone CC:DD:EE:FF:00:11
+
+# 4. Pairing attacks
+blue-tap -s pentest ssp-downgrade probe AA:BB:CC:DD:EE:FF
+blue-tap -s pentest knob probe AA:BB:CC:DD:EE:FF
+
+# 5. Connection hijack + data extraction
+blue-tap -s pentest hijack AA:BB:CC:DD:EE:FF CC:DD:EE:FF:00:11
+
+# 6. Direct data extraction (alternative to hijack)
+blue-tap -s pentest pbap dump AA:BB:CC:DD:EE:FF
+blue-tap -s pentest map dump AA:BB:CC:DD:EE:FF
+
+# 7. Protocol fuzzing
+blue-tap -s pentest fuzz campaign AA:BB:CC:DD:EE:FF \
+  -p sdp -p rfcomm -p obex-pbap --duration 1h --capture
+
+# 8. DoS testing
+blue-tap -s pentest dos l2cap-storm AA:BB:CC:DD:EE:FF
+blue-tap -s pentest dos rfcomm-sabm-flood AA:BB:CC:DD:EE:FF
+
+# 9. Report
+blue-tap -s pentest report -f html
+```
+
+### Workflow 4: Hijack and Extract
+
+Impersonate the owner's phone, connect to the IVI, and steal data.
+
+```bash
+# Find the IVI and nearby phones
+blue-tap scan classic
+
+# Enumerate IVI services
 blue-tap recon sdp AA:BB:CC:DD:EE:FF
 blue-tap recon rfcomm-scan AA:BB:CC:DD:EE:FF
 
-# 3. Execute the hijack
-blue-tap hijack AA:BB:CC:DD:EE:FF CC:DD:EE:FF:00:11 \
-  --phone-name "John's iPhone"
+# Hijack — clones phone identity, connects to IVI, dumps PBAP + MAP
+blue-tap hijack AA:BB:CC:DD:EE:FF CC:DD:EE:FF:00:11 --phone-name "iPhone"
 
-# All data saved to hijack output directory
+# Or use BIAS when IVI validates link keys
+blue-tap hijack AA:BB:CC:DD:EE:FF CC:DD:EE:FF:00:11 --bias
 ```
 
-### Workflow 4: Fuzzing Campaign
+### Workflow 5: Audio Eavesdropping
 
-Extended protocol fuzzing with crash analysis.
+Record the car's microphone, capture media streams, or inject audio.
+
+```bash
+# Switch to HFP profile and record microphone
+blue-tap audio profile AA:BB:CC:DD:EE:FF hfp
+blue-tap audio record-mic AA:BB:CC:DD:EE:FF -d 120
+
+# Live eavesdrop (car mic → laptop speakers)
+blue-tap audio live AA:BB:CC:DD:EE:FF
+
+# Capture A2DP media stream
+blue-tap audio profile AA:BB:CC:DD:EE:FF a2dp
+blue-tap audio capture AA:BB:CC:DD:EE:FF
+
+# Inject audio through car speakers
+blue-tap audio play AA:BB:CC:DD:EE:FF message.wav
+
+# Review all captured audio
+blue-tap audio review
+```
+
+### Workflow 6: Fuzzing Campaign
+
+Find 0-day vulnerabilities with protocol-aware fuzzing.
 
 ```bash
 # Generate seed corpus
 blue-tap fuzz corpus generate
 
-# Run a targeted 1-hour campaign with capture
-blue-tap -s fuzz-session fuzz campaign AA:BB:CC:DD:EE:FF \
-  -p sdp -p rfcomm -p obex-pbap \
-  --strategy targeted \
-  --duration 1h \
-  --capture
+# Run coverage-guided campaign across multiple protocols
+blue-tap -s fuzz fuzz campaign AA:BB:CC:DD:EE:FF \
+  -p sdp -p rfcomm -p obex-pbap -p ble-att \
+  --strategy coverage --duration 2h --capture
 
-# Review crashes
+# Review and analyze crashes
 blue-tap fuzz crashes list
 blue-tap fuzz crashes show 1
+blue-tap fuzz minimize 1
 
-# Minimize a crash
-blue-tap fuzz minimize 1 --strategy ddmin
-
-# Replay to verify
+# Replay crash to verify reproducibility
 blue-tap fuzz crashes replay 1
 
 # Try known CVE patterns
 blue-tap fuzz cve AA:BB:CC:DD:EE:FF
 
-# Export results
+# Export and report
 blue-tap fuzz crashes export
-blue-tap -s fuzz-session report
+blue-tap -s fuzz report
 ```
 
-### Workflow 5: Playbook Automation
+### Workflow 7: SSP Downgrade + PIN Brute Force
 
-Create a reusable pentest playbook.
+Force a device from Secure Simple Pairing to legacy PIN mode, then brute force the PIN.
+
+```bash
+blue-tap ssp-downgrade probe AA:BB:CC:DD:EE:FF
+blue-tap ssp-downgrade attack AA:BB:CC:DD:EE:FF --pin-start 0 --pin-end 9999
+blue-tap pbap dump AA:BB:CC:DD:EE:FF     # Extract data after pairing
+```
+
+### Workflow 8: Playbook Automation
+
+Create a reusable pentest playbook — one command per line, `TARGET` is auto-resolved.
 
 **`ivi-pentest.txt`:**
 ```
@@ -1298,7 +1378,6 @@ recon sdp TARGET
 recon fingerprint TARGET
 recon rfcomm-scan TARGET
 recon l2cap-scan TARGET
-recon gatt TARGET
 vulnscan TARGET
 pbap dump TARGET
 map dump TARGET
@@ -1306,77 +1385,7 @@ report
 ```
 
 ```bash
-blue-tap -s auto-pentest run --playbook ivi-pentest.txt
-```
-
-### Workflow 6: Fleet-Wide Assessment
-
-Assess all IVIs in a parking lot or fleet.
-
-```bash
-# Scan and classify all nearby devices
-blue-tap fleet scan -d 30
-
-# Assess all discovered IVIs
-blue-tap fleet assess
-
-# Generate consolidated fleet report
-blue-tap fleet report -o fleet_report.html
-```
-
-### Workflow 7: Persistent Access via Link Key
-
-Demonstrate that a single intercepted pairing gives indefinite access.
-
-```bash
-# Step 1: Capture a pairing exchange (run while target pairs)
-blue-tap keys harvest AA:BB:CC:DD:EE:FF -d 600
-
-# Step 2: Verify the key works
-blue-tap keys verify AA:BB:CC:DD:EE:FF
-
-# Step 3: Days/weeks later — reconnect without re-pairing
-blue-tap keys reconnect AA:BB:CC:DD:EE:FF
-
-# Step 4: Extract data using the persistent connection
-blue-tap pbap dump AA:BB:CC:DD:EE:FF
-```
-
-### Workflow 8: SSP Downgrade + PIN Brute Force
-
-Force a device from Secure Simple Pairing to legacy PIN mode.
-
-```bash
-# Check if the target is vulnerable
-blue-tap ssp-downgrade probe AA:BB:CC:DD:EE:FF
-
-# Execute the downgrade + brute force
-blue-tap ssp-downgrade attack AA:BB:CC:DD:EE:FF
-
-# Once paired, extract data
-blue-tap pbap dump AA:BB:CC:DD:EE:FF
-```
-
-### Workflow 6: Audio Eavesdropping
-
-```bash
-# Connect and switch to HFP profile for mic access
-blue-tap hfp connect AA:BB:CC:DD:EE:FF
-blue-tap audio profile AA:BB:CC:DD:EE:FF hfp
-
-# Live eavesdrop (car mic → laptop speakers)
-blue-tap audio live AA:BB:CC:DD:EE:FF
-
-# Or record to file
-blue-tap audio record-mic AA:BB:CC:DD:EE:FF
-
-# Capture media stream
-blue-tap audio profile AA:BB:CC:DD:EE:FF a2dp
-blue-tap audio capture AA:BB:CC:DD:EE:FF
-
-# Review captured audio
-blue-tap audio list
-blue-tap audio review
+blue-tap -s assessment run --playbook ivi-pentest.txt
 ```
 
 ---

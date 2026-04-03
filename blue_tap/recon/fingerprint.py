@@ -164,6 +164,9 @@ def _detect_ivi_signals(fp: dict):
     Each signal is recorded with its reasoning. The more signals present,
     the more likely it's an IVI — but none are definitive. A Bluetooth
     speakerphone with HFP AG + A2DP Sink looks identical to an IVI.
+
+    Uses normalized profile UUIDs where possible for reliable matching,
+    falling back to name matching for non-standard profiles.
     """
     signals = []
 
@@ -172,28 +175,59 @@ def _detect_ivi_signals(fp: dict):
     if class_info.get("is_ivi"):
         signals.append("Device class: Car Audio (0x04/0x08)")
 
-    # Signal 2: IVI-typical profile combination
-    # HFP AG + A2DP Sink is the strongest profile signal, but also matches
-    # any hands-free speakerphone. PBAP/MAP support increases confidence.
-    profile_names = [p.get("profile", "") + " " + p.get("name", "") for p in fp["profiles"]]
-    profile_text = " ".join(profile_names).lower()
+    # Normalize profiles for reliable matching
+    # Build a set of normalized profile identifiers from both profile field and name
+    profile_ids = set()
+    for p in fp["profiles"]:
+        profile = (p.get("profile") or "").lower()
+        name = (p.get("name") or "").lower()
+        combined = profile + " " + name
 
-    has_hfp_ag = (
-        ("hfp" in profile_text and "ag" in profile_text) or
-        ("hands-free" in profile_text and ("audio gateway" in profile_text or "ag" in profile_text))
-    )
-    has_a2dp_sink = "a2dp" in profile_text and "sink" in profile_text
-    has_pbap = "pbap" in profile_text or "phonebook" in profile_text or "phone book" in profile_text
-    has_map = re.search(r'\bmap\b', profile_text) and ("message" in profile_text or "mas" in profile_text)
+        # Map to canonical identifiers
+        if any(k in combined for k in ("hfp ag", "audio gateway", "hands-free ag", "handsfree ag")):
+            profile_ids.add("hfp_ag")
+        if any(k in combined for k in ("hfp", "hands-free", "handsfree")) and "ag" not in combined:
+            profile_ids.add("hfp")
+        if "a2dp" in combined and "sink" in combined:
+            profile_ids.add("a2dp_sink")
+        if "a2dp" in combined and "source" in combined:
+            profile_ids.add("a2dp_source")
+        if any(k in combined for k in ("pbap", "phonebook", "phone book")):
+            profile_ids.add("pbap")
+        if any(k in combined for k in ("message access", "map mas", "map mns")):
+            profile_ids.add("map")
+        elif "map" == profile.strip():
+            profile_ids.add("map")
+        if "avrcp" in combined or "a/v remote" in combined:
+            profile_ids.add("avrcp")
+        if any(k in combined for k in ("spp", "serial port")):
+            profile_ids.add("spp")
+        if any(k in combined for k in ("opp", "object push")):
+            profile_ids.add("opp")
+        if any(k in combined for k in ("dun", "dialup")):
+            profile_ids.add("dun")
+        if any(k in combined for k in ("hid", "human interface")):
+            profile_ids.add("hid")
+        if any(k in combined for k in ("pnp", "device id")):
+            profile_ids.add("pnp")
 
-    if has_hfp_ag and has_a2dp_sink:
+    fp["_profile_ids"] = sorted(profile_ids)  # Store for reuse in attack surface
+
+    # Signal 2: IVI-typical profile combinations
+    if "hfp_ag" in profile_ids and "a2dp_sink" in profile_ids:
         signals.append("Profiles: HFP AG + A2DP Sink (audio gateway pattern)")
-    if has_pbap:
+    if "pbap" in profile_ids:
         signals.append("Profiles: PBAP (phonebook access — common on IVIs)")
-    if has_map:
+    if "map" in profile_ids:
         signals.append("Profiles: MAP (message access — common on IVIs)")
 
-    # Signal 3: Name hints (very weak — most IVIs use generic names)
+    # Signal 3: Multiple IVI-typical profiles (even without HFP AG)
+    ivi_profile_count = sum(1 for pid in ("hfp_ag", "a2dp_sink", "pbap", "map", "avrcp")
+                            if pid in profile_ids)
+    if ivi_profile_count >= 4:
+        signals.append(f"Profile density: {ivi_profile_count}/5 IVI-typical profiles present")
+
+    # Signal 4: Name hints (very weak — most IVIs use generic names)
     name_lower = fp["name"].lower()
     ivi_name_hints = [
         "car", "auto", "vehicle", "ivi", "infotainment", "head unit",
@@ -206,6 +240,7 @@ def _detect_ivi_signals(fp: dict):
         signals.append(f"Name contains: {', '.join(matched_hints)} (weak signal)")
 
     fp["ivi_signals"] = signals
+    fp["ivi_confidence"] = min(len(signals) / 4.0, 1.0)  # 0.0 to 1.0
     fp["ivi_likely"] = len(signals) >= 2
     fp["is_ivi"] = fp["ivi_likely"]  # backward compat
 
@@ -216,33 +251,64 @@ def _map_attack_surface(fp: dict, services: list[dict]):
     This works on ANY Bluetooth device, not just IVIs. Every device with
     PBAP has a phonebook attack surface, regardless of whether we think
     it's an IVI.
+
+    Uses normalized profile IDs when available, falls back to string
+    matching on raw service data.
     """
-    profile_names = [p.get("profile", "") + " " + p.get("name", "") for p in fp["profiles"]]
-    profile_text = " ".join(profile_names).lower()
-    class_ids_text = " ".join(
-        " ".join(s.get("class_ids", [])) for s in services
-    ).lower()
-    combined = profile_text + " " + class_ids_text
+    profile_ids = set(fp.get("_profile_ids", []))
 
-    attack_map = [
-        ("pbap", "phonebook", "PBAP: Phonebook + call log download (contacts, call history, favorites)"),
-        ("map", "message access", "MAP: SMS/MMS message extraction"),
-        ("hfp", "hands-free", "HFP: Call audio eavesdropping, call injection, AT commands"),
-        ("a2dp", "advanced audio", "A2DP: Media audio interception (music, navigation audio)"),
-        ("avrcp", "a/v remote", "AVRCP: Media control injection (play/pause/skip/volume)"),
-        ("opp", "object push", "OPP: File push to IVI (malicious files, vCards)"),
-        ("spp", "serial port", "SPP: Serial port access (AT commands, diagnostics, potential RCE)"),
-        ("dun", "dialup", "DUN: Dialup networking (internet tethering abuse)"),
-        ("hid", "human interface", "HID: Input injection (keyboard/mouse events)"),
+    # If _detect_ivi_signals hasn't run yet, build from raw data
+    if not profile_ids:
+        profile_names = [p.get("profile", "") + " " + p.get("name", "") for p in fp["profiles"]]
+        profile_text = " ".join(profile_names).lower()
+        class_ids_text = " ".join(
+            " ".join(s.get("class_ids", [])) for s in services
+        ).lower()
+        combined = profile_text + " " + class_ids_text
+    else:
+        combined = ""
+
+    # Map profile IDs to attack descriptions
+    attack_by_id = {
+        "pbap": "PBAP: Phonebook + call log download (contacts, call history, favorites)",
+        "map": "MAP: SMS/MMS message extraction",
+        "hfp": "HFP: Call audio eavesdropping, call injection, AT commands",
+        "hfp_ag": "HFP AG: Audio gateway — call routing, AT command injection",
+        "a2dp_sink": "A2DP: Media audio interception (music, navigation audio)",
+        "a2dp_source": "A2DP Source: Audio injection to device",
+        "avrcp": "AVRCP: Media control injection (play/pause/skip/volume)",
+        "opp": "OPP: File push to device (malicious files, vCards)",
+        "spp": "SPP: Serial port access (AT commands, diagnostics, potential RCE)",
+        "dun": "DUN: Dialup networking (internet tethering abuse)",
+        "hid": "HID: Input injection (keyboard/mouse events)",
+        "pnp": "PnP: Device identification (vendor/product for targeted exploits)",
+    }
+
+    for pid, desc in attack_by_id.items():
+        if pid in profile_ids:
+            fp["attack_surface"].append(desc)
+
+    # Fallback string matching for profiles not captured by normalization
+    fallback_patterns = [
         ("sim", "sim access", "SAP: SIM Access Profile (SIM data extraction)"),
-        ("ftp", "file transfer", "FTP: File Transfer Profile (browse/download IVI filesystem)"),
-        ("pnp", "device id", "PnP: Device identification (vendor/product for targeted exploits)"),
+        ("ftp", "file transfer", "FTP: File Transfer Profile (browse/download filesystem)"),
     ]
-
-    for keywords_tuple in attack_map:
-        *keywords, description = keywords_tuple
-        if any(kw in combined for kw in keywords):
-            fp["attack_surface"].append(description)
+    if combined:
+        for keywords_tuple in fallback_patterns:
+            *keywords, description = keywords_tuple
+            if any(kw in combined for kw in keywords):
+                fp["attack_surface"].append(description)
+    else:
+        # Use raw service data for fallback
+        raw_text = " ".join(
+            (s.get("profile", "") + " " + s.get("name", "") + " " +
+             " ".join(s.get("class_ids", [])))
+            for s in services
+        ).lower()
+        for keywords_tuple in fallback_patterns:
+            *keywords, description = keywords_tuple
+            if any(kw in raw_text for kw in keywords):
+                fp["attack_surface"].append(description)
 
     # Note open RFCOMM channels as additional attack surface
     rfcomm_channels = [
@@ -284,4 +350,27 @@ def _check_vuln_hints(fp: dict):
         fp["vuln_hints"].append(
             f"Legacy pairing: BT {ver} — may use fixed PIN. "
             f"PIN brute-force feasible."
+        )
+    if ver < 5.4:
+        fp["vuln_hints"].append(
+            f"BrakTooth (multiple CVEs): BT {ver} < 5.4 — LMP/baseband "
+            f"fuzzing vulnerabilities in many chipsets. Check vendor patches."
+        )
+    if ver < 5.1:
+        fp["vuln_hints"].append(
+            f"SweynTooth (multiple CVEs): BT {ver} — BLE link layer "
+            f"vulnerabilities. Crash/deadlock via malformed LL packets."
+        )
+
+    # Check for profiles that increase risk
+    profile_ids = set(fp.get("_profile_ids", []))
+    if "spp" in profile_ids:
+        fp["vuln_hints"].append(
+            "SPP exposed: Serial port may accept AT commands without auth. "
+            "Test for unauthenticated access."
+        )
+    if "pbap" in profile_ids and ver < 5.0:
+        fp["vuln_hints"].append(
+            "PBAP on legacy BT: Phonebook access may be exploitable "
+            "without proper pairing (BlueBorne + PBAP combo)."
         )

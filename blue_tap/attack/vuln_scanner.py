@@ -28,6 +28,29 @@ from blue_tap.utils.output import (
     warning,
 )
 
+# Timeout constants (seconds) — tune these for your environment
+HCITOOL_TIMEOUT = 12       # hcitool info/name commands
+SDP_BROWSE_TIMEOUT = 30    # sdptool browse
+RFCOMM_PROBE_TIMEOUT = 2.0 # RFCOMM channel connect probes
+L2CAP_PROBE_TIMEOUT = 3.0  # L2CAP PSM connect probes
+OBEX_PROBE_TIMEOUT = 4.0   # OBEX authorization probes
+ENCRYPTION_TIMEOUT = 4.0   # Encryption enforcement checks
+AT_PROBE_TIMEOUT = 2.0     # Automotive AT command probes
+
+
+def _run_hcitool_info(address: str, hci: str = "hci0"):
+    """Run hcitool info with retry on transient failure."""
+    result = run_cmd(["hcitool", "-i", hci, "info", address], timeout=HCITOOL_TIMEOUT)
+    if result.returncode != 0:
+        # Retry once on transient failures
+        stderr = result.stderr.lower()
+        if any(hint in stderr for hint in ("timeout", "resource temporarily", "reset")):
+            verbose("hcitool info failed transiently, retrying...")
+            import time
+            time.sleep(1)
+            result = run_cmd(["hcitool", "-i", hci, "info", address], timeout=HCITOOL_TIMEOUT)
+    return result
+
 
 def _finding(
     severity: str,
@@ -71,7 +94,7 @@ def _extract_lmp_version(address: str, hci: str) -> tuple[str | None, str]:
     if not check_tool("hcitool"):
         return None, "hcitool not available"
 
-    result = run_cmd(["hcitool", "-i", hci, "info", address], timeout=12)
+    result = _run_hcitool_info(address, hci)
     if result.returncode != 0:
         return None, f"hcitool info failed: {result.stderr.strip()}"
 
@@ -116,7 +139,7 @@ def _check_service_exposure(address: str, services: list[dict]) -> list[dict]:
     blocked = []
 
     for svc_name, ch in targets:
-        probe = scanner.probe_channel(ch, timeout=2.0)
+        probe = scanner.probe_channel(ch, timeout=RFCOMM_PROBE_TIMEOUT)
         if probe.get("status") == "open":
             confirmed.append((svc_name, ch, probe.get("response_type", "unknown")))
         else:
@@ -449,35 +472,157 @@ def _check_bias(ssp: bool | None) -> list[dict]:
     return findings
 
 
-def _check_blueborne(address: str) -> list[dict]:
-    findings: list[dict] = []
-    raw_sdp = get_raw_sdp(address)
-    if "BlueZ" not in raw_sdp:
+def _check_bias_active(address: str, hci: str, ssp: bool | None,
+                       phone_address: str | None = None) -> list[dict]:
+    """Actively probe for BIAS vulnerability (CVE-2020-10135).
+
+    This is invasive: temporarily spoofs adapter MAC and identity,
+    then tests if the target auto-reconnects.
+
+    Args:
+        phone_address: MAC of the phone paired with the target. Required for
+            the auto-reconnect test — without it, we can still check SSP/version
+            but cannot test whether the IVI reconnects to a spoofed identity.
+    """
+    findings = []
+
+    if ssp is False:
+        findings.append(_finding(
+            "info", "BIAS probe skipped (no SSP)",
+            "Device does not support SSP — BIAS attack targets SSP authentication. "
+            "Legacy pairing has its own weaknesses (see PIN bypass check).",
+            cve="CVE-2020-10135",
+            status="unverified",
+            confidence="high",
+        ))
         return findings
 
-    m = re.search(r"BlueZ\s+(\d+\.\d+)", raw_sdp)
-    if not m:
+    if not phone_address:
+        findings.append(_finding(
+            "info", "BIAS auto-reconnect test skipped (no phone address)",
+            "Active BIAS probe requires the paired phone's MAC address to test "
+            "auto-reconnection. Use --phone <MAC> or select interactively. "
+            "SSP and version checks were still performed in the passive scan.",
+            cve="CVE-2020-10135",
+            status="unverified",
+            confidence="low",
+        ))
         return findings
 
     try:
-        bluez_ver = float(m.group(1))
-    except ValueError:
-        return findings
+        from blue_tap.attack.bias import BIASAttack
 
-    if bluez_ver < 5.47:
-        findings.append(
-            _finding(
-                "HIGH",
-                "BlueBorne Susceptibility Indicator (CVE-2017-1000251)",
-                "Observed BlueZ version string appears older than 5.47.",
-                cve="CVE-2017-1000251",
-                impact="Potential legacy BlueBorne exposure if this BlueZ version is authoritative for the target stack.",
-                remediation="Verify actual stack version and backported patches; update vendor firmware.",
+        info(f"Running active BIAS probe (spoofing as phone {phone_address})...")
+        attack = BIASAttack(address, phone_address, "Phone", hci)
+        result = attack.probe_vulnerability()
+
+        if result.get("auto_reconnects"):
+            findings.append(_finding(
+                "critical",
+                "BIAS: Auto-reconnection to spoofed identity (CVE-2020-10135)",
+                f"Target auto-reconnected to a spoofed identity within 15 seconds. "
+                f"This confirms the BIAS vulnerability — an attacker can impersonate "
+                f"the paired phone and gain full access without re-pairing.",
+                cve="CVE-2020-10135",
+                impact="Complete authentication bypass. Attacker can connect as the "
+                       "paired phone and access all profiles (PBAP, MAP, HFP, A2DP).",
+                remediation="Update IVI firmware to enforce mutual authentication. "
+                           "Disable auto-reconnect for paired devices if possible.",
+                status="confirmed",
+                confidence="high",
+                evidence=f"Auto-reconnect detected. SSP: {result.get('ssp_supported')}, "
+                         f"BT version: {result.get('bt_version')}",
+            ))
+        elif result.get("ssp_supported") is False:
+            findings.append(_finding(
+                "high",
+                "BIAS: SSP not enforced (CVE-2020-10135)",
+                "Target does not enforce SSP — legacy pairing can be exploited "
+                "for authentication bypass via role-switch.",
+                cve="CVE-2020-10135",
+                impact="Authentication bypass possible via role-switch attack.",
+                remediation="Enable and enforce SSP on the target device.",
                 status="potential",
                 confidence="medium",
-                evidence=f"SDP contains BlueZ {m.group(1)}",
+                evidence=f"SSP supported: {result.get('ssp_supported')}, "
+                         f"BT version: {result.get('bt_version')}",
+            ))
+        else:
+            findings.append(_finding(
+                "medium",
+                "BIAS: Active probe inconclusive (CVE-2020-10135)",
+                "Active BIAS probe completed but target did not auto-reconnect "
+                "within the test window. May still be vulnerable with different timing.",
+                cve="CVE-2020-10135",
+                status="potential",
+                confidence="low",
+                evidence=f"No auto-reconnect in 15s. SSP: {result.get('ssp_supported')}, "
+                         f"BT version: {result.get('bt_version')}",
+            ))
+    except ImportError:
+        findings.append(_finding(
+            "info", "BIAS active probe unavailable",
+            "Could not import BIAS attack module.",
+            cve="CVE-2020-10135",
+            status="unverified",
+            confidence="low",
+        ))
+    except Exception as e:
+        warning(f"BIAS active probe failed: {e}")
+        findings.append(_finding(
+            "info", "BIAS active probe failed",
+            f"Active probe encountered an error: {e}. "
+            "The device may still be vulnerable — try manual testing.",
+            cve="CVE-2020-10135",
+            status="unverified",
+            confidence="low",
+        ))
+
+    return findings
+
+
+def _check_blueborne(address: str) -> list[dict]:
+    findings: list[dict] = []
+
+    # Primary: try bluetoothd --version (more reliable than SDP strings)
+    btd_result = run_cmd(["bluetoothd", "--version"], timeout=5)
+    bluez_version = None
+    version_source = ""
+    if btd_result.returncode == 0:
+        ver_match = re.search(r"(\d+\.\d+)", btd_result.stdout)
+        if ver_match:
+            bluez_version = ver_match.group(1)
+            version_source = f"bluetoothd --version reported {bluez_version}"
+
+    # Fallback: parse SDP output for BlueZ version string
+    if bluez_version is None:
+        raw_sdp = get_raw_sdp(address)
+        if "BlueZ" in raw_sdp:
+            m = re.search(r"BlueZ\s+(\d+\.\d+)", raw_sdp)
+            if m:
+                bluez_version = m.group(1)
+                version_source = f"SDP contains BlueZ {bluez_version}"
+
+    if bluez_version:
+        try:
+            bluez_ver = float(bluez_version)
+        except ValueError:
+            return findings
+
+        if bluez_ver < 5.47:
+            findings.append(
+                _finding(
+                    "HIGH",
+                    "BlueBorne Susceptibility Indicator (CVE-2017-1000251)",
+                    "Observed BlueZ version string appears older than 5.47.",
+                    cve="CVE-2017-1000251",
+                    impact="Potential legacy BlueBorne exposure if this BlueZ version is authoritative for the target stack.",
+                    remediation="Verify actual stack version and backported patches; update vendor firmware.",
+                    status="potential",
+                    confidence="medium",
+                    evidence=version_source,
+                )
             )
-        )
     return findings
 
 
@@ -584,7 +729,7 @@ def _check_braktooth_chipset(address: str, hci: str) -> list[dict]:
     """
     findings: list[dict] = []
 
-    result = run_cmd(["hcitool", "-i", hci, "info", address], timeout=10)
+    result = _run_hcitool_info(address, hci)
     if result.returncode != 0:
         return findings
 
@@ -598,14 +743,14 @@ def _check_braktooth_chipset(address: str, hci: str) -> list[dict]:
         return findings
 
     for chipset_key, cves in _BRAKTOOTH_CHIPSETS.items():
-        if chipset_key in manufacturer:
+        if re.search(rf'\b{re.escape(chipset_key)}\b', manufacturer, re.IGNORECASE):
             findings.append(
                 _finding(
                     "MEDIUM",
                     f"BrakTooth Chipset Susceptibility ({chipset_key})",
                     f"Target manufacturer '{manufacturer}' matches known BrakTooth-vulnerable "
                     f"chipset family. BrakTooth affects LMP/baseband layer (16 vulns, 25 CVEs).",
-                    cve=cves[0],
+                    cve=", ".join(cves),
                     impact="Potential firmware crash, deadlock, or RCE via crafted LMP PDUs. "
                            "Requires ESP32-based attack hardware or SDR, not testable via HCI.",
                     remediation="Check vendor firmware update status. BrakTooth patches are chipset-specific.",
@@ -614,8 +759,7 @@ def _check_braktooth_chipset(address: str, hci: str) -> list[dict]:
                     evidence=f"Manufacturer: {manufacturer}, matched chipset: {chipset_key}",
                 )
             )
-            info(f"BrakTooth chipset match: {manufacturer} ({cves[0]})")
-            break
+            info(f"BrakTooth chipset match: {manufacturer} ({', '.join(cves)})")
 
     if not findings:
         info(f"No BrakTooth chipset match for: {manufacturer}")
@@ -639,7 +783,7 @@ def _check_eatt_support(address: str) -> list[dict]:
             socket.SOCK_SEQPACKET,
             getattr(socket, "BTPROTO_L2CAP", 0),
         )
-        sock.settimeout(3.0)
+        sock.settimeout(L2CAP_PROBE_TIMEOUT)
         try:
             sock.connect((address, 0x0027))
             findings.append(
@@ -755,9 +899,10 @@ def _check_encryption_enforcement(address: str, services: list[dict]) -> list[di
     BTPROTO_RFCOMM = getattr(socket, "BTPROTO_RFCOMM", 3)
 
     for svc_name, ch in targets:
+        sock = None
         try:
             sock = socket.socket(AF_BLUETOOTH, socket.SOCK_STREAM, BTPROTO_RFCOMM)
-            sock.settimeout(4.0)
+            sock.settimeout(ENCRYPTION_TIMEOUT)
             # Set security level to BT_SECURITY_LOW (1)
             sec_struct = struct.pack("BBH", 1, 0, 0)
             sock.setsockopt(SOL_BLUETOOTH, BT_SECURITY, sec_struct)
@@ -794,6 +939,11 @@ def _check_encryption_enforcement(address: str, services: list[dict]) -> list[di
                     verbose(f"Encryption check for {svc_name}/ch{ch}: {exc}")
         except OSError as exc:
             verbose(f"Socket setup failed for encryption check on {svc_name}/ch{ch}: {exc}")
+            if sock is not None:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
 
     return findings
 
@@ -810,7 +960,7 @@ def _check_pin_lockout(address: str, hci: str, ssp: bool | None) -> list[dict]:
         from blue_tap.attack.pin_brute import PINBruteForce
 
         brute = PINBruteForce(address, hci=hci)
-        result = brute.detect_lockout(attempts=3)
+        result = brute.detect_lockout(attempts=2)
     except Exception as exc:
         verbose(f"PIN lockout detection failed: {exc}")
         return findings
@@ -869,7 +1019,7 @@ def _check_device_class(address: str, hci: str) -> list[dict]:
     if not check_tool("hcitool"):
         return findings
 
-    result = run_cmd(["hcitool", "-i", hci, "info", address], timeout=12)
+    result = _run_hcitool_info(address, hci)
     if result.returncode != 0:
         return findings
 
@@ -918,7 +1068,7 @@ def _extract_lmp_features_dict(address: str, hci: str) -> dict | None:
     if not check_tool("hcitool"):
         return None
 
-    result = run_cmd(["hcitool", "-i", hci, "info", address], timeout=12)
+    result = _run_hcitool_info(address, hci)
     if result.returncode != 0:
         return None
 
@@ -954,7 +1104,7 @@ def _check_lmp_features(address: str, hci: str) -> list[dict]:
     if not check_tool("hcitool"):
         return findings
 
-    result = run_cmd(["hcitool", "-i", hci, "info", address], timeout=12)
+    result = _run_hcitool_info(address, hci)
     if result.returncode != 0:
         return findings
 
@@ -1084,7 +1234,7 @@ def _check_authorization_model(address: str, services: list[dict]) -> list[dict]
         target_uuid = MAP_UUID if any(k in svc_lower for k in ("map", "message")) else PBAP_UUID
         try:
             sock = socket.socket(AF_BLUETOOTH, socket.SOCK_STREAM, BTPROTO_RFCOMM)
-            sock.settimeout(4.0)
+            sock.settimeout(OBEX_PROBE_TIMEOUT)
             try:
                 sock.connect((address, ch))
             except OSError as exc:
@@ -1113,7 +1263,7 @@ def _check_authorization_model(address: str, services: list[dict]) -> list[dict]
 
             try:
                 sock.sendall(obex_connect)
-                sock.settimeout(3.0)
+                sock.settimeout(OBEX_PROBE_TIMEOUT)
                 resp = sock.recv(1024)
             except (TimeoutError, OSError):
                 resp = b""
@@ -1133,17 +1283,19 @@ def _check_authorization_model(address: str, services: list[dict]) -> list[dict]
                         evidence=f"OBEX Connect to ch {ch} ({svc_name}) returned 0x{resp[0]:02X}",
                     )
                 )
-            elif resp and resp[0] == 0xC1:
+            elif resp and resp[0] in (0xC1, 0xC3):
                 findings.append(
                     _finding(
                         "INFO",
                         f"OBEX Authorization Enforced ({svc_name})",
-                        f"{svc_name} on channel {ch} returned Unauthorized (0xC1).",
+                        f"{svc_name} on channel {ch} returned Unauthorized/Forbidden (0x{resp[0]:02X}).",
                         status="confirmed",
                         confidence="high",
                         evidence=f"OBEX Connect to ch {ch} ({svc_name}) returned 0x{resp[0]:02X}",
                     )
                 )
+            elif resp and resp[0] in (0xC0, 0x44, 0xD0):
+                verbose(f"OBEX rejected from {svc_name}/ch{ch}: 0x{resp[0]:02X}")
             elif resp:
                 verbose(f"OBEX response from {svc_name}/ch{ch}: 0x{resp[0]:02X}")
         except OSError as exc:
@@ -1213,7 +1365,7 @@ def _check_automotive_diagnostics(address: str, services: list[dict]) -> list[di
             continue
         try:
             sock = socket.socket(AF_BLUETOOTH, socket.SOCK_STREAM, BTPROTO_RFCOMM)
-            sock.settimeout(4.0)
+            sock.settimeout(OBEX_PROBE_TIMEOUT)
             try:
                 sock.connect((address, ch))
             except OSError:
@@ -1224,10 +1376,10 @@ def _check_automotive_diagnostics(address: str, services: list[dict]) -> list[di
             for probe in probes:
                 try:
                     sock.sendall(probe)
-                    sock.settimeout(2.0)
+                    sock.settimeout(AT_PROBE_TIMEOUT)
                     data = sock.recv(1024)
                     if data:
-                        responses.append((probe.strip().decode(), data))
+                        responses.append((probe.strip().decode(errors="replace"), data))
                 except (TimeoutError, OSError):
                     continue
 
@@ -1273,7 +1425,8 @@ def _check_automotive_diagnostics(address: str, services: list[dict]) -> list[di
     return findings
 
 
-def scan_vulnerabilities(address: str, hci: str = "hci0") -> list[dict]:
+def scan_vulnerabilities(address: str, hci: str = "hci0", active: bool = False,
+                         phone_address: str | None = None) -> list[dict]:
     """Run vulnerability and attack-surface checks against a target.
 
     Output is evidence-based and intentionally avoids definitive CVE claims
@@ -1340,55 +1493,74 @@ def scan_vulnerabilities(address: str, hci: str = "hci0") -> list[dict]:
         device_name = name_result.stdout.strip()
     sdp_raw = get_raw_sdp(address)
     # Extract manufacturer from hcitool info
-    info_result = run_cmd(["hcitool", "-i", hci, "info", address], timeout=10)
+    info_result = _run_hcitool_info(address, hci)
     if info_result.returncode == 0:
         mfr_m = re.search(r"Manufacturer:\s*(.+)", info_result.stdout)
         if mfr_m:
             manufacturer = mfr_m.group(1).strip()
 
-    findings.extend(_check_knob(bt_version, raw_version, lmp_feats))
-    findings.extend(_check_blurtooth(bt_version, raw_version, lmp_feats))
-    findings.extend(_check_bluffs(bt_version, raw_version))
-    findings.extend(_check_bias(ssp))
-    findings.extend(_check_blueborne(address))
-    findings.extend(_check_pin_pairing_bypass(bt_version, raw_version, ssp))
-    findings.extend(_check_invalid_curve(bt_version, raw_version, lmp_feats))
+    # --- Local analysis checks (parallel, no active connections needed) ---
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    section("Check 5: Pairing Method Probe", style="bt.cyan")
-    findings.extend(_check_pairing_method(address, hci))
+    section("Check 4a: Local Analysis (version/feature checks)", style="bt.cyan")
+    local_checks = [
+        lambda: _check_knob(bt_version, raw_version, lmp_feats),
+        lambda: _check_blurtooth(bt_version, raw_version, lmp_feats),
+        lambda: _check_bluffs(bt_version, raw_version),
+        lambda: _check_pin_pairing_bypass(bt_version, raw_version, ssp),
+        lambda: _check_invalid_curve(bt_version, raw_version, lmp_feats),
+        *([] if active else [lambda: _check_bias(ssp)]),
+        lambda: _check_braktooth_chipset(address, hci),
+        lambda: _check_lmp_features(address, hci),
+        lambda: _check_device_class(address, hci),
+        lambda: _check_blueborne(address),
+    ]
 
-    section("Check 6: BLE Writable Surface", style="bt.cyan")
-    findings.extend(_check_writable_gatt(address))
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = [pool.submit(fn) for fn in local_checks]
+        for future in as_completed(futures):
+            try:
+                findings.extend(future.result())
+            except Exception as e:
+                warning(f"Check failed: {e}")
 
-    section("Check 7: BrakTooth Chipset Susceptibility", style="bt.cyan")
-    findings.extend(_check_braktooth_chipset(address, hci))
+    # --- Sequential active checks (require active connections, can't overlap) ---
+    section("Check 5: Encryption Enforcement", style="bt.cyan")
+    findings.extend(_check_encryption_enforcement(address, services))
 
-    section("Check 8: EATT Support (BT 5.2+ Indicator)", style="bt.cyan")
-    findings.extend(_check_eatt_support(address))
+    section("Check 6: Authorization Model (OBEX)", style="bt.cyan")
+    findings.extend(_check_authorization_model(address, services))
+
+    section("Check 7: Automotive Diagnostics", style="bt.cyan")
+    findings.extend(_check_automotive_diagnostics(address, services))
+
+    if active:
+        section("Active Check: PIN Lockout Detection")
+        findings.extend(_check_pin_lockout(address, hci, ssp))
+    else:
+        verbose("Skipping PIN lockout check (use --active to enable)")
+
+    if active:
+        section("Active Check: BIAS Vulnerability Probe")
+        findings.extend(_check_bias_active(address, hci, ssp, phone_address))
 
     section("Check 9: Hidden RFCOMM Services", style="bt.cyan")
     findings.extend(_check_hidden_rfcomm(address, services))
 
-    section("Check 10: Encryption Enforcement", style="bt.cyan")
-    findings.extend(_check_encryption_enforcement(address, services))
+    section("Check 10: BLE Writable Surface", style="bt.cyan")
+    findings.extend(_check_writable_gatt(address))
 
-    section("Check 11: PIN Lockout Behavior", style="bt.cyan")
-    findings.extend(_check_pin_lockout(address, hci, ssp))
+    section("Check 11: EATT Support (BT 5.2+ Indicator)", style="bt.cyan")
+    findings.extend(_check_eatt_support(address))
 
-    section("Check 12: Device Class Analysis", style="bt.cyan")
-    findings.extend(_check_device_class(address, hci))
+    section("Check 12: Pairing Method Probe", style="bt.cyan")
+    findings.extend(_check_pairing_method(address, hci))
 
-    section("Check 13: LMP Feature Bits", style="bt.cyan")
-    findings.extend(_check_lmp_features(address, hci))
-
-    section("Check 14: Authorization Model (OBEX)", style="bt.cyan")
-    findings.extend(_check_authorization_model(address, services))
-
-    section("Check 15: Automotive Diagnostics", style="bt.cyan")
-    findings.extend(_check_automotive_diagnostics(address, services))
-
-    section("Check 16: PerfektBlue (OpenSynergy BlueSDK)", style="bt.cyan")
+    section("Check 13: PerfektBlue (OpenSynergy BlueSDK)", style="bt.cyan")
     findings.extend(_check_perfektblue(address, services, device_name, manufacturer, sdp_raw))
+
+    if not active:
+        info("Tip: Use --active to enable invasive checks (BIAS probe, PIN lockout)")
 
     _print_findings(address, findings)
     return findings
