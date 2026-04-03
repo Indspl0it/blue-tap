@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "blue-tap"
-version = "2.1.1"
+version = "2.2.0"
 description = "Bluetooth/BLE Penetration Testing Toolkit for Automotive IVI Systems"
 readme = "README.md"
 license = {text = "GPL-3.0-or-later"}
@@ -14,6 +14,7 @@ requires-python = ">=3.10"
 dependencies = [
     "click>=8.1",
     "rich>=13.0",
+    "rich-click>=1.8",
     "bleak>=0.21",
     "dbus-fast>=2.0",
     "scapy>=2.5",
