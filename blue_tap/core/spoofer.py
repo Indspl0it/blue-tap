@@ -238,6 +238,25 @@ def spoof_btmgmt(hci: str, target_mac: str) -> bool:
         return False
 
 
+def spoof_rtl8761b(hci: str, target_mac: str) -> bool:
+    """Spoof BDADDR on RTL8761B via DarkFirmware firmware patching.
+
+    Patches the firmware binary at the BDADDR offset and performs a USB
+    reset to reload the firmware with the new address.  This is the only
+    reliable spoofing method for Realtek chipsets (bdaddr, spooftooph,
+    and btmgmt all return 'Unsupported manufacturer').
+    """
+    try:
+        from blue_tap.core.firmware import DarkFirmwareManager
+        fw = DarkFirmwareManager()
+        if not fw.detect_rtl8761b(hci):
+            return False
+        return fw.patch_bdaddr(target_mac, hci)
+    except Exception as exc:
+        error(f"RTL8761B BDADDR spoofing failed: {exc}")
+        return False
+
+
 def spoof_address(hci: str, target_mac: str, method: str = "auto") -> bool:
     """Spoof MAC address using the best available method.
 
@@ -258,7 +277,21 @@ def spoof_address(hci: str, target_mac: str, method: str = "auto") -> bool:
         return spoof_spooftooph(hci, target_mac)
     elif method == "btmgmt":
         return spoof_btmgmt(hci, target_mac)
+    elif method == "rtl8761b":
+        return spoof_rtl8761b(hci, target_mac)
     else:
+        # Try RTL8761B firmware patching first (only method that works on Realtek)
+        try:
+            from blue_tap.core.firmware import DarkFirmwareManager
+            fw = DarkFirmwareManager()
+            if fw.detect_rtl8761b(hci):
+                info("Detected RTL8761B — using firmware BDADDR patching")
+                if spoof_rtl8761b(hci, target_mac):
+                    return True
+                warning("RTL8761B firmware patching failed, trying other methods...")
+        except ImportError:
+            pass
+
         # Auto: try each method
         for name, fn in [
             ("bdaddr", spoof_bdaddr),

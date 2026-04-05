@@ -967,6 +967,66 @@ def _validate_at_structure(response: bytes) -> list[Anomaly]:
     return anomalies
 
 
+def _validate_lmp_structure(response: bytes) -> list[Anomaly]:
+    """Parse LMP response opcode and extract structured anomaly signals.
+
+    LMP PDU wire format: byte 0 = (opcode << 1) | tid (over-the-air encoding).
+    DarkFirmware strips the TID-shift so bytes arriving here are raw:
+      byte 0 = opcode (lower 7 bits)
+
+    Well-known response opcodes and their significance:
+      LMP_ACCEPTED      (3)  — normal acknowledgement, low signal
+      LMP_NOT_ACCEPTED  (4)  — rejection: byte 1 = rejected opcode, byte 2 = reason
+      LMP_DETACH        (7)  — link termination: byte 1 = error code; HIGH SIGNAL
+      LMP_FEATURES_RES  (40) — feature bitmask in bytes 1-8
+    """
+    if len(response) == 0:
+        return []
+
+    anomalies: list[Anomaly] = []
+    opcode = response[0] & 0x7F  # mask TID bit just in case
+
+    if opcode == 7:  # LMP_DETACH
+        reason = response[1] if len(response) > 1 else 0x00
+        anomalies.append(Anomaly(
+            AnomalyType.BEHAVIORAL, "critical", "lmp",
+            f"LMP_DETACH received — remote disconnected (reason=0x{reason:02x}); "
+            f"possible crash, state corruption, or security rejection",
+            evidence=response.hex(),
+            score=9.0,
+        ))
+
+    elif opcode == 4:  # LMP_NOT_ACCEPTED
+        rejected_opcode = response[1] if len(response) > 1 else 0x00
+        reason = response[2] if len(response) > 2 else 0x00
+        # NOT_ACCEPTED is medium signal — novel (rejected_opcode, reason) pairs
+        # indicate new code paths being exercised on the target.
+        anomalies.append(Anomaly(
+            AnomalyType.BEHAVIORAL, "medium", "lmp",
+            f"LMP_NOT_ACCEPTED for opcode 0x{rejected_opcode:02x} "
+            f"(reason=0x{reason:02x})",
+            evidence=response.hex(),
+            # Score varies by reason code: 0x06 = "Command Disallowed" in wrong state
+            score=5.0 if reason in (0x06, 0x12) else 3.5,
+        ))
+
+    elif opcode == 3:  # LMP_ACCEPTED
+        accepted_opcode = response[1] if len(response) > 1 else 0x00
+        # Accepted is low signal unless the accepted opcode is security-critical
+        # (encryption, auth, key exchange).
+        _security_opcodes = {0x10, 0x11, 0x12, 0x13, 0x17, 0x18, 0x19, 0x1A}
+        if accepted_opcode in _security_opcodes:
+            anomalies.append(Anomaly(
+                AnomalyType.BEHAVIORAL, "low", "lmp",
+                f"LMP_ACCEPTED for security-critical opcode 0x{accepted_opcode:02x} "
+                f"— target entered security negotiation path",
+                evidence=response.hex(),
+                score=4.0,
+            ))
+
+    return anomalies
+
+
 # Map protocol names to validators
 _STRUCTURAL_VALIDATORS: dict[str, type[list]] = {
     "sdp": _validate_sdp_structure,
@@ -982,6 +1042,7 @@ _STRUCTURAL_VALIDATORS: dict[str, type[list]] = {
     "at-phonebook": _validate_at_structure,
     "at-sms": _validate_at_structure,
     "at-injection": _validate_at_structure,
+    "lmp": _validate_lmp_structure,
 }
 
 

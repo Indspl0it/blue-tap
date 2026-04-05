@@ -5,6 +5,74 @@ All notable changes to Blue-Tap are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0] - 2026-04-05
+
+### Added — DarkFirmware Below-HCI Attack Platform
+
+This release extends Blue-Tap below the HCI boundary with a custom firmware platform for RTL8761B (TP-Link UB500). The DarkFirmware integration enables direct LMP packet injection and monitoring — capabilities that no standard BlueZ tool provides.
+
+**Key breakthrough:** Live RAM patching of the RTL8761B controller — BDADDR spoofing and 17-byte LMP PDU injection/capture work without adapter reset, by writing directly to the running firmware's SRAM via HCI VSC 0xFC61/0xFC62. The original DarkFirmware research supported basic injection; Blue-Tap extends this with live RAM patching, full 17-byte LMP PDU support (not just 10-byte), and structured LMP log parsing.
+
+#### DarkFirmware Core (4 new modules, 1,772 lines)
+
+- **`core/hci_vsc.py`** (584 lines) — Raw HCI socket interface for vendor-specific commands: LMP injection (VSC 0xFE22), controller memory read (0xFC61), memory write (0xFC62), background LMP monitor thread with structured 56-byte log parsing
+- **`core/firmware.py`** (788 lines) — DarkFirmware lifecycle management: RTL8761B detection, firmware install/restore with automatic backup, live RAM BDADDR patching (no reset), firmware status verification via memory read, controller memory dump, USB reset
+- **Runtime detection** — CLI auto-detects RTL8761B and DarkFirmware at startup, shows green "active" status or warning with install command
+- **Firmware CLI commands** — `adapter firmware-status`, `firmware-install`, `firmware-spoof`, `firmware-set`, `firmware-dump`, `connections`
+
+#### Below-HCI Attacks (2 new modules, 771 lines)
+
+- **BLUFFS attack** (`attack/bluffs.py`, 408 lines) — CVE-2023-24023 session key derivation downgrade with probe/A1 (LSC key-downgrade)/A3 (SC→LSC downgrade) variants via DarkFirmware LMP injection
+- **Encryption downgrade** (`attack/encryption_downgrade.py`, 363 lines) — 3 attack methods beyond KNOB: `LMP_ENCRYPTION_MODE_REQ(mode=0)` to disable encryption, stop/start toggle for weaker renegotiation, SC PDU rejection to force Legacy SC
+
+#### LMP Protocol Support
+
+- **LMP protocol builder** (`fuzz/protocols/lmp.py`, 2,020 lines) — Full LMP PDU construction for 30+ opcodes: key negotiation, encryption setup, feature exchange, role switch, version exchange, pairing, power control
+- **LMP fuzzing** — 12th protocol added to campaign engine via HCI VSC injection
+- **LMP sniffing** — `recon lmp-sniff`, `lmp-monitor` (with live dashboard), `combined-sniff` (HCI + LMP)
+- **LMP DoS** — `dos lmp` with configurable method, count, and delay
+
+#### Other New Features
+
+- **Assess command** — Non-destructive 5-phase security assessment (fingerprint → services → vulnscan → DarkFirmware probe → summary with next-step commands)
+- **TargetedStrategy wired into engine** — `--strategy targeted` now works in fuzz campaigns via adapter wrapper that bridges the CVE-pattern generator API to the engine's generate/feedback interface
+- **Session adapter tracking** — `set_adapter()` auto-records which HCI adapter is used; populated automatically from `--hci` parameter
+- **Protocol DoS expansion** — LMP-level DoS attacks via DarkFirmware
+- **BIAS LMP injection mode** — BIAS attack can now use DarkFirmware for LMP-level role-switch manipulation
+- **KNOB LMP negotiation** — KNOB attack uses DarkFirmware for direct LMP key-size manipulation
+- **Sniffer rewrite** — Replaced USRP B210 SDR integration with DarkFirmware LMP capture; nRF52840 BLE sniffing retained
+- **Playbooks module** — `blue_tap/playbooks/` for reusable assessment sequences
+- **UI dashboard** — `blue_tap/ui/dashboard.py` for live attack monitoring
+- **Fuzzing strategy base class** — `fuzz/strategies/base.py` formal strategy interface
+
+### Improved
+
+- **README overhauled** — Added BLUFFS, encryption downgrade, assess, DarkFirmware sections; RTL8761B as primary recommended adapter; DarkFirmware setup in Quick Start; Credits & References section with research paper citations; 9 workflows; removed CSR8510 from hardware table (BT 4.x)
+- **Hardware recommendations** — RTL8761B (TP-Link UB500) promoted to primary adapter; dual-adapter setup no longer needed; USRP B210 kept only as research-grade option
+- **Fuzz engine** — Baseline learning uses explicit `recv_timeout=5.0`; field weight tracker logs exceptions instead of silently swallowing; `_StubCorpus` now implements `get_all_seeds()` for proper baseline learning
+- **Report generator** — Crash DB load errors use `warning()` instead of silent `info()`
+- **SDP parser** — PSM channel fallback returns `0` (int) instead of raw string for type consistency
+- **CLI command grouping** — Added bluffs, encryption-downgrade, assess to Rich-Click command groups; `_infer_category` covers all attack types
+- **Vuln scanner** — Extended with DarkFirmware-aware checks
+- **Transport layer** — LMP transport added alongside L2CAP/RFCOMM/BLE
+- **Coverage-guided strategy** — Enhanced with protocol-aware seed selection
+- **State machine strategy** — Extended with LMP state transitions
+
+### Fixed
+
+- **fleet_assess NameError** (HIGH) — `risk_color` undefined when `results` is empty, causing crash
+- **_StubCorpus missing `get_all_seeds()`** — Baseline learning silently skipped when Corpus import failed
+- **Dead `_SESSION_SKIP_COMMANDS`** — Removed unused module-level variable
+- **Unnecessary `hasattr()` guard** — Removed defensive check on `add_session_metadata()` that always exists
+- **Silent field tracker exceptions** — `except: pass` in field weight tracker now logs warnings
+- **Baseline recv timeout** — Baseline learning now passes explicit timeout instead of relying on transport default
+
+### Removed
+
+- **USRP B210 SDR integration** — Replaced by DarkFirmware LMP capture (simpler, cheaper, more reliable)
+- **CSR8510 from recommended hardware** — BT 4.x adapter superseded by RTL8761B (BT 5.0 + DarkFirmware)
+- **All mock-based test files** (26 files, 21K lines) — Replaced with real hardware validation workflows
+
 ## [2.2.0] - 2026-04-04
 
 ### Added

@@ -241,8 +241,8 @@ class HijackSession:
         """Phase 2+3 alternative: Use BIAS attack to bypass authentication.
 
         Combines impersonation and connection into one step using the BIAS
-        CVE-2020-10135 role-switch technique. Falls back to InternalBlue
-        guidance if the software-only approach fails.
+        CVE-2020-10135 role-switch technique. Falls back to DarkFirmware
+        LMP injection if the software-only approach fails.
         """
         with phase("BIAS Authentication Bypass", 2, 5):
             from blue_tap.attack.bias import BIASAttack

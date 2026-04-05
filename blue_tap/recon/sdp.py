@@ -125,7 +125,7 @@ def parse_sdp_output(output: str) -> list[dict]:
                 try:
                     current["channel"] = int(m.group(1), 0)
                 except (ValueError, TypeError):
-                    current["channel"] = m.group(1)
+                    current["channel"] = 0
 
         elif line.startswith("Channel:") and current and last_protocol == "RFCOMM":
             m = re.search(r"Channel:\s*(\d+)", line)
@@ -140,7 +140,7 @@ def parse_sdp_output(output: str) -> list[dict]:
                 try:
                     current["channel"] = int(m.group(1), 0)
                 except (ValueError, TypeError):
-                    current["channel"] = m.group(1)
+                    current["channel"] = 0
 
         elif "OBEX" in line and current:
             current.setdefault("protocols", []).append("OBEX")

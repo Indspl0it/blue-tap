@@ -40,6 +40,7 @@ from dataclasses import dataclass
 from blue_tap.fuzz.corpus import Corpus
 from blue_tap.fuzz.mutators import CorpusMutator
 from blue_tap.fuzz.strategies._registry import get_registry, PROTOCOLS as _SHARED_PROTOCOLS
+from blue_tap.fuzz.strategies.base import FuzzStrategy
 
 
 # ---------------------------------------------------------------------------
@@ -57,6 +58,11 @@ _INITIAL_ENERGY = 50
 
 # Energy assigned to a crash-producing input (maximum priority).
 _CRASH_ENERGY = 100
+
+# Energy assigned when reloading a saved interesting input on session resume.
+# Half of _INITIAL_ENERGY — we don't know if the input is still interesting
+# for the current target session, so we deprioritise it relative to fresh finds.
+_RELOAD_ENERGY = 25
 
 # Maximum dedup retries per generate() call.
 _MAX_DEDUP_RETRIES = 8
@@ -88,7 +94,7 @@ class CoverageStats:
 # CoverageGuidedStrategy
 # ---------------------------------------------------------------------------
 
-class CoverageGuidedStrategy:
+class CoverageGuidedStrategy(FuzzStrategy):
     """Response-diversity guided fuzzing strategy.
 
     Uses response fingerprinting as a proxy for code coverage:
@@ -103,6 +109,9 @@ class CoverageGuidedStrategy:
 
     The strategy works even when no interesting inputs exist yet — it
     falls back to random template selection from protocol builders.
+
+    Overrides :meth:`~.base.FuzzStrategy.feedback` to update the interesting
+    input pool based on observed responses and crashes.
     """
 
     # Expose the full protocol list so callers can iterate or validate.
@@ -159,13 +168,21 @@ class CoverageGuidedStrategy:
 
         for _ in range(_MAX_DEDUP_RETRIES):
             data, log = self._generate_one(protocol)
-            if self._is_novel(data):
+            # Reject empty bytes (mutation deleted all content) just like
+            # duplicates — both are useless fuzz cases.
+            if data and self._is_novel(data):
                 self._stats.total_generated += 1
                 return data, log
 
-        # Guarantee forward progress — accept even if duplicate.
+        # Guarantee forward progress — accept last result even if duplicate.
+        # If data is empty (all mutations deleted content), fall back to a
+        # minimal random blob so the engine never sends an empty payload.
         self._stats.total_generated += 1
-        return data, log  # type: ignore[possibly-undefined]
+        if not data:  # type: ignore[possibly-undefined]
+            import os as _os
+            data = _os.urandom(8)
+            log = ["fallback(empty_mutation_output)"]
+        return data, log
 
     # ------------------------------------------------------------------
     # Public API — feedback
@@ -207,18 +224,26 @@ class CoverageGuidedStrategy:
             self._stats.fingerprints_seen = len(self._fingerprints)
             self._stats.novel_responses += 1
 
-            # Save as interesting input for this protocol.
-            pool = self._interesting_inputs.setdefault(protocol, [])
-            pool.append(input_bytes)
-            self._stats.interesting_inputs += 1
-
-            # Assign energy — crashes get maximum energy.
             input_hash = self._input_hash(input_bytes)
-            self._energy[input_hash] = _CRASH_ENERGY if crash else _INITIAL_ENERGY
+            already_tracked = input_hash in self._energy
 
-            # Evict lowest-energy inputs when the pool exceeds the cap.
-            if len(pool) > _MAX_INTERESTING_PER_PROTOCOL:
-                self._evict_lowest_energy(pool)
+            if not already_tracked:
+                # First time this payload is interesting — add to pool.
+                # Guard prevents duplicates when the engine calls feedback()
+                # twice for the same payload (crash=False then crash=True),
+                # which happens when _analyze_response() feeds back a response
+                # and then _handle_crash() fires the crash signal for the same
+                # input in the same analysis cycle.
+                pool = self._interesting_inputs.setdefault(protocol, [])
+                pool.append(input_bytes)
+                self._stats.interesting_inputs += 1
+
+                # Evict lowest-energy inputs when the pool exceeds the cap.
+                if len(pool) > _MAX_INTERESTING_PER_PROTOCOL:
+                    self._evict_lowest_energy(pool)
+
+            # Always update energy — crash signal upgrades INITIAL (50) → CRASH (100).
+            self._energy[input_hash] = _CRASH_ENERGY if crash else _INITIAL_ENERGY
 
             # Persist to corpus if available.
             if self.corpus is not None:
@@ -258,6 +283,139 @@ class CoverageGuidedStrategy:
             },
             "cached_protocols": list(self._template_cache.keys()),
         }
+
+    def load_from_corpus(
+        self,
+        corpus: Corpus,
+        protocol: str | None = None,
+    ) -> int:
+        """Reload saved interesting inputs from disk into the active pool.
+
+        Called on campaign resume so the previous session's learned signal is
+        not thrown away.  Each reloaded input is assigned ``_RELOAD_ENERGY``
+        (half the normal initial energy) because we don't know if it is still
+        interesting for the current target state.
+
+        Inputs that are already in the pool (same hash) are skipped to prevent
+        duplicates when ``load_from_corpus`` is called more than once.
+
+        Args:
+            corpus:   The campaign corpus.  Must support ``list_protocols()``
+                      and ``iter_interesting(protocol)``.
+            protocol: If given, reload only this protocol.  If ``None``,
+                      reload all protocols present in the corpus.
+
+        Returns:
+            Total number of interesting inputs added to the pool.
+        """
+        if not hasattr(corpus, "iter_interesting"):
+            return 0
+
+        protocols_to_load = (
+            [protocol] if protocol is not None else corpus.list_protocols()
+        )
+        loaded = 0
+
+        for proto in protocols_to_load:
+            for data in corpus.iter_interesting(proto):
+                input_hash = self._input_hash(data)
+                if input_hash in self._energy:
+                    # Already in pool — skip to avoid duplicates.
+                    continue
+                pool = self._interesting_inputs.setdefault(proto, [])
+                pool.append(data)
+                self._energy[input_hash] = _RELOAD_ENERGY
+                loaded += 1
+                # Respect the per-protocol cap.
+                if len(pool) > _MAX_INTERESTING_PER_PROTOCOL:
+                    self._evict_lowest_energy(pool)
+
+        if loaded > 0:
+            self._stats.interesting_inputs += loaded
+
+        return loaded
+
+    def to_dict(self) -> dict:
+        """Serialise strategy state for session persistence.
+
+        Captured state:
+        - Response fingerprints seen (so novel detection continues correctly).
+        - Interesting input pools (as hex strings for JSON safety).
+        - Energy schedule (so partially-explored inputs resume with correct weight).
+        - Running statistics.
+
+        Returns:
+            A JSON-serialisable dict.  Restore with :meth:`from_dict`.
+        """
+        return {
+            "fingerprints": list(self._fingerprints),
+            "interesting_inputs": {
+                proto: [data.hex() for data in inputs]
+                for proto, inputs in self._interesting_inputs.items()
+            },
+            "energy": dict(self._energy),
+            "stats": {
+                "total_generated":    self._stats.total_generated,
+                "total_feedback":     self._stats.total_feedback,
+                "novel_responses":    self._stats.novel_responses,
+                "interesting_inputs": self._stats.interesting_inputs,
+                "fingerprints_seen":  self._stats.fingerprints_seen,
+                "crashes_seen":       self._stats.crashes_seen,
+                "exploration_rounds": self._stats.exploration_rounds,
+                "exploitation_rounds": self._stats.exploitation_rounds,
+            },
+        }
+
+    @classmethod
+    def from_dict(
+        cls,
+        data: dict,
+        corpus: Corpus | None = None,
+        fingerprint_size: int = _DEFAULT_FINGERPRINT_SIZE,
+        interesting_priority: float = _DEFAULT_INTERESTING_PRIORITY,
+    ) -> CoverageGuidedStrategy:
+        """Restore strategy state from a :meth:`to_dict` snapshot.
+
+        Used by :meth:`~blue_tap.fuzz.engine.FuzzCampaign.resume` to
+        reconstruct the strategy after reading ``campaign_state.json``.
+
+        Args:
+            data:                 Dict produced by :meth:`to_dict`.
+            corpus:               Corpus to attach to the restored strategy.
+            fingerprint_size:     How many leading bytes to hash for fingerprinting.
+            interesting_priority: Exploitation / exploration ratio (0–1).
+
+        Returns:
+            A fully-initialised :class:`CoverageGuidedStrategy`.
+        """
+        strat = cls(
+            corpus=corpus,
+            fingerprint_size=fingerprint_size,
+            interesting_priority=interesting_priority,
+        )
+
+        strat._fingerprints = set(data.get("fingerprints", []))
+
+        for proto, hex_inputs in data.get("interesting_inputs", {}).items():
+            strat._interesting_inputs[proto] = [
+                bytes.fromhex(h) for h in hex_inputs
+            ]
+
+        strat._energy = dict(data.get("energy", {}))
+
+        raw_stats = data.get("stats", {})
+        strat._stats = CoverageStats(
+            total_generated=raw_stats.get("total_generated", 0),
+            total_feedback=raw_stats.get("total_feedback", 0),
+            novel_responses=raw_stats.get("novel_responses", 0),
+            interesting_inputs=raw_stats.get("interesting_inputs", 0),
+            fingerprints_seen=raw_stats.get("fingerprints_seen", 0),
+            crashes_seen=raw_stats.get("crashes_seen", 0),
+            exploration_rounds=raw_stats.get("exploration_rounds", 0),
+            exploitation_rounds=raw_stats.get("exploitation_rounds", 0),
+        )
+
+        return strat
 
     # ------------------------------------------------------------------
     # Internal — generation dispatcher
@@ -409,13 +567,15 @@ class CoverageGuidedStrategy:
         # Template mode.
         templates = self._get_templates(protocol)
         if not templates:
-            return CorpusMutator.mutate(b"\x00" * 8, num_mutations=2), [
-                "fallback(no_templates)"
-            ]
+            blob = CorpusMutator.mutate(b"\x00" * 8, num_mutations=2)
+            return blob or b"\x00" * 8, ["fallback(no_templates)"]
 
         template = random.choice(templates)
         num_mutations = random.randint(1, 3)
         mutated = CorpusMutator.mutate(template, num_mutations=num_mutations)
+        # Guard: if mutation deleted all bytes, return the original template.
+        if not mutated:
+            mutated = template
         log = [
             f"coverage_explore_template({protocol}, {len(template)}B) "
             f"-> mutate x{num_mutations} -> {len(mutated)}B"

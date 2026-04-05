@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import random
+from collections.abc import Generator
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -47,6 +48,11 @@ class Corpus:
     def __init__(self, base_dir: str) -> None:
         self.base_dir = base_dir
         self.seeds: dict[str, list[bytes]] = {}
+        # Parallel weight array: _seed_anomaly_counts[proto][i] is the anomaly
+        # count recorded for seeds[proto][i].  Higher count → higher selection
+        # probability in get_random_seed().  Using a list (not dict) so index
+        # alignment with self.seeds is O(1) and GC-friendly.
+        self._seed_anomaly_counts: dict[str, list[int]] = {}
         Path(self.base_dir).mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------
@@ -75,6 +81,7 @@ class Corpus:
                     data = bin_file.read_bytes()
                     if data:
                         self.seeds.setdefault(protocol, []).append(data)
+                        self._seed_anomaly_counts.setdefault(protocol, []).append(0)
                         loaded += 1
                 except OSError:
                     continue
@@ -94,6 +101,7 @@ class Corpus:
             return
 
         self.seeds.setdefault(protocol, []).append(data)
+        self._seed_anomaly_counts.setdefault(protocol, []).append(0)
 
         proto_dir = Path(self.base_dir) / protocol
         proto_dir.mkdir(parents=True, exist_ok=True)
@@ -111,11 +119,43 @@ class Corpus:
     # ------------------------------------------------------------------
 
     def get_random_seed(self, protocol: str) -> bytes | None:
-        """Return a random seed for *protocol*, or ``None`` if none exist."""
+        """Return a seed for *protocol* using anomaly-weighted sampling.
+
+        Seeds that have triggered more anomalies (crashes, unexpected
+        responses) are selected proportionally more often.  Seeds with
+        zero anomalies all share a base weight of 1; each recorded anomaly
+        adds +2 to that seed's weight so high-signal inputs surface more
+        frequently without completely starving unvisited seeds.
+
+        Returns ``None`` if no seeds exist for *protocol*.
+        """
         pool = self.seeds.get(protocol)
         if not pool:
             return None
-        return random.choice(pool)
+        counts = self._seed_anomaly_counts.get(protocol, [])
+        # Compute weights: base 1 + 2 * anomaly_count
+        weights = [1 + 2 * (counts[i] if i < len(counts) else 0) for i in range(len(pool))]
+        return random.choices(pool, weights=weights, k=1)[0]
+
+    def record_anomaly(self, protocol: str, data: bytes) -> None:
+        """Increment the anomaly counter for *data* in *protocol*'s seed pool.
+
+        Called by the engine when a payload produces a crash or high-severity
+        response.  The next call to :meth:`get_random_seed` will weight
+        this seed higher.  If *data* is not in the pool it is silently ignored
+        (the fuzzer may have generated it on the fly without adding it first).
+        """
+        pool = self.seeds.get(protocol)
+        if not pool:
+            return
+        counts = self._seed_anomaly_counts.setdefault(protocol, [0] * len(pool))
+        # Pad weight list if it has drifted out of sync with seeds list
+        while len(counts) < len(pool):
+            counts.append(0)
+        for idx, seed in enumerate(pool):
+            if seed == data:
+                counts[idx] += 1
+                return
 
     def get_all_seeds(self, protocol: str) -> list[bytes]:
         """Return all seeds for a given protocol."""
@@ -144,6 +184,29 @@ class Corpus:
         dest = interesting_dir / filename
         if not dest.exists():
             dest.write_bytes(data)
+
+    def iter_interesting(self, protocol: str) -> Generator[bytes, None, None]:
+        """Yield all saved interesting inputs for *protocol* from disk.
+
+        Interesting inputs are stored under
+        ``base_dir/<protocol>/interesting/*.bin``.  This generator is used
+        by :class:`~blue_tap.fuzz.strategies.coverage_guided.CoverageGuidedStrategy`
+        on campaign resume to reload the previous session's learned signal.
+
+        Yields:
+            Raw bytes for each saved interesting input, in filesystem order.
+            Empty files are skipped silently.
+        """
+        interesting_dir = Path(self.base_dir) / protocol / "interesting"
+        if not interesting_dir.is_dir():
+            return
+        for bin_file in sorted(interesting_dir.glob("*.bin")):
+            try:
+                data = bin_file.read_bytes()
+                if data:
+                    yield data
+            except OSError:
+                continue
 
     # ------------------------------------------------------------------
     # Statistics
@@ -199,14 +262,18 @@ class Corpus:
         for protocol in list(self.seeds):
             seen: set[str] = set()
             unique: list[bytes] = []
-            for seed in self.seeds[protocol]:
+            unique_counts: list[int] = []
+            counts = self._seed_anomaly_counts.get(protocol, [])
+            for idx, seed in enumerate(self.seeds[protocol]):
                 h = hashlib.sha256(seed).hexdigest()
                 if h not in seen:
                     seen.add(h)
                     unique.append(seed)
+                    unique_counts.append(counts[idx] if idx < len(counts) else 0)
                 else:
                     removed += 1
             self.seeds[protocol] = unique
+            self._seed_anomaly_counts[protocol] = unique_counts
         return removed
 
     # ------------------------------------------------------------------

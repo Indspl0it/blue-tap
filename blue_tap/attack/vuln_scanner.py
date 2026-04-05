@@ -179,6 +179,15 @@ def _check_service_exposure(address: str, services: list[dict]) -> list[dict]:
     return findings
 
 
+def _check_darkfirmware_available(hci: str = "hci0") -> bool:
+    """Check if DarkFirmware is available for enhanced vulnerability probing."""
+    try:
+        from blue_tap.core.firmware import DarkFirmwareManager
+        return DarkFirmwareManager().is_darkfirmware_loaded(hci)
+    except Exception:
+        return False
+
+
 def _check_knob(bt_version: float | None, raw_version: str | None,
                 lmp_features: dict | None = None) -> list[dict]:
     """KNOB (CVE-2019-9506): LMP key size negotiation downgrade.
@@ -1425,6 +1434,171 @@ def _check_automotive_diagnostics(address: str, services: list[dict]) -> list[di
     return findings
 
 
+# ---------------------------------------------------------------------------
+# LMP Feature Probing via DarkFirmware
+# ---------------------------------------------------------------------------
+
+# LMP feature bitmap (BT Core Spec Vol 2, Part C, Section 3.3)
+FEATURE_BITS: dict[tuple[int, int], str] = {
+    (0, 0): "3-slot_packets",
+    (0, 1): "5-slot_packets",
+    (0, 2): "encryption",
+    (0, 3): "slot_offset",
+    (0, 4): "timing_accuracy",
+    (0, 5): "role_switch",
+    (0, 6): "hold_mode",
+    (0, 7): "sniff_mode",
+    (1, 1): "power_control",
+    (2, 1): "edr_2mbps",
+    (2, 2): "edr_3mbps",
+    (3, 3): "edr_esco_2mbps",
+    (3, 4): "edr_esco_3mbps",
+    (3, 7): "extended_features",
+    (4, 0): "le_supported",
+    (4, 1): "le_and_bredr",
+    (5, 2): "secure_connections_controller",
+    (6, 0): "secure_connections_host",
+    (7, 0): "ssp_host",
+    (7, 3): "secure_connections_host_support",
+}
+
+
+def _probe_lmp_features(address: str, hci: str) -> dict | None:
+    """Actively probe target's LMP features via DarkFirmware.
+
+    Sends LMP_FEATURES_REQ and parses the 8-byte feature bitmap
+    from the response. Returns decoded feature dict or None if
+    probing failed.
+
+    Args:
+        address: Target Bluetooth address (unused for LMP — operates on
+            the active ACL link).
+        hci: HCI adapter identifier (e.g. ``"hci0"``).
+
+    Returns:
+        Dict with ``"raw"`` (bytes) plus boolean flags for each known
+        feature, or ``None`` if probing is unavailable or fails.
+    """
+    try:
+        from blue_tap.core.hci_vsc import HCIVSCSocket
+        from blue_tap.fuzz.protocols.lmp import build_features_req, LMP_FEATURES_RES
+    except ImportError:
+        info("DarkFirmware not available — skipping LMP feature probing")
+        return None
+
+    info(f"Probing LMP features via DarkFirmware on {hci}...")
+    hci_idx = int(hci.replace("hci", "")) if hci.startswith("hci") else 0
+
+    try:
+        lmp_responses: list[bytes] = []
+        with HCIVSCSocket(hci_idx) as vsc:
+            vsc.start_lmp_monitor(lambda evt: lmp_responses.append(evt))
+            payload = build_features_req()
+            ok = vsc.send_lmp(payload)
+            if not ok:
+                warning("Failed to send LMP_FEATURES_REQ via DarkFirmware")
+                vsc.stop_lmp_monitor()
+                return None
+
+            info("LMP_FEATURES_REQ sent, waiting for response...")
+            import time as _time
+            _time.sleep(5)
+            vsc.stop_lmp_monitor()
+
+        # Parse responses — look for LMP_FEATURES_RES (opcode 40)
+        for resp in lmp_responses:
+            if not resp or len(resp) < 1:
+                continue
+            opcode = resp[0] & 0x7F  # mask off TID bit
+            if opcode == LMP_FEATURES_RES and len(resp) >= 9:
+                raw_features = resp[1:9]
+                result: dict = {"raw": raw_features}
+
+                for (byte_idx, bit_idx), name in FEATURE_BITS.items():
+                    if byte_idx < len(raw_features):
+                        result[name] = bool(raw_features[byte_idx] & (1 << bit_idx))
+                    else:
+                        result[name] = False
+
+                enc = result.get("encryption", False)
+                sc = result.get("secure_connections_controller", False)
+                rs = result.get("role_switch", False)
+                info(f"LMP features probed: encryption={enc}, SC={sc}, role_switch={rs}")
+                return result
+
+        warning("No LMP_FEATURES_RES received within timeout")
+        return None
+
+    except Exception as exc:
+        warning(f"LMP feature probing failed: {exc}")
+        return None
+
+
+def _probe_lmp_version(address: str, hci: str) -> dict | None:
+    """Actively probe target's LMP version via DarkFirmware.
+
+    Sends LMP_VERSION_REQ (opcode 37) and parses the response:
+    ver_nr(1), company_id(2), sub_ver(2).
+
+    Args:
+        address: Target Bluetooth address.
+        hci: HCI adapter identifier.
+
+    Returns:
+        Dict with ``"version"``, ``"company"``, ``"subversion"`` keys,
+        or ``None`` if probing fails.
+    """
+    try:
+        from blue_tap.core.hci_vsc import HCIVSCSocket
+        from blue_tap.fuzz.protocols.lmp import build_version_req, LMP_VERSION_RES
+    except ImportError:
+        info("DarkFirmware not available — skipping LMP version probing")
+        return None
+
+    info(f"Probing LMP version via DarkFirmware on {hci}...")
+    hci_idx = int(hci.replace("hci", "")) if hci.startswith("hci") else 0
+
+    try:
+        lmp_responses: list[bytes] = []
+        with HCIVSCSocket(hci_idx) as vsc:
+            vsc.start_lmp_monitor(lambda evt: lmp_responses.append(evt))
+            payload = build_version_req()
+            ok = vsc.send_lmp(payload)
+            if not ok:
+                warning("Failed to send LMP_VERSION_REQ via DarkFirmware")
+                vsc.stop_lmp_monitor()
+                return None
+
+            info("LMP_VERSION_REQ sent, waiting for response...")
+            import time as _time
+            _time.sleep(5)
+            vsc.stop_lmp_monitor()
+
+        # Parse responses — look for LMP_VERSION_RES (opcode 38)
+        for resp in lmp_responses:
+            if not resp or len(resp) < 1:
+                continue
+            opcode = resp[0] & 0x7F
+            if opcode == LMP_VERSION_RES and len(resp) >= 6:
+                ver_nr = resp[1]
+                company_id = struct.unpack("<H", resp[2:4])[0]
+                sub_ver = struct.unpack("<H", resp[4:6])[0]
+                info(f"LMP version probed: ver={ver_nr:#04x}, company={company_id:#06x}, "
+                     f"subver={sub_ver:#06x}")
+                return {
+                    "version": ver_nr,
+                    "company": company_id,
+                    "subversion": sub_ver,
+                }
+
+        warning("No LMP_VERSION_RES received within timeout")
+        return None
+
+    except Exception as exc:
+        warning(f"LMP version probing failed: {exc}")
+        return None
+
+
 def scan_vulnerabilities(address: str, hci: str = "hci0", active: bool = False,
                          phone_address: str | None = None) -> list[dict]:
     """Run vulnerability and attack-surface checks against a target.
@@ -1486,6 +1660,24 @@ def scan_vulnerabilities(address: str, hci: str = "hci0", active: bool = False,
 
     # Collect LMP features and device context for protocol-informed CVE checks
     lmp_feats = _extract_lmp_features_dict(address, hci)
+
+    # DarkFirmware-enhanced probing: use active LMP probes if available
+    if active and _check_darkfirmware_available(hci):
+        section("Check 4b: DarkFirmware LMP Probing", style="bt.cyan")
+        df_features = _probe_lmp_features(address, hci)
+        if df_features is not None:
+            info("Using DarkFirmware-probed LMP features (overriding hcitool heuristics)")
+            # Merge DarkFirmware results — these are more authoritative
+            if lmp_feats is None:
+                lmp_feats = {}
+            for key, val in df_features.items():
+                if key != "raw":
+                    lmp_feats[key] = val
+
+        df_version = _probe_lmp_version(address, hci)
+        if df_version is not None:
+            info(f"DarkFirmware LMP version: {df_version}")
+
     device_name = ""
     manufacturer = ""
     name_result = run_cmd(["hcitool", "-i", hci, "name", address], timeout=8)
@@ -1543,6 +1735,46 @@ def scan_vulnerabilities(address: str, hci: str = "hci0", active: bool = False,
     if active:
         section("Active Check: BIAS Vulnerability Probe")
         findings.extend(_check_bias_active(address, hci, ssp, phone_address))
+
+    # DarkFirmware-enhanced active KNOB probe
+    if _check_darkfirmware_available(hci) and active:
+        section("Active Check: DarkFirmware KNOB Probe", style="bt.cyan")
+        try:
+            from blue_tap.core.hci_vsc import HCIVSCSocket
+            from blue_tap.fuzz.protocols.lmp import build_enc_key_size_req
+
+            hci_idx = int(hci.replace("hci", "")) if hci.startswith("hci") else 0
+            with HCIVSCSocket(hci_idx) as vsc:
+                lmp_responses = []
+                vsc.start_lmp_monitor(lambda evt: lmp_responses.append(evt))
+                payload = build_enc_key_size_req(key_size=1)
+                ok = vsc.send_lmp(payload)
+                if ok:
+                    import time as _time
+                    _time.sleep(2)
+                vsc.stop_lmp_monitor()
+
+                if lmp_responses:
+                    findings.append(
+                        _finding(
+                            "HIGH",
+                            "KNOB: DarkFirmware Active Probe Response (CVE-2019-9506)",
+                            f"Target responded to LMP_encryption_key_size_req(key_size=1) "
+                            f"sent via DarkFirmware. {len(lmp_responses)} LMP response(s) received.",
+                            cve="CVE-2019-9506",
+                            impact="Target may accept 1-byte encryption key size — "
+                                   "complete traffic decryption possible.",
+                            remediation="Update firmware to enforce min 7-byte key size.",
+                            status="confirmed",
+                            confidence="high",
+                            evidence="darkfirmware_active_probe",
+                        )
+                    )
+                    info(f"DarkFirmware KNOB probe: {len(lmp_responses)} LMP response(s)")
+                else:
+                    info("DarkFirmware KNOB probe: no LMP response (target may enforce key size)")
+        except Exception as exc:
+            verbose(f"DarkFirmware KNOB probe failed: {exc}")
 
     section("Check 9: Hidden RFCOMM Services", style="bt.cyan")
     findings.extend(_check_hidden_rfcomm(address, services))

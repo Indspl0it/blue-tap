@@ -11,7 +11,16 @@ build/
 *.pdf
 *.log
 *.pid
+.coverage
 .claude/
+.serena/
+.pytest_cache/
+.ruff_cache/
+sessions/
+sample-reports/
+scripts/
+aflnet/
+sweyntooth/
 target/received/*
 !target/received/.gitkeep
 target/.ivi_profile

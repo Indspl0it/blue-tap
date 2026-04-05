@@ -110,6 +110,27 @@ def get_adapter_info(hci: str) -> dict:
     elif any(kw in chipset_lower or kw in manufacturer_lower
              for kw in ("broadcom", "cypress", "bcm", "cyw")):
         ext["capabilities"]["address_change"] = True
+    # Realtek RTL8761B: address_change = True (via firmware patching with DarkFirmware)
+    elif any(kw in chipset_lower or kw in manufacturer_lower
+             for kw in ("realtek", "rtl8761", "rtl87")):
+        ext["capabilities"]["address_change"] = True
+
+    # Check for DarkFirmware enhanced capabilities on Realtek adapters
+    if ext["capabilities"].get("address_change") and any(
+        kw in chipset_lower or kw in manufacturer_lower
+        for kw in ("realtek", "rtl8761", "rtl87")
+    ):
+        try:
+            from blue_tap.core.firmware import DarkFirmwareManager
+            fw = DarkFirmwareManager()
+            if fw.is_darkfirmware_loaded(hci):
+                ext["capabilities"]["lmp_injection"] = True
+                ext["capabilities"]["lmp_monitoring"] = True
+                ext["capabilities"]["memory_rw"] = True
+                if "DarkFirmware" not in ext.get("features", []):
+                    ext.setdefault("features", []).append("DarkFirmware")
+        except Exception:
+            pass  # DarkFirmware check failed, non-fatal
 
     # --- btmgmt info for management-level details ---
     idx = hci.replace("hci", "")

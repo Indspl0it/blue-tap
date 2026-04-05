@@ -9,6 +9,8 @@ the underlying socket type.
 
 from __future__ import annotations
 
+import collections
+import re
 import socket
 import struct
 import time
@@ -24,6 +26,7 @@ from blue_tap.utils.output import info, warning, error
 AF_BLUETOOTH = getattr(socket, "AF_BLUETOOTH", 31)
 BTPROTO_L2CAP = 0
 BTPROTO_RFCOMM = 3
+BTPROTO_HCI = 1
 SOL_BLUETOOTH = 274
 BT_SECURITY = 4
 
@@ -552,3 +555,210 @@ class BLETransport(BluetoothTransport):
         state = "connected" if self._connected else "disconnected"
         cid_name = {self.ATT_CID: "ATT", self.SMP_CID: "SMP"}.get(self.cid, f"0x{self.cid:04x}")
         return f"<BLETransport addr={self.address} cid={cid_name} {state}>"
+
+
+# ---------------------------------------------------------------------------
+# LMP transport (DarkFirmware RTL8761B)
+# ---------------------------------------------------------------------------
+
+class LMPTransport(BluetoothTransport):
+    """Transport for LMP (Link Manager Protocol) via DarkFirmware RTL8761B.
+
+    Sends and receives LMP packets below the HCI layer using vendor-specific
+    HCI commands on a DarkFirmware-patched RTL8761B adapter.  Unlike other
+    transports, LMPTransport does NOT create the Bluetooth connection -- it
+    requires a pre-existing ACL link to the target device.
+
+    The underlying DarkFirmware hooks:
+      - VSC 0xFE22: Copies payload into LMP buffer, sends via send_LMP_reply()
+      - LMP RX Hook: Incoming LMP packets logged as HCI Event 0xFF
+
+    Limitations:
+      - Max 17 bytes per LMP PDU (UB500 firmware patched to 0x11 via patch_send_length())
+      - Only operates on connection index 0 (first ACL connection after reset)
+      - LMP RX data only available for opcode path 0x0480
+
+    Args:
+        address: Target BD_ADDR (used for ACL connection verification).
+        hci_dev: HCI device index for the DarkFirmware adapter (default 1).
+        timeout: Timeout in seconds for send/recv operations.
+        max_reconnects: Max reconnect attempts (reconnect re-verifies ACL link).
+    """
+
+    def __init__(
+        self,
+        address: str,
+        hci_dev: int = 1,
+        timeout: float = 5.0,
+        max_reconnects: int = 3,
+    ) -> None:
+        super().__init__(address, timeout, max_reconnects)
+        self.hci_dev = hci_dev
+        self._hci_vsc = None  # Will hold HCIVSCSocket instance
+        self._rx_queue: collections.deque | None = None
+        self._connection_handle: int | None = None
+
+    # -- Abstract interface (placeholders -- real work is in connect()) ----
+
+    def _create_socket(self) -> socket.socket:
+        """Placeholder -- LMP transport uses HCI VSC, not a regular socket."""
+        return socket.socket()  # Will be closed immediately by connect() override
+
+    def _connect_socket(self, sock: socket.socket) -> None:
+        """Placeholder -- connection handled in connect() override."""
+
+    # -- Connection management ---------------------------------------------
+
+    def connect(self) -> bool:
+        """Open HCI VSC socket and verify ACL connection to target.
+
+        The ACL connection must already exist (e.g., established via
+        bluetoothctl or by the fuzzing engine through an L2CAP probe).
+        """
+        try:
+            self.close()
+
+            from blue_tap.core.hci_vsc import HCIVSCSocket
+
+            self._hci_vsc = HCIVSCSocket(self.hci_dev)
+            self._hci_vsc.open()
+            self._rx_queue = collections.deque(maxlen=1000)
+
+            # Verify ACL connection exists
+            handle = self._find_acl_handle()
+            if handle is None:
+                warning(
+                    f"No ACL connection to {self.address} found. "
+                    f"LMP injection requires an existing connection."
+                )
+                # Try to establish one via L2CAP SDP probe
+                if not self._establish_acl():
+                    error("Could not establish ACL connection for LMP transport")
+                    self.close()
+                    return False
+                handle = self._find_acl_handle()
+                if handle is None:
+                    self.close()
+                    return False
+
+            self._connection_handle = handle
+            info(f"LMP transport connected (ACL handle={handle:#06x})")
+
+            # Start LMP monitor
+            self._hci_vsc.start_lmp_monitor(self._on_lmp_received)
+            self._connected = True
+            return True
+        except OSError as exc:
+            error(f"LMP connect failed: {exc}")
+            self.stats.errors += 1
+            self._connected = False
+            self.close()
+            return False
+
+    def _find_acl_handle(self) -> int | None:
+        """Parse ``hcitool con`` to find ACL connection handle for target."""
+        result = run_cmd(
+            ["hcitool", "-i", f"hci{self.hci_dev}", "con"], timeout=5,
+        )
+        if result.returncode != 0:
+            return None
+        # Parse: "< ACL AA:BB:CC:DD:EE:FF handle 64 state 1 lm CENTRAL"
+        for line in result.stdout.splitlines():
+            if self.address.upper() in line.upper():
+                m = re.search(r"handle\s+(\d+)", line)
+                if m:
+                    return int(m.group(1))
+        return None
+
+    def _establish_acl(self) -> bool:
+        """Try to establish ACL connection via L2CAP SDP probe."""
+        info(f"Establishing ACL via SDP probe to {self.address}")
+        try:
+            probe = socket.socket(
+                AF_BLUETOOTH, socket.SOCK_SEQPACKET, BTPROTO_L2CAP,
+            )
+            probe.settimeout(5.0)
+            probe.connect((self.address, 1))  # PSM 1 = SDP
+            probe.close()
+            time.sleep(0.5)
+            return True
+        except OSError:
+            return False
+
+    def _on_lmp_received(self, lmp_log: dict) -> None:
+        """Callback from LMP monitor thread -- push to receive queue."""
+        if self._rx_queue is not None:
+            self._rx_queue.append(lmp_log)
+
+    # -- Data transfer -----------------------------------------------------
+
+    def send(self, data: bytes) -> int:
+        """Send LMP packet via DarkFirmware VSC 0xFE22."""
+        if self._hci_vsc is None or not self._connected:
+            if not self.reconnect():
+                raise ConnectionError("Not connected and reconnect failed")
+        try:
+            ok = self._hci_vsc.send_lmp(data)
+            if ok:
+                self.stats.bytes_sent += len(data)
+                self.stats.packets_sent += 1
+                return len(data)
+            warning(f"LMP send returned failure for {len(data)} bytes")
+            self.stats.errors += 1
+            return 0
+        except OSError as exc:
+            self.stats.errors += 1
+            error(f"LMP send error: {exc}")
+            return 0
+
+    def recv(self, bufsize: int = 4096, recv_timeout: float | None = None) -> bytes | None:
+        """Receive LMP packet from monitor queue."""
+        if self._rx_queue is None or not self._connected:
+            return None
+        timeout = recv_timeout if recv_timeout is not None else self.timeout
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self._rx_queue:
+                log_entry = self._rx_queue.popleft()
+                payload = log_entry.get("payload", b"")
+                if payload:
+                    self.stats.bytes_received += len(payload)
+                    self.stats.packets_received += 1
+                    return payload
+            time.sleep(0.05)  # Brief poll interval
+        return b""  # Timeout
+
+    # -- Lifecycle ---------------------------------------------------------
+
+    def close(self) -> None:
+        """Stop LMP monitor and close HCI VSC socket."""
+        info(f"Closing LMP transport to {self.address}")
+        self._connected = False
+        if self._hci_vsc is not None:
+            try:
+                self._hci_vsc.stop_lmp_monitor()
+                self._hci_vsc.close()
+            except OSError:
+                pass
+            self._hci_vsc = None
+        self._rx_queue = None
+        # Close placeholder socket from base class
+        if self._sock is not None:
+            try:
+                self._sock.close()
+            except OSError:
+                pass
+            self._sock = None
+
+    def is_alive(self) -> bool:
+        """Check ACL connection still exists (not l2ping -- LMP is below L2CAP)."""
+        return self._find_acl_handle() is not None
+
+    def __repr__(self) -> str:
+        state = "connected" if self._connected else "disconnected"
+        handle = (
+            f" handle={self._connection_handle:#06x}"
+            if self._connection_handle
+            else ""
+        )
+        return f"<LMPTransport addr={self.address} hci{self.hci_dev}{handle} {state}>"

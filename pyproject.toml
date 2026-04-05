@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "blue-tap"
-version = "2.2.0"
+version = "2.3.0"
 description = "Bluetooth/BLE Penetration Testing Toolkit for Automotive IVI Systems"
 readme = "README.md"
 license = {text = "GPL-3.0-or-later"}
@@ -19,6 +19,7 @@ dependencies = [
     "dbus-fast>=2.0",
     "scapy>=2.5",
     "pulsectl>=23.5",
+    "pyyaml>=6.0",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -49,6 +50,10 @@ blue-tap = "blue_tap.cli:cli"
 
 [tool.setuptools.packages.find]
 include = ["blue_tap*"]
+
+[tool.setuptools.package-data]
+"blue_tap.firmware" = ["*.bin"]
+"blue_tap.playbooks" = ["*.yaml"]
 
 [tool.ruff]
 line-length = 120

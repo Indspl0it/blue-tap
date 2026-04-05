@@ -61,6 +61,7 @@ try:
         L2CAPTransport,
         RFCOMMTransport,
         BLETransport,
+        LMPTransport,
     )
     _HAS_TRANSPORT = True
 except ImportError:
@@ -91,6 +92,12 @@ try:
     _HAS_STRATEGIES = True
 except ImportError:
     _HAS_STRATEGIES = False
+
+try:
+    from blue_tap.fuzz.strategies.targeted import TargetedStrategy
+    _HAS_TARGETED = True
+except ImportError:
+    _HAS_TARGETED = False
 
 try:
     from blue_tap.fuzz.response_analyzer import ResponseAnalyzer
@@ -137,6 +144,7 @@ PROTOCOL_TRANSPORT_MAP: dict[str, dict[str, Any]] = {
     "obex-opp":     {"type": "rfcomm", "channel": 9},
     "ble-att":      {"type": "ble",    "cid": 4},
     "ble-smp":      {"type": "ble",    "cid": 6},
+    "lmp":          {"type": "lmp",    "hci_dev": 1},
 }
 
 #: Severity classification for crash types.
@@ -340,6 +348,19 @@ class _StubCorpus:
         import random
         return os.urandom(random.randint(8, 256))
 
+    def get_all_seeds(self, protocol: str = "") -> list[bytes]:
+        """Return all seeds for a protocol."""
+        protocol_dir = os.path.join(self._dir, protocol) if protocol else self._dir
+        if not os.path.isdir(protocol_dir):
+            return []
+        seeds = []
+        for fname in os.listdir(protocol_dir):
+            fpath = os.path.join(protocol_dir, fname)
+            if os.path.isfile(fpath):
+                with open(fpath, "rb") as f:
+                    seeds.append(f.read())
+        return seeds
+
     def add_seed(self, protocol: str, data: bytes, name: str = "") -> None:
         """Save a seed to the corpus directory."""
         protocol_dir = os.path.join(self._dir, protocol) if protocol else self._dir
@@ -358,6 +379,28 @@ class _StubCorpus:
             1 for f in os.listdir(protocol_dir)
             if os.path.isfile(os.path.join(protocol_dir, f))
         )
+
+
+class _TargetedStrategyAdapter:
+    """Adapts TargetedStrategy's generate_all() to the engine strategy interface."""
+
+    def __init__(self) -> None:
+        self._inner = TargetedStrategy()
+        self._iter = self._inner.generate_all()
+
+    def generate(self, protocol: str) -> tuple[bytes | list[bytes], list[str]]:
+        try:
+            payload, description = next(self._iter)
+            return payload, [description]
+        except StopIteration:
+            # Restart from the beginning
+            self._iter = self._inner.generate_all()
+            payload, description = next(self._iter)
+            return payload, [description]
+
+    def feedback(self, protocol: str, payload: bytes,
+                 response: bytes | None, crash: bool = False) -> None:
+        pass  # Targeted strategy replays known patterns — no learning
 
 
 class _StubMutator:
@@ -545,7 +588,7 @@ class FuzzCampaign:
         self,
         target: str,
         protocols: list[str],
-        strategy: str = "random",
+        strategy: str = "coverage_guided",
         duration: float | None = None,
         max_iterations: int | None = None,
         session_dir: str = "",
@@ -591,7 +634,10 @@ class FuzzCampaign:
 
         # Strategy dispatch — instantiate real strategy classes when available.
         self._strategy_obj: Any = None
-        if _HAS_STRATEGIES and _HAS_CORPUS and isinstance(self.corpus, Corpus):
+        if strategy == "targeted" and _HAS_TARGETED:
+            self._strategy_obj = _TargetedStrategyAdapter()
+            info("Strategy: targeted (known CVE pattern reproduction)")
+        elif _HAS_STRATEGIES and _HAS_CORPUS and isinstance(self.corpus, Corpus):
             if strategy == "coverage_guided":
                 self._strategy_obj = CoverageGuidedStrategy(corpus=self.corpus)
                 info("Strategy: coverage-guided (response-diversity feedback)")
@@ -601,7 +647,8 @@ class FuzzCampaign:
             elif strategy == "random":
                 self._strategy_obj = RandomWalkStrategy(corpus=self.corpus)
                 info("Strategy: random-walk (70% template / 30% corpus)")
-        if self._strategy_obj is None and strategy not in ("random", "targeted"):
+        _known_strategies = ("random", "coverage_guided", "state_machine", "targeted")
+        if self._strategy_obj is None and strategy not in _known_strategies:
             warning(f"Strategy '{strategy}' unavailable, falling back to byte-level mutation")
 
         # Response anomaly analyzer (learns baseline, detects deviations)
@@ -672,6 +719,12 @@ class FuzzCampaign:
                 elif ttype == "ble":
                     transports[protocol] = BLETransport(
                         self.target, cid=spec["cid"],
+                    )
+                elif ttype == "lmp":
+                    transports[protocol] = LMPTransport(
+                        self.target,
+                        hci_dev=spec.get("hci_dev", 1),
+                        timeout=spec.get("timeout", 5.0),
                     )
             else:
                 transports[protocol] = _StubTransport(
@@ -750,36 +803,54 @@ class FuzzCampaign:
         2. Response fingerprinting (novel response -> save to corpus)
         3. Behavioral anomaly detection (structural, statistical, leak indicators)
         """
-        # Feed back to strategy for coverage-guided learning
-        if hasattr(self._strategy_obj, "feedback"):
+        # Feed back to strategy for coverage-guided learning.
+        # FuzzStrategy ABC guarantees feedback() exists on all strategy objects
+        # (no-op default on stateless strategies like RandomWalk).
+        if self._strategy_obj is not None:
             try:
                 self._strategy_obj.feedback(protocol, payload, response, crash=False)
-            except (ValueError, KeyError):
+            except Exception:
                 pass
 
         # Run anomaly analyzer (structural + baseline deviation + leak detection)
         if self._analyzer is not None:
             anomalies = self._analyzer.analyze(protocol, payload, response, latency_ms)
+            # Guard: add the payload to the corpus at most once per analysis call.
+            # Multiple anomalies can score >= 7.0 for the same payload in one
+            # response, and 9.0+ anomalies also trigger _handle_crash() which calls
+            # add_seed() internally.  Without this flag, corpus.seeds accumulates
+            # multiple copies of the same bytes.
+            _seed_added_this_call = False
             for anomaly in anomalies:
                 if anomaly.score >= 7.0:
-                    # High-confidence anomaly — treat as interesting input
-                    try:
-                        self.corpus.add_seed(
-                            protocol, payload,
-                            name=f"anomaly_{anomaly.anomaly_type.value}_{self.stats.iterations}",
-                        )
-                    except (OSError, AttributeError):
-                        pass
                     info(
                         f"[bt.yellow]ANOMALY[/bt.yellow] "
                         f"[{anomaly.severity}] {anomaly.description}"
                     )
+                    # Only add to corpus for sub-crash-threshold anomalies.
+                    # 9.0+ anomalies delegate entirely to _handle_crash() which
+                    # calls add_seed() once.
+                    if anomaly.score < 9.0 and not _seed_added_this_call:
+                        try:
+                            self.corpus.add_seed(
+                                protocol, payload,
+                                name=f"anomaly_{anomaly.anomaly_type.value}_{self.stats.iterations}",
+                            )
+                            _seed_added_this_call = True
+                        except (OSError, AttributeError):
+                            pass
                 if anomaly.score >= 9.0:
                     # Very high score — log as potential crash/leak for investigation
                     self._handle_crash(
                         "unexpected_response", protocol, payload, mutation_log,
                     )
-                    return  # Don't double-count
+                    return  # Don't double-count (crash handler bumps anomaly weight)
+                elif anomaly.score >= 5.0:
+                    # Medium-high anomaly — boost seed weight without triggering crash path
+                    try:
+                        self.corpus.record_anomaly(protocol, payload)
+                    except (OSError, AttributeError):
+                        pass
 
             # Feed anomaly info to field weight tracker
             if self._field_tracker is not None and anomalies:
@@ -790,8 +861,8 @@ class FuzzCampaign:
                             if anomaly.score >= 5.0:
                                 try:
                                     self._field_tracker.record_anomaly(protocol, field_name)
-                                except Exception:
-                                    pass
+                                except Exception as exc:
+                                    warning(f"Field weight tracker error: {exc}")
 
         if response is None:
             return
@@ -868,6 +939,12 @@ class FuzzCampaign:
         except (OSError, AttributeError):
             pass
 
+        # Bump anomaly weight so this seed is sampled more often going forward.
+        try:
+            self.corpus.record_anomaly(protocol, payload)
+        except (OSError, AttributeError):
+            pass
+
         # Feed crash info to field weight tracker
         if self._field_tracker is not None:
             for log_entry in mutation_log:
@@ -878,11 +955,12 @@ class FuzzCampaign:
                     except Exception:
                         pass
 
-        # Notify strategy of the crash (for coverage-guided energy boost)
-        if hasattr(self._strategy_obj, "feedback"):
+        # Notify strategy of the crash (for coverage-guided energy boost).
+        # FuzzStrategy ABC guarantees feedback() exists — no hasattr needed.
+        if self._strategy_obj is not None:
             try:
                 self._strategy_obj.feedback(protocol, payload, None, crash=True)
-            except (ValueError, KeyError):
+            except Exception:
                 pass
 
         crash_num = self.stats.crashes
@@ -1053,7 +1131,7 @@ class FuzzCampaign:
                             transport.connect()
                         t0 = time.time()
                         transport.send(seed)
-                        response = transport.recv()
+                        response = transport.recv(recv_timeout=5.0)
                         latency_ms = (time.time() - t0) * 1000
                         self._analyzer.record_baseline(proto, response, latency_ms)
                     except Exception:
@@ -1526,6 +1604,13 @@ class FuzzCampaign:
                 state["health_monitor"] = self._health_monitor.to_dict()
             except Exception:
                 pass
+        # Persist strategy fingerprint / energy state so resume picks up where we left off
+        if self._strategy_obj is not None and hasattr(self._strategy_obj, "to_dict"):
+            try:
+                state["strategy_state"] = self._strategy_obj.to_dict()
+                info("Strategy state serialised into campaign snapshot")
+            except Exception as exc:
+                info(f"[bt.yellow]Strategy state serialisation skipped: {exc}[/bt.yellow]")
         state_path = os.path.join(self._fuzz_dir, "campaign_state.json")
         with open(state_path, "w") as f:
             json.dump(state, f, indent=2, default=str)
@@ -1590,6 +1675,37 @@ class FuzzCampaign:
                 campaign._health_monitor = TargetHealthMonitor.from_dict(state["health_monitor"])
             except Exception:
                 pass
+        # Restore CoverageGuidedStrategy from serialised snapshot, then reload interesting inputs
+        if _HAS_STRATEGIES and "strategy_state" in state:
+            try:
+                if isinstance(campaign._strategy_obj, CoverageGuidedStrategy):
+                    corpus_arg = campaign.corpus if _HAS_CORPUS else None
+                    campaign._strategy_obj = CoverageGuidedStrategy.from_dict(
+                        state["strategy_state"],
+                        corpus=corpus_arg,
+                    )
+                    info("CoverageGuidedStrategy state restored from snapshot")
+            except Exception as exc:
+                info(f"[bt.yellow]Strategy state restore skipped: {exc}[/bt.yellow]")
+        # Reload interesting inputs from disk regardless of snapshot presence
+        # (handles the case where interesting/ files exist but snapshot was lost)
+        if _HAS_STRATEGIES and isinstance(campaign._strategy_obj, CoverageGuidedStrategy):
+            if _HAS_CORPUS and isinstance(campaign.corpus, Corpus):
+                try:
+                    # Load seeds from disk first so list_protocols() is populated.
+                    # Without this the corpus is empty in memory and load_from_corpus
+                    # has no protocol list to iterate over.
+                    corpus_dir = os.path.join(session_dir, "fuzz", "corpus")
+                    if os.path.isdir(corpus_dir):
+                        campaign.corpus.load_from_directory(corpus_dir)
+                    loaded = campaign._strategy_obj.load_from_corpus(campaign.corpus)
+                    if loaded > 0:
+                        info(
+                            f"Reloaded {loaded} interesting input(s) from previous session "
+                            f"into coverage strategy"
+                        )
+                except Exception as exc:
+                    info(f"[bt.yellow]Interesting inputs reload skipped: {exc}[/bt.yellow]")
 
         info(
             f"Resumed campaign from {state_path} "

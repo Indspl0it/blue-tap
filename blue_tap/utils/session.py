@@ -39,6 +39,14 @@ def set_session(session: "Session | None"):
     _active_session = session
 
 
+def set_adapter(adapter: str) -> None:
+    """Record which adapter is being used in the active session."""
+    session = get_session()
+    if session is not None and adapter and not session.metadata.get("adapter"):
+        session.metadata["adapter"] = adapter
+        session._save_meta()
+
+
 def log_command(command: str, data: dict | list | str,
                 category: str = "general",
                 target: str = "") -> str | None:

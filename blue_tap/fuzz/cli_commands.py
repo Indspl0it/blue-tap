@@ -608,9 +608,18 @@ def _campaign_command(fuzz_group):
         help="Protocols to fuzz (repeat for multiple, default: all).",
     )
     @click.option(
-        "--strategy", "-s", default="random",
-        type=click.Choice(["random", "targeted", "coverage", "state-machine"]),
-        help="Mutation strategy.",
+        "--strategy", "-s", default="coverage_guided",
+        type=click.Choice(
+            ["coverage_guided", "random", "state_machine", "targeted"],
+            case_sensitive=False,
+        ),
+        help=(
+            "Mutation strategy (default: coverage_guided). "
+            "coverage_guided: response-fingerprint feedback, energy scheduling. "
+            "state_machine: protocol state violation sequences. "
+            "random: blind byte-level mutation. "
+            "targeted: reproduce known CVE patterns."
+        ),
     )
     @click.option("--duration", "-d", default="1h", help="Duration: 30s, 5m, 1h, 24h, 7d")
     @click.option("--iterations", "-n", default=None, type=int,

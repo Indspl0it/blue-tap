@@ -32,6 +32,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
 from blue_tap.fuzz.mutators import CorpusMutator
+from blue_tap.fuzz.strategies.base import FuzzStrategy
 
 # ---------------------------------------------------------------------------
 # Core abstractions
@@ -1091,11 +1092,248 @@ class ATTStateMachine(StateMachineModel):
 
 
 # ===========================================================================
+# LMP State Machine
+# ===========================================================================
+
+
+class LMPStateMachine(StateMachineModel):
+    """LMP connection state machine for below-HCI fuzzing via DarkFirmware.
+
+    Models the LMP connection setup lifecycle:
+        idle -> features -> authentication -> encryption -> connected
+
+    BrakTooth found 18 CVEs by sending LMP packets in invalid state order.
+    This model generates sequences that violate the expected LMP state
+    machine transitions to trigger link manager bugs.
+    """
+
+    def __init__(self) -> None:
+        from blue_tap.fuzz.protocols.lmp import (
+            build_features_req,
+            build_features_res,
+            build_version_req,
+            build_au_rand,
+            build_sres,
+            build_in_rand,
+            build_comb_key,
+            build_encryption_mode_req,
+            build_enc_key_size_req,
+            build_start_encryption_req,
+            build_stop_encryption_req,
+            build_setup_complete,
+            build_detach,
+            build_switch_req,
+            build_accepted,
+            build_not_accepted,
+            build_io_capability_req,
+            build_io_capability_res,
+            build_host_connection_req,
+            LMP_FEATURES_REQ,
+            LMP_AU_RAND,
+            LMP_ENCRYPTION_MODE_REQ,
+        )
+
+        self.initial_state = "idle"
+        self.canonical_path = [
+            "idle", "features", "authentication", "encryption", "connected",
+        ]
+
+        # Feature exchange packets
+        features_pkts = (build_features_req(), build_version_req())
+        # Authentication packets
+        auth_pkts = (build_au_rand(), build_sres(b"\x00\x00\x00\x00"))
+        # Encryption setup packets
+        enc_pkts = (
+            build_encryption_mode_req(1),
+            build_enc_key_size_req(16),
+            build_start_encryption_req(),
+        )
+        # Connected state packets
+        connected_pkts = (build_setup_complete(),)
+
+        self.states = {
+            "idle": ProtocolState(
+                name="idle",
+                valid_transitions=("features",),
+                entry_packets=(),
+            ),
+            "features": ProtocolState(
+                name="features",
+                valid_transitions=("authentication", "connected"),
+                entry_packets=features_pkts,
+            ),
+            "authentication": ProtocolState(
+                name="authentication",
+                valid_transitions=("encryption", "connected"),
+                entry_packets=auth_pkts,
+            ),
+            "encryption": ProtocolState(
+                name="encryption",
+                valid_transitions=("connected",),
+                entry_packets=enc_pkts,
+            ),
+            "connected": ProtocolState(
+                name="connected",
+                valid_transitions=("authentication",),
+                entry_packets=connected_pkts,
+            ),
+        }
+
+        # Store builders for invalid transition generation
+        self._lmp = {
+            "build_features_req": build_features_req,
+            "build_features_res": build_features_res,
+            "build_version_req": build_version_req,
+            "build_au_rand": build_au_rand,
+            "build_sres": build_sres,
+            "build_in_rand": build_in_rand,
+            "build_comb_key": build_comb_key,
+            "build_encryption_mode_req": build_encryption_mode_req,
+            "build_enc_key_size_req": build_enc_key_size_req,
+            "build_start_encryption_req": build_start_encryption_req,
+            "build_stop_encryption_req": build_stop_encryption_req,
+            "build_setup_complete": build_setup_complete,
+            "build_detach": build_detach,
+            "build_switch_req": build_switch_req,
+            "build_accepted": build_accepted,
+            "build_not_accepted": build_not_accepted,
+            "build_io_capability_req": build_io_capability_req,
+            "build_io_capability_res": build_io_capability_res,
+            "build_host_connection_req": build_host_connection_req,
+            "LMP_FEATURES_REQ": LMP_FEATURES_REQ,
+            "LMP_AU_RAND": LMP_AU_RAND,
+            "LMP_ENCRYPTION_MODE_REQ": LMP_ENCRYPTION_MODE_REQ,
+        }
+
+    def _build_invalid_transitions(self) -> list[tuple[list[bytes], list[str]]]:
+        """Build all pre-defined invalid LMP state transitions."""
+        lmp = self._lmp
+        sequences: list[tuple[list[bytes], list[str]]] = []
+
+        # 1. Encryption before authentication (idle -> encryption)
+        sequences.append((
+            [
+                lmp["build_encryption_mode_req"](1),
+                lmp["build_enc_key_size_req"](16),
+            ],
+            ["INVALID: Encryption setup before authentication (idle -> encryption)"],
+        ))
+
+        # 2. Setup complete before features (idle -> connected)
+        sequences.append((
+            [lmp["build_setup_complete"]()],
+            ["INVALID: Setup complete before features (idle -> connected)"],
+        ))
+
+        # 3. SRES without AU_RAND challenge (unsolicited response)
+        sequences.append((
+            [lmp["build_sres"](b"\x00\x00\x00\x00")],
+            ["INVALID: Unsolicited SRES without prior AU_RAND"],
+        ))
+
+        # 4. Role switch during encryption setup
+        sequences.append((
+            [
+                lmp["build_features_req"](),
+                lmp["build_au_rand"](),
+                lmp["build_encryption_mode_req"](1),
+                lmp["build_switch_req"](0),
+            ],
+            ["INVALID: Role switch during encryption setup (BIAS-adjacent)"],
+        ))
+
+        # 5. Detach during authentication
+        sequences.append((
+            [
+                lmp["build_features_req"](),
+                lmp["build_au_rand"](),
+                lmp["build_detach"](0x13),
+            ],
+            ["INVALID: Detach during authentication (abort mid-auth)"],
+        ))
+
+        # 6. Start encryption without mode negotiation
+        sequences.append((
+            [
+                lmp["build_features_req"](),
+                lmp["build_au_rand"](),
+                lmp["build_start_encryption_req"](),
+            ],
+            ["INVALID: Start encryption without mode request"],
+        ))
+
+        # 7. Stop encryption when not encrypted
+        sequences.append((
+            [lmp["build_stop_encryption_req"]()],
+            ["INVALID: Stop encryption when encryption not active"],
+        ))
+
+        # 8. Double features negotiation
+        sequences.append((
+            [lmp["build_features_req"](), lmp["build_features_req"]()],
+            ["INVALID: Double features request (re-negotiation race)"],
+        ))
+
+        # 9. Accepted for opcode never sent
+        sequences.append((
+            [lmp["build_accepted"](lmp["LMP_FEATURES_REQ"])],
+            ["INVALID: Accepted for opcode never sent (phantom ack)"],
+        ))
+
+        # 10. Not accepted for opcode never sent
+        sequences.append((
+            [lmp["build_not_accepted"](lmp["LMP_AU_RAND"], 0x19)],
+            ["INVALID: Not accepted for opcode never sent (phantom reject)"],
+        ))
+
+        # 11. IO capability before features (SSP before setup)
+        sequences.append((
+            [lmp["build_io_capability_req"](0x03, 0x00, 0x00)],
+            ["INVALID: IO capability request before feature exchange"],
+        ))
+
+        # 12. Rapid state cycling (features -> connected -> features -> connected)
+        sequences.append((
+            [
+                lmp["build_features_req"](),
+                lmp["build_setup_complete"](),
+                lmp["build_features_req"](),
+                lmp["build_setup_complete"](),
+            ],
+            ["INVALID: Rapid state cycling (features/complete x2)"],
+        ))
+
+        # 13. All encryption opcodes in rapid succession
+        sequences.append((
+            [
+                lmp["build_encryption_mode_req"](1),
+                lmp["build_enc_key_size_req"](1),
+                lmp["build_start_encryption_req"](),
+                lmp["build_stop_encryption_req"](),
+                lmp["build_encryption_mode_req"](0),
+            ],
+            ["INVALID: All encryption opcodes in rapid succession"],
+        ))
+
+        # 14. Host connection request after setup complete
+        sequences.append((
+            [
+                lmp["build_features_req"](),
+                lmp["build_setup_complete"](),
+                lmp["build_host_connection_req"](),
+            ],
+            ["INVALID: Host connection request after setup complete"],
+        ))
+
+        return sequences
+
+
+# ===========================================================================
 # StateMachineStrategy — the main entry point
 # ===========================================================================
 
 
-class StateMachineStrategy:
+class StateMachineStrategy(FuzzStrategy):
     """Multi-step protocol fuzzing with state machine violations.
 
     Models protocol state machines and generates:
@@ -1104,6 +1342,11 @@ class StateMachineStrategy:
       3. State regression attacks (go backwards in state machine)
       4. State skipping attacks (jump ahead)
       5. Repeated state attacks (same command twice)
+
+    ``generate(protocol)`` returns ``(list[bytes], mutation_log)`` — the
+    list contains ordered packets to send sequentially.  This differs from
+    single-packet strategies (RandomWalk, CoverageGuided) which return
+    ``(bytes, mutation_log)``.  The engine handles both return shapes.
 
     Each ``generate*`` method returns a tuple of
     ``(list_of_packets_to_send_sequentially, description_log)``.
@@ -1137,6 +1380,7 @@ class StateMachineStrategy:
                         "smp-legacy": SMPStateMachine(secure_connections=False),
                         "smp-sc": SMPStateMachine(secure_connections=True),
                         "att": ATTStateMachine(),
+                        "lmp": LMPStateMachine(),
                     }
 
         self._stats_generated: int = 0

@@ -17,9 +17,12 @@
   - [Discovery and Scanning](#1-discovery-and-scanning)
   - [Reconnaissance](#2-reconnaissance)
   - [Vulnerability Assessment](#3-vulnerability-assessment)
+  - [Safe Assessment (Assess Command)](#3b-safe-assessment-assess-command)
   - [Connection Hijacking and BIAS](#4-connection-hijacking-and-bias)
   - [KNOB Attack](#5-knob-attack-cve-2019-9506)
   - [SSP Downgrade](#6-ssp-downgrade-attack)
+  - [BLUFFS Attack (CVE-2023-24023)](#6b-bluffs-attack-cve-2023-24023)
+  - [Encryption Downgrade](#6c-encryption-downgrade)
   - [Data Extraction (PBAP / MAP / AT / OPP)](#7-data-extraction-pbap--map--at--opp)
   - [Audio Interception (HFP / A2DP)](#8-audio-interception-hfp--a2dp)
   - [AVRCP Media Control](#9-avrcp-media-control)
@@ -27,7 +30,9 @@
   - [Denial of Service](#11-denial-of-service)
   - [MAC Spoofing and Adapter Management](#12-mac-spoofing-and-adapter-management)
   - [Session Management and Reporting](#13-session-management-and-reporting)
+  - [DarkFirmware and Below-HCI Attacks](#13b-darkfirmware-and-below-hci-attacks)
   - [Automation and Orchestration](#14-automation-and-orchestration)
+  - [Credits and References](#credits-and-references)
 - [Quick Start](#quick-start)
 - [Usage Guide](#usage-guide)
 - [Workflows](#workflows)
@@ -254,7 +259,9 @@ cli.py ────────────────────────�
   ├── core/
   │   ├── adapter.py      ← hciconfig, btmgmt, bluetoothctl
   │   ├── scanner.py      ← hcitool (Classic), bleak (BLE)
-  │   └── spoofer.py      ← bdaddr, hciconfig, btmgmt
+  │   ├── spoofer.py      ← bdaddr, hciconfig, btmgmt
+  │   ├── firmware.py       ← DarkFirmware install/status/spoof (RTL8761B)
+  │   └── hci_vsc.py        ← Raw HCI vendor-specific commands (LMP inject/monitor)
   │
   ├── recon/
   │   ├── sdp.py          ← sdptool, raw L2CAP PSM 1
@@ -281,7 +288,9 @@ cli.py ────────────────────────�
   │   ├── pin_brute.py     ← D-Bus pairing agent
   │   ├── ssp_downgrade.py ← IO cap manipulation + PIN brute force
   │   ├── knob.py          ← CVE-2019-9506 key negotiation + brute force
-  │   └── fleet.py         ← device classification + fleet-wide vuln scan
+  │   ├── fleet.py         ← device classification + fleet-wide vuln scan
+  │   ├── bluffs.py         ← CVE-2023-24023 session key downgrade (DarkFirmware)
+  │   └── encryption_downgrade.py ← Beyond-KNOB encryption attacks (DarkFirmware)
   │
   ├── fuzz/
   │   ├── engine.py              ← campaign orchestrator + main loop
@@ -295,7 +304,7 @@ cli.py ────────────────────────�
   │   ├── field_weight_tracker.py← anomaly-guided field mutation weights
   │   ├── response_analyzer.py   ← 3-layer anomaly detection (struct+time+leak)
   │   ├── health_monitor.py      ← watchdog reboot + degradation detection
-  │   ├── protocols/             ← 8 protocol-specific builders
+  │   ├── protocols/             ← 9 protocol-specific builders (incl. LMP)
   │   └── strategies/            ← 4 campaign strategies
   │
   ├── report/
@@ -407,6 +416,30 @@ blue-tap vulnscan <MAC> -o findings.json               # Export findings to JSON
 
 ---
 
+### 3b. Assessment without Exploitation
+
+Non-destructive, 5-phase security assessment that runs fingerprinting, service discovery, and vulnerability scanning without exploitation.
+
+```bash
+blue-tap assess <MAC>                              # Standard 5-phase assessment
+blue-tap assess <MAC> --active -i hci1             # Include active LMP probing
+blue-tap assess <MAC> -o assessment.json           # Export results to JSON
+```
+
+**Assessment phases:**
+
+| Phase | What It Does |
+|:-----:|-------------|
+| 1 | Fingerprint — BT version, chipset, manufacturer, LMP features |
+| 2 | Service discovery — SDP browse, RFCOMM channel scan |
+| 3 | Vulnerability scan — 20+ CVE checks |
+| 4 | DarkFirmware probe — active LMP feature/version check (if `--active`) |
+| 5 | Summary — findings table with recommended next-step commands |
+
+Output includes a summary table of findings and recommended Blue-Tap commands to investigate each finding further.
+
+---
+
 ### 4. Connection Hijacking and BIAS
 
 Full IVI takeover by impersonating the target's phone. Includes connection retry logic, per-phase rollback on failure, and adapter state verification before each phase transition.
@@ -468,6 +501,53 @@ blue-tap ssp-downgrade attack <MAC> --delay 1.0        # Slower to avoid lockout
 3. Remove existing pairing with target
 4. Initiate pairing — target falls back to legacy PIN mode
 5. Brute force PIN with progress logging every 100 attempts, lockout detection (3 consecutive timeouts), and `lockout_detected` flag in results
+
+---
+
+### 6b. BLUFFS Attack (CVE-2023-24023)
+
+Session key derivation downgrade attack. Forces both endpoints to derive a weak, reusable session key by manipulating BR/EDR encryption setup at the LMP layer. Requires DarkFirmware on RTL8761B adapter for LMP injection.
+
+```bash
+blue-tap bluffs <MAC> -v probe                     # Check if target is vulnerable [safe]
+blue-tap bluffs <MAC> -v key-downgrade             # LSC Central: force minimum key size (A1)
+blue-tap bluffs <MAC> -v sc-downgrade              # SC Central: reject SC, force LSC (A3)
+blue-tap bluffs <MAC> -v all                       # Run probe → sc-downgrade → key-downgrade
+blue-tap bluffs <MAC> -v all --phone BB:CC:DD:EE   # With phone identity cloning
+```
+
+**Attack variants:**
+
+| Variant | Mode | Role | Description |
+|---------|------|------|-------------|
+| A1 | LSC | Central | Force minimum encryption key size via LMP |
+| A3 | SC → LSC | Central | Reject Secure Connections, then apply A1 |
+| probe | — | — | Check SC downgrade vulnerability (non-destructive) |
+
+**Reference:** Antonioli, "BLUFFS: Bluetooth Forward and Future Secrecy Attacks and Defenses", ACM CCS 2023
+
+---
+
+### 6c. Encryption Downgrade
+
+Alternative encryption downgrade paths beyond KNOB that exploit different link manager code paths. Requires DarkFirmware on RTL8761B adapter.
+
+```bash
+blue-tap encryption-downgrade <MAC> -m no-encryption             # Disable encryption entirely
+blue-tap encryption-downgrade <MAC> -m force-renegotiation       # Stop/start to weaken params
+blue-tap encryption-downgrade <MAC> -m reject-secure-connections # Force Legacy SC (weaker keys)
+blue-tap encryption-downgrade <MAC> -m all                       # Run all methods
+```
+
+**Methods:**
+
+| Method | LMP PDU | Effect |
+|--------|---------|--------|
+| no-encryption | `LMP_ENCRYPTION_MODE_REQ(mode=0)` | Requests disabling encryption |
+| force-renegotiation | Alternating `LMP_STOP_ENCRYPTION`/`LMP_START_ENCRYPTION` | Forces weaker re-negotiation |
+| reject-secure-connections | Reject SC PDUs during re-keying | Forces Legacy Secure Connections |
+
+Requires an active ACL connection to the target. Each method result shows VULNERABLE/Partially Accepted/Rejected status.
 
 ---
 
@@ -643,7 +723,7 @@ blue-tap fuzz campaign <MAC> -n 50000 --delay 0.1          # 50K iterations, fas
 blue-tap fuzz campaign --resume                            # Resume previous campaign
 ```
 
-#### Supported Protocols (11)
+#### Supported Protocols (12)
 
 | Protocol | Transport | Attack Surface |
 |----------|-----------|----------------|
@@ -659,6 +739,7 @@ blue-tap fuzz campaign --resume                            # Resume previous cam
 | `ble-att` | BLE CID 4 | ATT handles, writes, MTU, prepare writes, signed writes |
 | `ble-smp` | BLE CID 6 | Pairing, key sizes, ECDH curve points, sequencing |
 | `bnep` | L2CAP PSM 15 | Setup connection, ethernet frames, filter lists |
+| `lmp` | HCI VSC 0xFE22 | LMP opcodes, key negotiation, feature response, role switch, encryption setup |
 
 #### Fuzzing Strategies
 
@@ -669,7 +750,7 @@ blue-tap fuzz campaign --resume                            # Resume previous cam
 | `state-machine` | Protocol state violation attacks — skip steps, go backwards, repeat states | OBEX, HFP, SMP, ATT state machine bugs |
 | `targeted` | CVE reproduction + variation — exact reproduction patterns then field mutations | Testing for known vulnerability classes |
 
-#### Fuzzing Intelligence (What Makes It Different)
+### Fuzzing Intelligence
 
 Blue-Tap implements six layers of intelligence that run automatically during every campaign:
 
@@ -967,6 +1048,58 @@ blue-tap report -f html -o report.html       # HTML format (default)
 
 ---
 
+### 13b. DarkFirmware and Below-HCI Attacks
+
+DarkFirmware is a custom firmware for RTL8761B-based USB Bluetooth adapters (TP-Link UB500, USB ID 2357:0604) that enables direct LMP packet injection and monitoring. This extends Blue-Tap's reach below the HCI boundary to attack link-layer protocols that standard BlueZ cannot access.
+
+#### Firmware Management
+
+```bash
+blue-tap adapter firmware-status                     # Check DarkFirmware status
+blue-tap adapter firmware-install                    # Install bundled DarkFirmware
+blue-tap adapter firmware-install --restore          # Revert to stock Realtek firmware
+blue-tap adapter firmware-spoof <MAC>                # BDADDR spoofing via firmware patch
+blue-tap adapter firmware-set <addr> <value>         # Direct firmware memory write
+blue-tap adapter firmware-dump --addr 0x200000 --len 256  # Dump controller memory
+```
+
+#### Capabilities Enabled by DarkFirmware
+
+| Capability | VSC Opcode | Description |
+|-----------|------------|-------------|
+| LMP Injection | 0xFE22 | Inject arbitrary LMP packets into live connections |
+| LMP Monitoring | Event 0xFF | Capture incoming LMP packets as HCI vendor events |
+| Memory Read | 0xFC61 | Read 32-bit-aligned controller memory |
+| Memory Write | 0xFC62 | Write 32-bit-aligned controller memory |
+
+#### LMP Sniffing and Monitoring
+
+```bash
+blue-tap recon lmp-sniff <MAC>                       # Sniff LMP packets on a connection
+blue-tap recon lmp-monitor -i hci1                   # Monitor all LMP traffic (DarkFirmware)
+blue-tap recon lmp-monitor -i hci1 --dashboard       # With live dashboard
+blue-tap recon combined-sniff <MAC>                  # Combined HCI + LMP monitoring
+```
+
+#### Attacks That Require DarkFirmware
+
+| Attack | Command | CVE |
+|--------|---------|-----|
+| BLUFFS session key downgrade | `blue-tap bluffs` | CVE-2023-24023 |
+| Encryption downgrade | `blue-tap encryption-downgrade` | — |
+| BIAS LMP injection mode | `blue-tap bias attack --method lmp` | CVE-2020-10135 |
+| KNOB LMP key negotiation | `blue-tap knob attack` | CVE-2019-9506 |
+| LMP-level DoS | `blue-tap dos lmp` | — |
+| LMP protocol fuzzing | `blue-tap fuzz lmp` | — |
+
+#### Required Hardware
+
+**RTL8761B USB adapter** — TP-Link UB500 (USB 2357:0604), ~₹599 / ~$8.
+
+The RTL8761B runs a MIPS16e core with 256KB SRAM. DarkFirmware patches the firmware's LMP handler to redirect incoming packets as HCI vendor events and adds a VSC handler for outbound LMP injection. The original firmware is backed up automatically before patching.
+
+---
+
 ### 14. Automation and Orchestration
 
 #### Auto Mode — Full 9-Phase Pentest
@@ -1047,13 +1180,13 @@ report
 
 A dedicated USB Bluetooth adapter is **required** for full-feature pentesting. Internal laptop adapters (Intel, Realtek) enforce Secure Simple Pairing and block MAC spoofing, which disables most attack capabilities.
 
-| Adapter | MAC Spoofing | Legacy PIN | BLE | Classic | Fuzzing | Price | Verdict |
-|---------|:---:|:---:|:---:|:---:|:---:|:-----:|---------|
-| **CSR8510 USB** | Yes | Yes | Yes | Yes | Yes | ~$5 | Best overall — full feature support |
-| **BCM20702 USB** | Yes | Yes | Yes | Yes | Yes | ~$10 | Solid alternative to CSR |
-| **RTL8761B USB** | Partial | Partial | Yes | Yes | Partial | ~$8 | Budget option, some limitations |
-| **nRF52840 dongle** | N/A | N/A | Sniff only | No | No | ~$10 | BLE sniffing and raw PDU capture only |
-| **USRP B210** | Yes | Yes | Yes | Yes | Yes | ~$1500 | Research-grade — full baseband access |
+| Adapter | MAC Spoofing | Legacy PIN | BLE | Classic | Fuzzing | DarkFirmware | Price | Verdict |
+|---------|:---:|:---:|:---:|:---:|:---:|:---:|:-----:|---------|
+| **RTL8761B USB** (TP-Link UB500) | Via firmware | Partial | Yes | Yes | Yes | **Yes** | ~$8 | **Primary adapter** — BT 5.0, DarkFirmware for BLUFFS/LMP injection |
+| **nRF52840 dongle** | N/A | N/A | Sniff only | No | No | No | ~$10 | BLE raw PDU sniffing and pairing capture |
+
+
+**Recommended setup:** RTL8761B as primary adapter — handles both standard HCI attacks and below-HCI attacks (BLUFFS, LMP injection/monitoring, encryption downgrade). Add nRF52840 for BLE sniffing.
 
 ### Installation
 
@@ -1092,10 +1225,28 @@ sudo systemctl restart bluetooth
 sdptool browse local   # Should not show "Failed to connect to SDP server"
 ```
 
+### DarkFirmware Setup (Optional — for below-HCI attacks)
+
+If you have an RTL8761B adapter (TP-Link UB500), install DarkFirmware to enable LMP injection, BLUFFS, and encryption downgrade attacks. Blue-Tap auto-detects the adapter and firmware status at startup.
+
+```bash
+# Check adapter and firmware status
+blue-tap adapter list
+blue-tap adapter firmware-status --hci hci1
+
+# Install DarkFirmware (backs up original firmware automatically)
+sudo blue-tap adapter firmware-install --hci hci1
+
+# Verify — CLI will show "DarkFirmware active on hci1" on next run
+blue-tap adapter firmware-status --hci hci1
+```
+
+Without DarkFirmware, Blue-Tap works normally for all HCI-level attacks (hijack, PBAP, MAP, fuzzing, DoS, etc.). DarkFirmware is only required for BLUFFS, encryption downgrade, LMP fuzzing, and LMP monitoring.
+
 ### First Scan
 
 ```bash
-# Check adapter is available
+# Check adapter is available (DarkFirmware status shown automatically)
 blue-tap adapter list
 
 # Discover nearby Bluetooth devices
@@ -1164,18 +1315,21 @@ Options:
 │ adapter           HCI Bluetooth adapter management.                          │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭─ Assessment ─────────────────────────────────────────────────────────────────╮
+│ assess     Safe non-destructive security assessment (5-phase).              │
 │ vulnscan   Scan target for vulnerabilities and attack-surface indicators.    │
 │ fleet      Fleet-wide Bluetooth assessment — scan, classify, assess          │
 │            multiple devices.                                                 │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭─ Exploitation ───────────────────────────────────────────────────────────────╮
-│ hijack          Full IVI hijack: spoof phone identity and extract data.      │
-│ bias            BIAS attack — bypass authentication via role-switch          │
-│                 (CVE-2020-10135).                                            │
-│ knob            KNOB attack — negotiate minimum encryption key size          │
-│                 (CVE-2019-9506).                                             │
-│ ssp-downgrade   SSP downgrade attack — force legacy PIN pairing.             │
-│ spoof           MAC address spoofing and device impersonation.               │
+│ hijack               Full IVI hijack: spoof phone identity and extract data.│
+│ bias                 BIAS attack — bypass authentication via role-switch     │
+│                      (CVE-2020-10135).                                      │
+│ knob                 KNOB attack — negotiate minimum encryption key size    │
+│                      (CVE-2019-9506).                                       │
+│ bluffs               BLUFFS session key downgrade (CVE-2023-24023).         │
+│ encryption-downgrade Encryption downgrade beyond KNOB (DarkFirmware).       │
+│ ssp-downgrade        SSP downgrade attack — force legacy PIN pairing.       │
+│ spoof                MAC address spoofing and device impersonation.          │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭─ Data Extraction & Audio ────────────────────────────────────────────────────╮
 │ pbap    Phone Book Access Profile - download phonebook and call logs.        │
@@ -1388,6 +1542,25 @@ report
 blue-tap -s assessment run --playbook ivi-pentest.txt
 ```
 
+### Workflow 9: BLUFFS + Encryption Downgrade
+
+Test session key and encryption security using DarkFirmware LMP attacks.
+
+```bash
+# 1. Probe for BLUFFS vulnerability
+blue-tap bluffs AA:BB:CC:DD:EE:FF -v probe -i hci1
+
+# 2. If vulnerable, attempt session key downgrade
+blue-tap bluffs AA:BB:CC:DD:EE:FF -v sc-downgrade -i hci1
+blue-tap bluffs AA:BB:CC:DD:EE:FF -v key-downgrade -i hci1
+
+# 3. Test encryption downgrade paths
+blue-tap encryption-downgrade AA:BB:CC:DD:EE:FF -m all -i hci1
+
+# 4. Generate report
+blue-tap report
+```
+
 ---
 
 ## Vulnerable IVI Simulator
@@ -1598,14 +1771,6 @@ sudo apt install bluez-tools
 sudo apt install -y bluez bluez-tools python3-pip python3-dev python3-venv libbluetooth-dev
 ```
 
-### Raspberry Pi
-
-- Use an external USB adapter (CSR8510/BCM20702) for full feature access
-
-### WSL (Windows Subsystem for Linux)
-
-- **Not supported** — WSL does not pass through USB Bluetooth adapters
-- Use a native Linux installation or VM with USB passthrough
 
 ---
 
@@ -1618,6 +1783,36 @@ Copyright (C) 2026 Santhosh Ballikonda
 This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
 
 This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+---
+
+## Credits and References
+
+Blue-Tap builds on published academic research and open-source tools. Credit to the researchers whose work made these attacks possible:
+
+### Research Papers
+
+| Attack | Paper | Authors | Venue |
+|--------|-------|---------|-------|
+| **BLUFFS** | "BLUFFS: Bluetooth Forward and Future Secrecy Attacks and Defenses" | Daniele Antonioli | ACM CCS 2023 |
+| **KNOB** | "The KNOB is Broken: Exploiting Low Entropy in the Encryption Key Negotiation of Bluetooth BR/EDR" | Daniele Antonioli, Nils Ole Tippenhauer, Kasper Rasmussen | USENIX Security 2019 |
+| **BIAS** | "BIAS: Bluetooth Impersonation AttackS" | Daniele Antonioli, Nils Ole Tippenhauer, Kasper Rasmussen | IEEE S&P 2020 |
+| **BrakTooth** | "BrakTooth: Causing Havoc on Bluetooth Link Manager via Directed Fuzzing" | Matheus E. Garbelini et al. | USENIX Security 2022 |
+| **SweynTooth** | "SweynTooth: Unleashing Mayhem over Bluetooth Low Energy" | Matheus E. Garbelini et al. | USENIX ATC 2020 |
+| **AFLNet** | "AFLNet: A Greybox Fuzzer for Network Protocols" | Van-Thuan Pham et al. | ICST 2020 |
+| **Invalid Curve** | "Invalid Curve Attack on Bluetooth Secure Simple Pairing" | Eli Biham, Lior Neumann | — |
+| **BlueBorne** | "BlueBorne: A New Attack Vector" | Ben Seri, Gregory Vishnepolsky | Armis Labs 2017 |
+| **PerfektBlue** | "PerfektBlue: Bluetooth Vulnerabilities in OpenSynergy BlueSDK" | — | 2024 |
+
+### Tools and Firmware
+
+| Tool | Purpose | Credit |
+|------|---------|--------|
+| [DarkFirmware](https://github.com/nicman23/dark_firmware_for_realtek_i) | RTL8761B firmware patching for LMP injection/monitoring | nicman23 |
+| [BlueZ](http://www.bluez.org/) | Linux Bluetooth protocol stack | BlueZ contributors |
+| [Bleak](https://github.com/hbldh/bleak) | BLE GATT client library | Henrik Blidh |
+| [InternalBlue](https://github.com/seemoo-lab/internalblue) | Broadcom/Cypress Bluetooth firmware tools | SEEMOO Lab, TU Darmstadt |
+| [Crackle](https://github.com/mikeryan/crackle) | BLE pairing key cracking | Mike Ryan |
 
 ---
 

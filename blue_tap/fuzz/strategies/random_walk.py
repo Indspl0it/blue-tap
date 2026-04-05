@@ -23,6 +23,7 @@ import random
 from blue_tap.fuzz.corpus import Corpus
 from blue_tap.fuzz.mutators import CorpusMutator
 from blue_tap.fuzz.strategies._registry import get_registry, PROTOCOLS as _SHARED_PROTOCOLS
+from blue_tap.fuzz.strategies.base import FuzzStrategy
 
 
 # ---------------------------------------------------------------------------
@@ -42,7 +43,7 @@ _MAX_DEDUP_RETRIES = 8
 _MAX_SEEN = 500_000
 
 
-class RandomWalkStrategy:
+class RandomWalkStrategy(FuzzStrategy):
     """Random protocol-aware mutation strategy.
 
     Alternates between:
@@ -50,6 +51,10 @@ class RandomWalkStrategy:
     - Corpus mode (30%): Pick seed from corpus, apply byte-level havoc
 
     Weights mutations toward length/type/count fields for higher bug yield.
+
+    No feedback loop — ``feedback()`` is intentionally the inherited no-op.
+    Use :class:`~.coverage_guided.CoverageGuidedStrategy` for response-guided
+    mutation.
     """
 
     # Expose the full protocol list so callers can iterate or validate.
@@ -97,7 +102,8 @@ class RandomWalkStrategy:
                 data, log = self._generate_from_template(protocol)
             last_mode_corpus = use_corpus
 
-            if self._is_novel(data):
+            # Reject empty bytes (mutation deleted all content) alongside duplicates.
+            if data and self._is_novel(data):
                 self._generated_total += 1
                 if use_corpus:
                     self._generated_corpus += 1
@@ -107,14 +113,19 @@ class RandomWalkStrategy:
 
             self._duplicates_skipped += 1
 
-        # After retries, accept the last one even if it is a duplicate
-        # to guarantee forward progress.
+        # After retries, accept the last one even if it is a duplicate.
+        # If mutation stripped all content, fall back to a minimal random blob
+        # so the engine never sends an empty payload.
         self._generated_total += 1
         if last_mode_corpus:
             self._generated_corpus += 1
         else:
             self._generated_template += 1
-        return data, log  # type: ignore[possibly-undefined]
+        if not data:  # type: ignore[possibly-undefined]
+            import os as _os
+            data = _os.urandom(8)
+            log = ["fallback(empty_mutation_output)"]
+        return data, log
 
     def stats(self) -> dict:
         """Return generation statistics."""
@@ -143,6 +154,8 @@ class RandomWalkStrategy:
         template = random.choice(templates)
         num_mutations = random.randint(1, 3)
         mutated = CorpusMutator.mutate(template, num_mutations=num_mutations)
+        if not mutated:
+            mutated = template  # Guard: mutation deleted all bytes
 
         log = [
             f"template({protocol}, {len(template)}B) "

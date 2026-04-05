@@ -122,6 +122,23 @@ PROTOCOL_FIELD_MAP: dict[str, list[FieldDescriptor]] = {
     "at-injection": [
         ("command", 0, -1, "raw"),
     ],
+    # LMP (Link Manager Protocol) — below-HCI fuzzing via DarkFirmware on UB500
+    #
+    # PDU structure: byte 0 = [TID:3bits | opcode:5bits], bytes 1+ = params.
+    # Many fields overlap intentionally — the tracker selects probabilistically,
+    # so overlapping fields let the same bytes be targeted by different mutation
+    # types (e.g. "key_size" as uint vs "payload_raw" as raw blob).
+    "lmp": [
+        ("tid_opcode",    0,  1, "uint"),  # byte 0: [TID:3 | opcode:5]
+        ("param_byte_0",  1,  1, "uint"),  # first param: key_size, enc_mode, features[0]
+        ("param_byte_1",  2,  1, "uint"),  # second param
+        ("param_byte_2",  3,  1, "uint"),  # third param
+        ("rand_field",    1,  8, "raw"),   # AU_RAND / IN_RAND / TEMP_RAND (8 bytes)
+        ("sres_field",    1,  4, "raw"),   # SRES response (4 bytes)
+        ("key_size",      1,  1, "uint"),  # LMP_encryption_key_size_req param (KNOB target)
+        ("features_mask", 1,  8, "raw"),   # LMP_features_res bitmask (8 bytes)
+        ("payload_raw",   1, -1, "raw"),   # full payload — generic mutation fallback
+    ],
 }
 
 # Opcode-specific field maps: protocol -> opcode -> field list

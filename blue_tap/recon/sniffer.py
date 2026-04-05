@@ -1,26 +1,25 @@
-"""nRF52840 + USRP B210 integration for BLE/BR-EDR capture and link key cracking.
+"""nRF52840 BLE sniffing, DarkFirmware LMP capture, and link key cracking.
 
 Hardware:
-  - nRF52840 dongle — BLE sniffing via Nordic's nRF Sniffer for Bluetooth LE.
+  - nRF52840 dongle -- BLE sniffing via Nordic's nRF Sniffer for Bluetooth LE.
     Requires sniffer firmware flashed onto the dongle (see Nordic Semiconductor
     "nRF Sniffer for Bluetooth LE" documentation). Interfaces with Wireshark/tshark
     through the nrf_sniffer_ble extcap plugin, or via nrfutil CLI.
 
-  - USRP B210 SDR — wideband 2.4 GHz capture for BR/EDR baseband sniffing.
-    Requires UHD drivers (uhd_find_devices, uhd_rx_cfile) and gr-bluetooth
-    GNU Radio module for real-time BR/EDR decoding. Raw IQ capture is always
-    available as a fallback for offline analysis.
+  - RTL8761B (DarkFirmware) -- LMP traffic monitor for BR/EDR link-layer
+    visibility.  Captures incoming LMP packets via the firmware's RX hook,
+    which logs all LMP traffic as HCI vendor-specific events (0xFF).
 
-Workflow (BLE — nRF52840):
+Workflow (BLE -- nRF52840):
   1. Scan for BLE advertisers (nrf_sniffer_ble extcap via tshark)
   2. Sniff target BLE connection / pairing exchange
   3. Crack captured pairing to extract LTK (crackle)
 
-Workflow (BR/EDR — USRP B210):
-  1. Scan for active piconets (raw IQ + gr-bluetooth btbb_rx)
-  2. Follow target piconet and capture traffic
-  3. Extract link key from captured LMP frames (tshark)
-  4. Inject link key into BlueZ for impersonation
+Workflow (LMP -- DarkFirmware RTL8761B):
+  1. Load DarkFirmware onto RTL8761B adapter
+  2. Establish ACL connection to target
+  3. Monitor incoming LMP packets (features, auth, encryption negotiation)
+  4. Export to BTIDES JSON format
 
 CrackleRunner works on BLE pcaps from any capture source.
 LinkKeyExtractor works on BR/EDR pcaps from any capture source.
@@ -28,20 +27,20 @@ LinkKeyExtractor works on BR/EDR pcaps from any capture source.
 Software required:
   - tshark (Wireshark CLI) with nrf_sniffer_ble extcap plugin
   - nrfutil (optional, alternative to tshark for nRF52840 sniffing)
-  - uhd (UHD drivers: uhd_find_devices, uhd_rx_cfile)
-  - gr-bluetooth (btbb_rx, btrx — optional, for real-time BR/EDR decoding)
   - crackle (BLE pairing cracker)
 
 References:
   - https://infocenter.nordicsemi.com/topic/ug_sniffer_ble/
-  - https://www.ettus.com/all-products/ub210-kit/
-  - https://github.com/greatscottgadgets/gr-bluetooth
+  - https://github.com/AyoubMouhworking/DarkFirmware_real_i
   - https://github.com/mikeryan/crackle
   - Ryan, M. "Bluetooth: With Low Energy Comes Low Security" USENIX WOOT 2013
 """
 
+import json
 import os
 import re
+import struct
+import threading
 import time
 import signal
 import subprocess
@@ -349,286 +348,593 @@ class NRFBLESniffer:
             info("nRF52840 BLE capture stopped")
 
 
-# ── USRP B210 BR/EDR Capture ──────────────────────────────────────────────
+# ── LMP Packet Filter ────────────────────────────────────────────────────
 
-class USRPCapture:
-    """BR/EDR sniffer using USRP B210 SDR.
+class LMPFilter:
+    """Filter LMP packets by category, direction, or opcode.
 
-    Uses UHD drivers for raw IQ capture at 2.4 GHz and gr-bluetooth
-    (btbb_rx, btrx) for real-time BR/EDR baseband decoding. If gr-bluetooth
-    is not available, raw IQ files can be captured for offline processing
-    with GNU Radio.
+    Predefined categories cover security-relevant LMP operations:
+      - auth: AU_RAND, SRES, IN_RAND, COMB_KEY, SSP confirm/number/dhkey
+      - encryption: ENC_MODE_REQ, KEY_SIZE_REQ, START/STOP_ENC
+      - features: VERSION_REQ/RES, FEATURES_REQ/RES
+      - security: All of the above combined
     """
 
-    def __init__(self, freq: float = 2.402e9, gain: float = 40):
-        self._proc = None
-        self.freq = freq
-        self.gain = gain
+    AUTH_OPCODES = {8, 9, 10, 11, 12, 13, 14, 59, 60, 61}
+    ENCRYPTION_OPCODES = {15, 16, 17, 18}
+    FEATURES_OPCODES = {37, 38, 39, 40}
+    SECURITY_OPCODES = AUTH_OPCODES | ENCRYPTION_OPCODES | FEATURES_OPCODES
 
-    @staticmethod
-    def is_available() -> bool:
-        """Check if USRP/UHD tools are installed."""
-        return check_tool("uhd_find_devices")
-
-    def scan_piconets(self, duration: int = 30) -> list[dict]:
-        """Scan for active BR/EDR piconets using USRP B210.
-
-        If gr-bluetooth btbb_rx is available, uses it for real-time
-        piconet detection. Otherwise, captures raw IQ and notes that
-        manual processing is needed.
-
-        Returns list of discovered piconets with LAP, UAP, and signal info.
-        """
-        if not self.is_available():
-            error("uhd_find_devices not found. Install UHD drivers: apt install uhd-host")
-            return []
-
-        with phase("USRP B210 Piconet Scan"):
-            info(f"Scanning for active BR/EDR piconets ({duration}s)...")
-            info(f"Center frequency: {self.freq / 1e6:.1f} MHz, Gain: {self.gain} dB")
-
-            if check_tool("btbb_rx"):
-                return self._scan_via_btbb_rx(duration)
-            else:
-                warning("gr-bluetooth btbb_rx not found — falling back to raw IQ capture")
-                info("Install gr-bluetooth for real-time piconet detection")
-                raw_file = f"piconet_scan_{int(time.time())}.cfile"
-                result = self.capture_raw_iq(raw_file, duration=duration)
-                if result["success"]:
-                    info(f"Raw IQ saved to {raw_file}")
-                    info("Process with GNU Radio / gr-bluetooth offline:")
-                    info(f"  btbb_rx -f {raw_file}")
-                return []
-
-    def _scan_via_btbb_rx(self, duration: int) -> list[dict]:
-        """Scan for piconets using gr-bluetooth btbb_rx."""
-        with step("Scanning via btbb_rx"):
-            result = run_cmd(
-                [
-                    "btbb_rx",
-                    "--freq", str(self.freq),
-                    "--gain", str(int(self.gain)),
-                    "--duration", str(duration),
-                ],
-                timeout=duration + 15,
-            )
-
-            piconets = []
-            if result.returncode == 0 and result.stdout:
-                for line in result.stdout.splitlines():
-                    # Parse LAP/UAP from btbb_rx output
-                    lap_m = re.search(r"LAP[=:\s]+([0-9A-Fa-f]{6})", line)
-                    uap_m = re.search(r"UAP[=:\s]+([0-9A-Fa-f]{2})", line)
-                    if lap_m:
-                        entry = {
-                            "lap": lap_m.group(1).upper(),
-                            "uap": uap_m.group(1).upper() if uap_m else "??",
-                            "raw": line.strip(),
-                        }
-                        # Deduplicate by LAP
-                        if not any(p["lap"] == entry["lap"] for p in piconets):
-                            piconets.append(entry)
-
-                success(f"Found {len(piconets)} active piconet(s)")
-                for p in piconets:
-                    substep(f"LAP: {p['lap']}  UAP: {p['uap']}")
-            else:
-                warning("No piconets detected (check USRP B210 connection)")
-                if result.stderr:
-                    verbose(f"stderr: {result.stderr.strip()}")
-
-        return piconets
-
-    def follow_piconet(
-        self,
-        target_address: str,
-        output_pcap: str = "bt_capture.pcap",
-        duration: int = 120,
-    ) -> dict:
-        """Follow a specific BR/EDR piconet and capture traffic to pcap.
-
-        Uses the LAP (lower 24 bits of BD_ADDR) to decode the target's
-        frequency hopping sequence via gr-bluetooth. If gr-bluetooth is
-        not available, captures raw IQ for offline processing.
-
-        Args:
-            target_address: Target BD_ADDR (AA:BB:CC:DD:EE:FF).
-                           LAP is extracted from the lower 3 octets.
-            output_pcap: Output pcap file path.
-            duration: Capture duration in seconds.
-        """
-        if not self.is_available():
-            error("UHD drivers not found. Install: apt install uhd-host")
-            return {"success": False, "error": "UHD not installed"}
-
-        # Extract LAP from MAC address (lower 3 bytes)
-        octets = target_address.replace("-", ":").split(":")
-        if len(octets) != 6:
-            error(f"Invalid MAC address: {target_address}")
-            return {"success": False, "error": "invalid MAC"}
-        lap = "".join(octets[3:6])  # Last 3 octets = LAP
-
-        with phase("USRP B210 Piconet Follow"):
-            info(f"Following piconet LAP={lap} for {duration}s")
-            info(f"Output: {output_pcap}")
-
-            if check_tool("btrx"):
-                return self._follow_via_btrx(lap, output_pcap, duration)
-            else:
-                warning("gr-bluetooth btrx not found — capturing raw IQ instead")
-                raw_file = output_pcap.replace(".pcap", ".cfile")
-                result = self.capture_raw_iq(raw_file, duration=duration)
-                if result["success"]:
-                    info(f"Raw IQ saved to {raw_file}")
-                    info("Decode offline with gr-bluetooth:")
-                    info(f"  btrx -f {raw_file} -l {lap} -o {output_pcap}")
-                    result["note"] = "raw IQ captured; decode offline with btrx"
-                    result["lap"] = lap
-                return result
-
-    def _follow_via_btrx(
-        self, lap: str, output_pcap: str, duration: int
-    ) -> dict:
-        """Follow piconet using gr-bluetooth btrx."""
-        cmd = [
-            "btrx",
-            "--lap", lap,
-            "--freq", str(self.freq),
-            "--gain", str(int(self.gain)),
-            "--output", output_pcap,
-        ]
-
-        with step("Capturing piconet traffic via btrx"):
-            try:
-                self._proc = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-                info(f"btrx capture started (PID {self._proc.pid})")
-
-                try:
-                    self._proc.wait(timeout=duration)
-                except subprocess.TimeoutExpired:
-                    self._proc.send_signal(signal.SIGINT)
-                    self._proc.wait(timeout=5)
-
-            except FileNotFoundError:
-                error("btrx binary not found")
-                return {"success": False, "error": "binary not found"}
-            except Exception as e:
-                error(f"Capture error: {e}")
-                return {"success": False, "error": str(e)}
-            finally:
-                self._proc = None
-
-        # Check output
-        if os.path.exists(output_pcap):
-            size = os.path.getsize(output_pcap)
-            success(f"Captured {size} bytes to {output_pcap}")
-            return {
-                "success": True,
-                "pcap": output_pcap,
-                "size": size,
-                "duration": duration,
-                "lap": lap,
-            }
+    def __init__(self, opcodes=None, category=None):
+        if category == "auth":
+            self.opcodes = self.AUTH_OPCODES
+        elif category == "encryption":
+            self.opcodes = self.ENCRYPTION_OPCODES
+        elif category == "features":
+            self.opcodes = self.FEATURES_OPCODES
+        elif category == "security":
+            self.opcodes = self.SECURITY_OPCODES
+        elif opcodes:
+            self.opcodes = set(opcodes)
         else:
-            warning("No pcap file produced (no traffic captured?)")
-            return {"success": False, "error": "no output file"}
+            self.opcodes = None  # Pass all
 
-    def capture_raw_iq(
+        label = category or (f"opcodes={self.opcodes}" if self.opcodes else "all")
+        verbose(f"LMPFilter initialized: {label}")
+
+    def matches(self, pkt: dict) -> bool:
+        """Return True if the packet passes this filter."""
+        if self.opcodes is None:
+            return True
+        return pkt.get("opcode", 0) in self.opcodes
+
+
+# ── DarkFirmware LMP Sniffer (RTL8761B) ──────────────────────────────────
+
+class DarkFirmwareSniffer:
+    """LMP traffic monitor using DarkFirmware-patched RTL8761B.
+
+    Captures incoming LMP packets via the firmware's RX hook, which logs
+    all LMP traffic as HCI vendor-specific events (0xFF).  This enables
+    visibility into link-layer negotiation that is normally hidden below
+    the HCI boundary.
+
+    Unlike passive sniffers (nRF), this operates as an active
+    endpoint -- you must be one end of the Bluetooth connection.  However,
+    this captures the pre-encryption LMP handshake in cleartext, which is
+    where KNOB, BIAS, and BLUFFS attacks operate.
+
+    Capabilities:
+      - Capture LMP metadata for ALL incoming packets (opcode + struct pointer)
+      - Capture full LMP payload for packets on the 0x0480 firmware path
+      - Export to BTIDES JSON format (compatible with Blue2thprinting)
+      - Real-time monitoring with Rich console output
+
+    Limitations:
+      - Only captures incoming LMP (outgoing only if sent via VSC echo)
+      - Full payload only for 0x0480 code path -- other paths get metadata only
+      - Single connection (firmware hardcodes connection index 0)
+      - Requires DarkFirmware loaded -- not a passive sniffer
+    """
+
+    def __init__(self, hci_dev: int = 1):
+        self.hci_dev = hci_dev
+        self._vsc = None
+        self._packets = []
+        self._monitoring = False
+        self._filter: LMPFilter | None = None
+        self._local_addr: str = ""
+
+    def is_available(self) -> bool:
+        """Check if DarkFirmware is loaded on the adapter."""
+        try:
+            from blue_tap.core.firmware import DarkFirmwareManager
+            fw = DarkFirmwareManager()
+            return fw.is_darkfirmware_loaded(f"hci{self.hci_dev}")
+        except Exception:
+            return False
+
+    def start_capture(
         self,
-        output_file: str = "bt_capture.cfile",
-        duration: int = 60,
-        freq: float | None = None,
-        rate: float = 4e6,
-    ) -> dict:
-        """Capture raw IQ samples from USRP B210 for offline analysis.
-
-        This is the most flexible capture mode — raw IQ can be processed
-        with any GNU Radio flowgraph, gr-bluetooth, or custom demodulators.
+        target=None,
+        output="lmp_capture.json",
+        duration=120,
+        lmp_filter: LMPFilter | None = None,
+        output_format: str = "json",
+    ):
+        """Capture LMP traffic for a duration, save to file.
 
         Args:
-            output_file: Output file path (complex float32 IQ samples).
+            target: Optional BD_ADDR to connect to (establishes ACL if specified).
+            output: Output file path (JSON or pcap).
             duration: Capture duration in seconds.
-            freq: Center frequency in Hz (default: self.freq).
-            rate: Sample rate in Hz (default: 4 MHz).
+            lmp_filter: Optional LMPFilter to restrict captured opcodes.
+            output_format: ``"json"`` (BTIDES v2) or ``"pcap"`` (Wireshark).
+
+        Returns:
+            dict with success, packets count, output path, duration.
         """
-        if not self.is_available():
-            error("UHD drivers not found. Install: apt install uhd-host")
-            return {"success": False, "error": "UHD not installed"}
+        from blue_tap.core.hci_vsc import HCIVSCSocket
 
-        capture_freq = freq if freq is not None else self.freq
+        self._filter = lmp_filter
+        result = {"success": False, "packets": 0, "output": output, "duration": 0}
 
-        with phase("USRP B210 Raw IQ Capture"):
-            info(f"Capturing raw IQ for {duration}s")
-            info(f"Frequency: {capture_freq / 1e6:.1f} MHz, Rate: {rate / 1e6:.1f} MS/s")
-            info(f"Output: {output_file}")
+        try:
+            self._vsc = HCIVSCSocket(self.hci_dev)
+            self._vsc.open()
+            self._packets = []
+            self._monitoring = True
+            self._local_addr = self._resolve_local_addr()
 
-            cmd = [
-                "uhd_rx_cfile",
-                "--freq", str(capture_freq),
-                "--samp-rate", str(rate),
-                "--gain", str(int(self.gain)),
-                "--duration", str(duration),
-                output_file,
-            ]
+            info(f"Starting LMP capture on hci{self.hci_dev} (duration={duration}s)")
+            if lmp_filter and lmp_filter.opcodes is not None:
+                info(f"Filter active: {len(lmp_filter.opcodes)} opcodes")
 
-            with step("Capturing raw IQ samples"):
+            # If target specified, try to establish connection
+            if target:
+                import socket as _socket
+                probe = None
                 try:
-                    self._proc = subprocess.Popen(
-                        cmd,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                    )
-                    info(f"uhd_rx_cfile started (PID {self._proc.pid})")
-
-                    try:
-                        self._proc.wait(timeout=duration + 15)
-                    except subprocess.TimeoutExpired:
-                        self._proc.send_signal(signal.SIGINT)
-                        self._proc.wait(timeout=5)
-
-                except FileNotFoundError:
-                    error("uhd_rx_cfile not found. Install: apt install uhd-host")
-                    return {"success": False, "error": "uhd_rx_cfile not found"}
-                except Exception as e:
-                    error(f"Capture error: {e}")
-                    return {"success": False, "error": str(e)}
+                    probe = _socket.socket(31, _socket.SOCK_SEQPACKET, 0)  # L2CAP
+                    probe.settimeout(5.0)
+                    probe.connect((target, 1))  # PSM 1 = SDP
+                    info(f"ACL connection established to {target}")
+                except OSError as e:
+                    warning(f"Could not connect to {target}: {e}")
                 finally:
-                    self._proc = None
+                    if probe:
+                        try:
+                            probe.close()
+                        except OSError:
+                            pass
 
-            if os.path.exists(output_file):
-                size = os.path.getsize(output_file)
-                # uhd_rx_cfile writes complex float32 = 8 bytes/sample (I+Q as float32)
-                samples = size // 8
-                success(f"Captured {size} bytes ({samples:,} complex float32 samples)")
-                return {
-                    "success": True,
-                    "file": output_file,
-                    "size": size,
-                    "duration": duration,
-                    "freq": capture_freq,
-                    "rate": rate,
-                }
+            self._vsc.start_lmp_monitor(self._on_packet)
+
+            start = time.time()
+            try:
+                while time.time() - start < duration and self._monitoring:
+                    time.sleep(0.1)
+            except KeyboardInterrupt:
+                pass
+
+            elapsed = time.time() - start
+            self._vsc.stop_lmp_monitor()
+            self._vsc.close()
+            self._vsc = None
+
+            # Export in requested format
+            if output_format == "pcap":
+                export_ok = self.export_pcap(self._packets, output)
+                if not export_ok:
+                    error("PCAP export failed")
             else:
-                warning("No output file produced")
-                return {"success": False, "error": "no output file"}
+                btides_data = self._export_btides(target)
+                with open(output, "w") as f:
+                    json.dump(btides_data, f, indent=2)
+
+            result["success"] = True
+            result["packets"] = len(self._packets)
+            result["duration"] = round(elapsed, 1)
+            success(f"Captured {len(self._packets)} LMP packets in {elapsed:.1f}s")
+
+        except Exception as exc:
+            error(f"LMP capture failed: {exc}")
+            if self._vsc:
+                try:
+                    self._vsc.stop_lmp_monitor()
+                    self._vsc.close()
+                except Exception:
+                    pass
+                self._vsc = None
+
+        return result
+
+    def monitor(
+        self,
+        target=None,
+        duration=0,
+        callback=None,
+        lmp_filter: LMPFilter | None = None,
+        dashboard: bool = False,
+    ):
+        """Real-time LMP packet monitor with console output.
+
+        Args:
+            target: Optional target address.
+            duration: Duration in seconds (0 = until Ctrl-C).
+            callback: Optional callback for each packet.
+            lmp_filter: Optional LMPFilter to restrict displayed opcodes.
+            dashboard: If True, use Rich Live dashboard display.
+        """
+        from blue_tap.core.hci_vsc import HCIVSCSocket
+
+        self._filter = lmp_filter
+        self._vsc = HCIVSCSocket(self.hci_dev)
+        self._vsc.open()
+        self._packets = []
+        self._monitoring = True
+        self._local_addr = self._resolve_local_addr()
+
+        # Establish connection if target given
+        if target:
+            import socket as _socket
+            probe = None
+            try:
+                probe = _socket.socket(31, _socket.SOCK_SEQPACKET, 0)
+                probe.settimeout(5.0)
+                probe.connect((target, 1))
+                info(f"ACL connection established to {target}")
+            except OSError:
+                warning(f"Could not connect to {target}")
+            finally:
+                if probe:
+                    try:
+                        probe.close()
+                    except OSError:
+                        pass
+
+        # Optionally start the Rich dashboard
+        _dashboard = None
+        if dashboard:
+            try:
+                from blue_tap.ui.dashboard import AttackDashboard
+                _dashboard = AttackDashboard(target=target or "")
+                _dashboard.start()
+                info("Rich dashboard started")
+            except Exception as exc:
+                warning(f"Dashboard unavailable, falling back to console: {exc}")
+                _dashboard = None
+
+        def _on_monitor_packet(pkt):
+            pkt["timestamp"] = time.time()
+            pkt["direction"] = "rx"
+            if self._filter and not self._filter.matches(pkt):
+                return
+            self._packets.append(pkt)
+            if _dashboard:
+                _dashboard.on_lmp_packet(pkt)
+            else:
+                self._print_lmp_packet(pkt)
+            if callback:
+                callback(pkt)
+
+        self._vsc.start_lmp_monitor(_on_monitor_packet)
+
+        info(f"LMP monitor started on hci{self.hci_dev}" +
+             (f" target={target}" if target else "") +
+             " (Ctrl-C to stop)")
+
+        start = time.time()
+        try:
+            while self._monitoring:
+                if duration > 0 and time.time() - start >= duration:
+                    break
+                time.sleep(0.1)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            if _dashboard:
+                try:
+                    _dashboard.stop()
+                except Exception:
+                    pass
+            # Ensure cleanup even on unexpected exceptions
+            if self._vsc is not None:
+                try:
+                    self._vsc.stop_lmp_monitor()
+                    self._vsc.close()
+                except Exception:
+                    pass
+                self._vsc = None
+        info(f"Captured {len(self._packets)} LMP packets")
 
     def stop(self):
-        """Stop any running capture."""
-        if self._proc:
-            try:
-                self._proc.send_signal(signal.SIGINT)
-                self._proc.wait(timeout=5)
-            except (ProcessLookupError, subprocess.TimeoutExpired):
+        """Stop ongoing capture/monitor."""
+        self._monitoring = False
+
+    def _on_packet(self, pkt):
+        """Internal callback -- timestamp, filter, and accumulate packets."""
+        pkt["timestamp"] = time.time()
+        pkt["direction"] = "rx"
+        if self._filter and not self._filter.matches(pkt):
+            return
+        self._packets.append(pkt)
+
+    @staticmethod
+    def _print_lmp_packet(pkt):
+        """Print a single LMP packet to console."""
+        opcode = pkt.get("opcode", 0)
+        payload = pkt.get("payload", b"")
+
+        # Try to resolve opcode name
+        try:
+            from blue_tap.fuzz.protocols.lmp import COMMAND_NAMES
+            name = COMMAND_NAMES.get(opcode, f"Unknown(0x{opcode:04x})")
+        except ImportError:
+            name = f"0x{opcode:04x}"
+
+        data_str = payload.hex() if payload else "(metadata only)"
+        info(f"  LMP RX: {name} | data={data_str}")
+
+    def _resolve_local_addr(self) -> str:
+        """Resolve the local BD_ADDR for hci_dev."""
+        try:
+            result = run_cmd(["hciconfig", f"hci{self.hci_dev}"], timeout=5)
+            if result.returncode == 0:
+                m = re.search(r"BD Address:\s*([0-9A-Fa-f:]{17})", result.stdout)
+                if m:
+                    return m.group(1).upper()
+        except Exception:
+            pass
+        return "unknown"
+
+    @staticmethod
+    def _decode_lmp_params(opcode: int, payload: bytes) -> dict:
+        """Decode LMP parameters for known opcodes.
+
+        Returns decoded fields for security-relevant opcodes:
+        features bitmap, version info, and key size.
+        """
+        decoded: dict = {}
+        try:
+            from blue_tap.fuzz.protocols.lmp import COMMAND_NAMES
+            decoded["opcode_name"] = COMMAND_NAMES.get(opcode, f"Unknown(0x{opcode:04x})")
+        except ImportError:
+            decoded["opcode_name"] = f"0x{opcode:04x}"
+
+        # LMP_FEATURES_RES (opcode 40): 8-byte features bitmap
+        if opcode == 40 and len(payload) >= 8:
+            decoded["features_hex"] = payload[:8].hex()
+        # LMP_VERSION_RES (opcode 38): version + company_id + subversion
+        elif opcode == 38 and len(payload) >= 5:
+            decoded["bt_version"] = payload[0]
+            decoded["company_id"] = int.from_bytes(payload[1:3], "little")
+            decoded["subversion"] = int.from_bytes(payload[3:5], "little")
+        # LMP_ENCRYPTION_KEY_SIZE_REQ (opcode 16): key size
+        elif opcode == 16 and len(payload) >= 1:
+            decoded["key_size"] = payload[0]
+
+        return decoded
+
+    def _export_btides(self, target=None):
+        """Export captured packets in BTIDES v2 JSON format.
+
+        BTIDES v2 envelope wraps captures with format metadata,
+        timestamps on each packet, direction field, and decoded
+        parameters for known opcodes.
+        """
+        lmp_array = []
+        for pkt in self._packets:
+            opcode = pkt.get("opcode", 0)
+            payload = pkt.get("payload", b"")
+            entry: dict = {
+                "opcode": opcode,
+                "has_full_data": pkt.get("has_data", False),
+                "timestamp": pkt.get("timestamp", 0.0),
+                "direction": pkt.get("direction", "rx"),
+            }
+            if payload:
+                entry["full_pkt_hex_str"] = payload.hex()
+            # Decode known opcode parameters
+            decoded = self._decode_lmp_params(opcode, payload)
+            if decoded:
+                entry["decoded"] = decoded
+            lmp_array.append(entry)
+
+        captures = [{
+            "bdaddr": target or "unknown",
+            "bdaddr_local": self._local_addr,
+            "bdaddr_rand": 0,
+            "capture_method": "darkfirmware_rtl8761b",
+            "LMPArray": lmp_array,
+        }]
+
+        info(f"Exported {len(lmp_array)} packets in BTIDES v2 format")
+        return {
+            "format": "btides",
+            "version": 2,
+            "captures": captures,
+        }
+
+    def export_pcap(self, packets: list, output: str) -> bool:
+        """Export captured LMP packets as pcap file.
+
+        Uses pcap format with DLT_BLUETOOTH_HCI_H4_WITH_PHDR (201) link type.
+        Each packet gets a pcap record with timestamp and HCI vendor event wrapper.
+
+        Args:
+            packets: List of packet dicts from capture/monitor.
+            output: Output file path.
+
+        Returns:
+            True on success, False on error.
+        """
+        try:
+            with open(output, "wb") as f:
+                # PCAP global header
+                f.write(struct.pack(
+                    "<IHHiIII",
+                    0xA1B2C3D4,  # magic
+                    2, 4,        # version 2.4
+                    0,           # thiszone
+                    0,           # sigfigs
+                    65535,       # snaplen
+                    201,         # DLT_BLUETOOTH_HCI_H4_WITH_PHDR
+                ))
+
+                for pkt in packets:
+                    ts = pkt.get("timestamp", time.time())
+                    ts_sec = int(ts)
+                    ts_usec = int((ts - ts_sec) * 1_000_000)
+
+                    payload = pkt.get("payload", b"")
+                    opcode = pkt.get("opcode", 0)
+
+                    # HCI direction: 0x01 = received from controller
+                    hci_direction = struct.pack("<I", 0x01)
+                    # HCI event packet indicator (0x04) + vendor event (0xFF)
+                    # length = 1 (sub-event) + 2 (opcode LE) + len(payload)
+                    inner_len = 1 + 2 + len(payload)
+                    hci_header = bytes([0x04, 0xFF, inner_len & 0xFF])
+                    # Sub-event 0x01 (LMP log), opcode LE16
+                    lmp_meta = bytes([0x01]) + struct.pack("<H", opcode)
+                    data = hci_direction + hci_header + lmp_meta + payload
+
+                    # Packet record header
+                    f.write(struct.pack(
+                        "<IIII",
+                        ts_sec, ts_usec,
+                        len(data), len(data),
+                    ))
+                    f.write(data)
+
+            success(f"PCAP exported: {output} ({len(packets)} packets)")
+            return True
+        except Exception as exc:
+            error(f"PCAP export failed: {exc}")
+            return False
+
+
+# ── Combined BLE + LMP Sniffer ─────────────────────────────────────────────
+
+class CombinedSniffer:
+    """Simultaneous BLE (nRF52840) and LMP (DarkFirmware) monitoring.
+
+    Runs both sniffers concurrently with a correlated output timeline.
+    BLE captures advertisements and pairing; LMP captures link-layer
+    negotiation.  Together they cover the full attack surface.
+    """
+
+    def __init__(self, nrf_available=True, darkfirmware_available=True, hci_dev=1):
+        self._nrf = NRFBLESniffer() if nrf_available else None
+        self._df = DarkFirmwareSniffer(hci_dev=hci_dev) if darkfirmware_available else None
+        self._events: list[dict] = []  # Unified timeline
+        self._lock = threading.Lock()
+
+        sources = []
+        if self._nrf:
+            sources.append("nRF52840-BLE")
+        if self._df:
+            sources.append("DarkFirmware-LMP")
+        info(f"CombinedSniffer initialized with: {', '.join(sources) or 'none'}")
+
+    def monitor(self, target=None, duration=60) -> dict:
+        """Run both sniffers with unified timeline output.
+
+        Args:
+            target: Optional target BD_ADDR.
+            duration: Capture duration in seconds.
+
+        Returns:
+            dict with combined events, counts per source, and success flag.
+        """
+        self._events = []
+        threads: list[threading.Thread] = []
+
+        info(f"Starting combined monitor (duration={duration}s)")
+
+        if self._df:
+            def _run_df():
                 try:
-                    self._proc.kill()
-                except ProcessLookupError:
-                    pass
-            self._proc = None
-            info("USRP B210 capture stopped")
+                    def _lmp_cb(pkt):
+                        pkt_copy = dict(pkt)
+                        pkt_copy["_source"] = "lmp"
+                        pkt_copy["_time"] = time.time()
+                        with self._lock:
+                            self._events.append(pkt_copy)
+                    self._df.monitor(
+                        target=target,
+                        duration=duration,
+                        callback=_lmp_cb,
+                    )
+                except Exception as exc:
+                    error(f"DarkFirmware monitor error: {exc}")
+
+            t = threading.Thread(target=_run_df, daemon=True)
+            threads.append(t)
+
+        if self._nrf:
+            def _run_nrf():
+                try:
+                    pcap = f"combined_ble_{int(time.time())}.pcap"
+                    result = self._nrf.sniff_connection(
+                        target_address=target or "",
+                        output_pcap=pcap,
+                        duration=duration,
+                    )
+                    with self._lock:
+                        self._events.append({
+                            "_source": "ble",
+                            "_time": time.time(),
+                            "type": "ble_capture_complete",
+                            "pcap": pcap,
+                            "result": result,
+                        })
+                except Exception as exc:
+                    error(f"nRF BLE monitor error: {exc}")
+
+            t = threading.Thread(target=_run_nrf, daemon=True)
+            threads.append(t)
+
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=duration + 15)
+
+        # Sort by timestamp
+        self._events.sort(key=lambda e: e.get("_time", 0))
+
+        lmp_count = sum(1 for e in self._events if e.get("_source") == "lmp")
+        ble_count = sum(1 for e in self._events if e.get("_source") == "ble")
+        success(f"Combined capture complete: {lmp_count} LMP + {ble_count} BLE events")
+
+        return {
+            "success": True,
+            "events": self._events,
+            "lmp_count": lmp_count,
+            "ble_count": ble_count,
+            "duration": duration,
+        }
+
+    def export(self, output: str = "combined_capture.json") -> bool:
+        """Export combined capture to JSON with source tags.
+
+        Args:
+            output: Output file path.
+
+        Returns:
+            True on success.
+        """
+        try:
+            export_data = {
+                "format": "combined_capture",
+                "version": 1,
+                "total_events": len(self._events),
+                "events": [],
+            }
+            for evt in self._events:
+                entry: dict = {
+                    "source": evt.get("_source", "unknown"),
+                    "timestamp": evt.get("_time", 0),
+                }
+                # Copy relevant fields (skip internal keys)
+                for k, v in evt.items():
+                    if k.startswith("_"):
+                        continue
+                    if isinstance(v, bytes):
+                        entry[k] = v.hex()
+                    else:
+                        entry[k] = v
+                export_data["events"].append(entry)
+
+            with open(output, "w") as f:
+                json.dump(export_data, f, indent=2, default=str)
+
+            success(f"Combined capture exported: {output} ({len(self._events)} events)")
+            return True
+        except Exception as exc:
+            error(f"Combined export failed: {exc}")
+            return False
 
 
 # ── Crackle Link Key Cracker ────────────────────────────────────────────────
@@ -736,7 +1042,7 @@ class CrackleRunner:
 class LinkKeyExtractor:
     """Extract and inject BR/EDR link keys for Classic Bluetooth impersonation.
 
-    After capturing a BR/EDR pairing exchange (via USRP B210), the link key
+    After capturing a BR/EDR pairing exchange (via DarkFirmware LMP capture), the link key
     can sometimes be derived from the captured LMP packets. This class also
     handles injecting recovered link keys into BlueZ's storage so that
     bluetoothctl can connect using the stolen key.

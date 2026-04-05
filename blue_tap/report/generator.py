@@ -335,6 +335,8 @@ class ReportGenerator:
         self._fuzz_health_events: list[dict] = []
         self._fuzz_anomalies: list[dict] = []
         self._fuzz_baselines: dict = {}
+        # LMP capture data (Phase 4 sniffer)
+        self._lmp_captures: list[dict] = []
 
     # ------------------------------------------------------------------
     # Data intake (public API — signatures must not change)
@@ -374,6 +376,16 @@ class ReportGenerator:
 
     def add_note(self, note: str):
         self.notes.append(note)
+
+    def add_lmp_captures(self, captures: list[dict]) -> None:
+        """Add LMP capture data from DarkFirmwareSniffer BTIDES export.
+
+        Args:
+            captures: List of LMP capture dicts, each containing an ``LMPArray``
+                      of packet entries with opcode, timestamp, direction, and
+                      optional decoded parameters.
+        """
+        self._lmp_captures.extend(captures)
 
     def add_session_metadata(self, metadata: dict) -> None:
         """Store session metadata for timeline, scope, and methodology sections."""
@@ -428,7 +440,7 @@ class ReportGenerator:
             except ImportError:
                 error("blue_tap.fuzz.crash_db not available")
             except (OSError, ValueError) as exc:
-                info(f"Could not load crashes.db: {exc}")
+                warning(f"Could not load crashes.db: {exc}")
 
         # Also check per-protocol crash DBs
         for fname in os.listdir(fuzz_dir):
@@ -1524,6 +1536,139 @@ class ReportGenerator:
         s.append('</div>')
         return "\n".join(s)
 
+    def _build_lmp_html(self) -> str:
+        """Render LMP capture findings as HTML section.
+
+        Produces a table of captured LMP packets color-coded by category
+        (auth=red, encryption=orange, features=blue), a feature bitmap
+        visualization, and an encryption negotiation summary.
+        """
+        if not self._lmp_captures:
+            return ""
+
+        from datetime import datetime as _dt
+
+        s = []
+        s.append('<div class="section" id="sec-lmp">')
+        s.append('<h2>LMP Capture Analysis</h2>')
+        s.append('<p>Link Manager Protocol packets captured via DarkFirmware '
+                 'RTL8761B reveal the below-HCI negotiation between link '
+                 'managers, including authentication, encryption setup, and '
+                 'feature exchange.</p>')
+
+        # Category colour map
+        _auth = {8, 9, 10, 11, 12, 13, 14, 59, 60, 61}
+        _enc = {15, 16, 17, 18}
+        _feat = {37, 38, 39, 40}
+
+        features_hex = None
+        key_sizes: list[int] = []
+
+        for capture in self._lmp_captures:
+            bdaddr = capture.get("bdaddr", "unknown")
+            lmp_array = capture.get("LMPArray", [])
+            if not lmp_array:
+                continue
+
+            s.append(f'<h3>Capture: {_esc(bdaddr)}</h3>')
+            s.append('<table><tr><th>Timestamp</th><th>Direction</th>'
+                     '<th>Opcode</th><th>Decoded</th></tr>')
+
+            for pkt in lmp_array:
+                opcode = pkt.get("opcode", 0)
+                ts_val = pkt.get("timestamp", 0)
+                try:
+                    ts_str = _dt.fromtimestamp(ts_val).strftime("%H:%M:%S.%f")[:-3] if ts_val else ""
+                except (OSError, ValueError):
+                    ts_str = str(ts_val)
+
+                direction = _esc(pkt.get("direction", "rx"))
+                decoded = pkt.get("decoded", {})
+                opcode_name = _esc(decoded.get("opcode_name", f"0x{opcode:04x}"))
+
+                # Build decoded params string
+                params = []
+                for k, v in decoded.items():
+                    if k == "opcode_name":
+                        continue
+                    params.append(f"{k}={_esc(str(v))}")
+                params_str = ", ".join(params) if params else ""
+
+                # Colour by category
+                if opcode in _auth:
+                    color = "#dc2626"  # red
+                elif opcode in _enc:
+                    color = "#ea580c"  # orange
+                elif opcode in _feat:
+                    color = "#2563eb"  # blue
+                else:
+                    color = "#6b7280"  # grey
+
+                s.append(
+                    f'<tr style="color:{color}">'
+                    f'<td>{_esc(ts_str)}</td>'
+                    f'<td>{direction}</td>'
+                    f'<td class="mono">{opcode_name}</td>'
+                    f'<td>{params_str}</td></tr>'
+                )
+
+                # Track for summaries
+                if decoded.get("features_hex"):
+                    features_hex = decoded["features_hex"]
+                if decoded.get("key_size"):
+                    key_sizes.append(decoded["key_size"])
+
+            s.append('</table>')
+
+        # Feature bitmap visualization
+        if features_hex:
+            s.append('<h3>Feature Bitmap</h3>')
+            s.append('<p>8-byte LMP features bitmap from '
+                     'LMP_FEATURES_RES:</p>')
+            try:
+                feat_bytes = bytes.fromhex(features_hex)
+                s.append('<table class="feature-grid"><tr>')
+                _feature_names = [
+                    "3-slot", "5-slot", "Encryption", "SlotOffset",
+                    "TimingAccuracy", "RoleSwitch", "HoldMode", "SniffMode",
+                    "ParkState", "PowerCtrlReq", "CQDDR", "SCOLink",
+                    "HV2", "HV3", "uLaw", "aLaw",
+                ]
+                for byte_idx, b in enumerate(feat_bytes):
+                    for bit in range(8):
+                        bit_num = byte_idx * 8 + bit
+                        is_set = bool(b & (1 << bit))
+                        bg = "#22c55e" if is_set else "#374151"
+                        name = _feature_names[bit_num] if bit_num < len(_feature_names) else f"bit{bit_num}"
+                        s.append(
+                            f'<td style="background:{bg};color:white;'
+                            f'padding:2px 4px;font-size:10px;" '
+                            f'title="Bit {bit_num}: {_esc(name)}">'
+                            f'{"1" if is_set else "0"}</td>'
+                        )
+                    if byte_idx % 2 == 1:
+                        s.append('</tr><tr>')
+                s.append('</tr></table>')
+            except (ValueError, IndexError):
+                s.append(f'<pre>{_esc(features_hex)}</pre>')
+
+        # Encryption negotiation summary
+        if key_sizes:
+            min_ks = min(key_sizes)
+            max_ks = max(key_sizes)
+            s.append('<h3>Encryption Negotiation Summary</h3>')
+            s.append(f'<p>Key size requests observed: min={min_ks}, '
+                     f'max={max_ks}, count={len(key_sizes)}</p>')
+            if min_ks < 7:
+                s.append(
+                    '<p style="color:#dc2626;font-weight:bold">'
+                    'WARNING: Key size below 7 bytes detected '
+                    '(potential KNOB attack surface - CVE-2019-9506)</p>'
+                )
+
+        s.append('</div>')
+        return "\n".join(s)
+
     def _build_recon_html(self) -> str:
         if not self.recon_results:
             return ""
@@ -1819,6 +1964,8 @@ class ReportGenerator:
                              self._fuzz_health_events, self._fuzz_baselines])
         if has_fuzz_intel:
             toc_entries.append(("sec-fuzz-intel", "Fuzzing Intelligence Analysis"))
+        if self._lmp_captures:
+            toc_entries.append(("sec-lmp", "LMP Capture Analysis"))
         if self.recon_results:
             toc_entries.append(("sec-recon", "Reconnaissance Results"))
         if self.dos_results:
@@ -1846,6 +1993,7 @@ class ReportGenerator:
         ]
         body_parts.extend(self._build_fuzz_html())
         body_parts.append(self._build_fuzz_intelligence_html())
+        body_parts.append(self._build_lmp_html())
         body_parts.extend([
             self._build_recon_html(),
             self._build_dos_html(),
