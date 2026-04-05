@@ -1808,7 +1808,7 @@ Blue-Tap builds on published academic research and open-source tools. Credit to 
 
 | Tool | Purpose | Credit |
 |------|---------|--------|
-| [DarkFirmware](https://github.com/nicman23/dark_firmware_for_realtek_i) | RTL8761B firmware patching for LMP injection/monitoring | nicman23 |
+| [DarkFirmware](https://github.com/darkmentorllc/DarkFirmware_real_i) | RTL8761B firmware patching for LMP injection/monitoring | darkmentorllc |
 | [BlueZ](http://www.bluez.org/) | Linux Bluetooth protocol stack | BlueZ contributors |
 | [Bleak](https://github.com/hbldh/bleak) | BLE GATT client library | Henrik Blidh |
 | [InternalBlue](https://github.com/seemoo-lab/internalblue) | Broadcom/Cypress Bluetooth firmware tools | SEEMOO Lab, TU Darmstadt |
