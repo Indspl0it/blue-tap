@@ -1143,6 +1143,42 @@ class ReportGenerator:
             if isinstance(knob, dict):
                 s.append(f'<pre>{_esc(json.dumps(knob, indent=2, default=str)[:2000])}</pre>')
 
+        if self.attack_results.get("bluffs_attack"):
+            bluffs = self.attack_results["bluffs_attack"]
+            s.append('<h3>Session Key Downgrade: BLUFFS (CVE-2023-24023)</h3>')
+            s.append('<p>The BLUFFS attack exploits weaknesses in BR/EDR session key '
+                     'derivation to force both endpoints to derive a weak, reusable '
+                     'session key. This allows an attacker to decrypt past and future '
+                     'communications (breaking both forward and future secrecy). The '
+                     'attack manipulates LMP encryption setup at the link layer via '
+                     'DarkFirmware LMP injection on RTL8761B.</p>')
+            if isinstance(bluffs, dict):
+                variant = bluffs.get("variant", "unknown")
+                vulnerable = bluffs.get("vulnerable", bluffs.get("success", False))
+                s.append(f'<p><strong>Variant:</strong> {_esc(str(variant))} | '
+                         f'<strong>Vulnerable:</strong> {"Yes" if vulnerable else "No"}</p>')
+                for detail in bluffs.get("details", []):
+                    s.append(f'<p class="note">{_esc(str(detail))}</p>')
+                s.append(f'<pre>{_esc(json.dumps(bluffs, indent=2, default=str)[:2000])}</pre>')
+
+        if self.attack_results.get("encryption_downgrade"):
+            enc = self.attack_results["encryption_downgrade"]
+            s.append('<h3>Encryption Downgrade (Beyond KNOB)</h3>')
+            s.append('<p>Alternative encryption downgrade paths were tested against the '
+                     'target via DarkFirmware LMP injection. These attacks exploit '
+                     'different link manager code paths than KNOB (CVE-2019-9506): '
+                     'disabling encryption entirely, forcing re-negotiation with weaker '
+                     'parameters, or rejecting Secure Connections to force Legacy SC.</p>')
+            if isinstance(enc, dict):
+                vulnerable_methods = enc.get("vulnerable_methods", [])
+                if vulnerable_methods:
+                    s.append(f'<p class="critical"><strong>Vulnerable methods:</strong> '
+                             f'{_esc(", ".join(vulnerable_methods))}</p>')
+                for m_name, m_result in enc.get("methods", {}).items():
+                    status = "VULNERABLE" if m_result.get("vulnerable") else "Rejected"
+                    s.append(f'<p><strong>{_esc(m_name)}:</strong> {status}</p>')
+                s.append(f'<pre>{_esc(json.dumps(enc, indent=2, default=str)[:2000])}</pre>')
+
         if self.attack_results.get("fleet_assess"):
             fleet = self.attack_results["fleet_assess"]
             s.append('<h3>Fleet-Wide Exposure Assessment</h3>')

@@ -1265,6 +1265,9 @@ def recon_lmp_sniff(address, duration, output, hci, output_format, lmp_filter):
         output_format=output_format,
     )
 
+    from blue_tap.utils.session import log_command
+    log_command("lmp_sniff", result, category="recon", target=address or "")
+
     if result["success"]:
         success(f"Captured {result['packets']} LMP packets in {result['duration']}s")
         success(f"Output: {result['output']}")
@@ -1354,6 +1357,9 @@ def recon_combined_sniff(address, duration, output, hci):
         hci_dev=hci_dev,
     )
     result = combined.monitor(target=address, duration=duration)
+
+    from blue_tap.utils.session import log_command
+    log_command("combined_sniff", result, category="recon", target=address or "")
 
     if result.get("success"):
         combined.export(output)
@@ -3606,6 +3612,9 @@ def fuzz_lmp(address, count, mode, hci):
                 if sent % 100 == 0 and sent > 0:
                     info(f"  Progress: {sent}/{count} sent, {errors} errors")
 
+            result = {"mode": mode, "sent": sent, "errors": errors, "count": count}
+            from blue_tap.utils.session import log_command
+            log_command("fuzz_lmp", result, category="fuzz", target=address or "")
             success(f"LMP fuzzing complete: {sent} packets sent, {errors} errors")
     except Exception as exc:
         error(f"LMP fuzzing failed: {exc}")
