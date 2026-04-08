@@ -5,6 +5,62 @@ All notable changes to Blue-Tap are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.1] - 2026-04-08
+
+### Added — Deep DarkFirmware Integration
+
+This release completes the DarkFirmware integration with full bidirectional LMP traffic parsing, connection table inspection, in-flight packet modification, and new attack modules.
+
+#### DarkFirmware HCI Infrastructure
+
+- **Bidirectional traffic parsing** — TXXX (outgoing LMP), ACLX (outgoing ACL), RXLC (incoming LC) marker parsers added to HCI VSC socket alongside existing AAAA (incoming LMP)
+- **Complete LMP opcode tables** — 61 standard + 22 extended opcodes per BT Core Spec v5.4 with human-readable decode helper
+- **In-flight LMP modification** — `set_mod_mode()`/`clear_mod_mode()` for Hook 2 modes: passthrough, modify, drop, opcode-drop, persistent-modify, auto-respond
+- **Raw ACL injection** — `send_raw_acl()` bypasses BlueZ L2CAP stack for below-stack packet injection
+- **Oversize LMP PDUs** — TX max raised from 17 to 28 bytes for BrakTooth-style oversize packet testing
+- **read_memory quirk fix** — RTL8761B returns 4 bytes only with size=0x20 (not size=4)
+
+#### Hook Management & Connection Inspection
+
+- **Hook initialization** — `init_hooks()` writes Hook 3/4 backup pointers to RAM and verifies all 4 hooks active
+- **ConnectionInspector** — Read/write controller RAM for encryption state, key material, auth flags, Secure Connections flag across all 12 connection slots
+- **DarkFirmwareWatchdog** — Dual detection (udevadm monitor + periodic health check) with 5s debounce and 3s settle for multi-day fuzzing
+- **Firmware-level detection** — Replaced MAC-based DarkFirmware detection with hook backup probe + LMP TX echo verification
+- **CONNECTION_SLOT_SIZE fix** — Corrected from 500 to 0x2B8 (696 bytes) per reverse engineering findings
+
+#### Below-HCI Attack Modules
+
+- **CTKD attack** (`attack/ctkd.py`) — CVE-2020-15802 cross-transport key derivation probe: snapshots key material before/after Classic attack, detects shared keys across slots
+- **KNOB RAM verification** — ConnectionInspector confirms actual key_size in controller memory after KNOB negotiation injection
+- **20 LMP state confusion tests** — BrakTooth-style test cases (enc_before_auth, switch_during_enc, knob_min_key, etc.) as vulnerability scanner seeds
+- **Raw L2CAP builders** (`fuzz/protocols/l2cap_raw.py`) — Frame builders + 15 malformed fuzz tests for below-stack injection
+
+#### Fuzzing Transports
+
+- **LMPTransport.send_and_collect()** — Send packet, wait for responses from rx_queue and lmp_log_buffer
+- **LMPTransport.check_alive()** — HCI Read BD Addr probe to detect dongle crash during fuzzing
+- **RawACLTransport** — Full transport class routing send() through send_raw_acl(), ACL handle resolution, ACLX/RXLC event monitoring
+
+#### CLI Integration
+
+- **Root privilege check** on startup (allows --help/--version/demo without root)
+- **Startup hardware detection** — Probe dongle, check DarkFirmware, init hooks, start watchdog (non-blocking)
+- **`adapter firmware-init`** — Manual hook initialization command
+- **`adapter connection-inspect`** — Dump connection table from controller RAM
+- **`ctkd` command** — Cross-transport key derivation attack with probe and monitor modes
+
+### Fixed
+
+- **OBEX PUT opcode** — `OBEX_PUT` was 0x82 (PUT-Final) instead of 0x02 (PUT), breaking multi-part OPP file transfers
+- **_read_bytes() alignment bug** — Unaligned addresses truncated reads; rewrote to track actual bytes extracted per iteration
+
+### Changed
+
+- **README restructured** — Split 1876-line README into focused docs: features, usage guide, troubleshooting, IVI simulator. README retains purpose, architecture, quick start with hyperlinks to detailed docs.
+- **Memory read/write logging** — Changed from `info()` to `logger.debug()` to reduce noise during fuzzing
+
+---
+
 ## [2.3.0] - 2026-04-05
 
 ### Added — DarkFirmware Below-HCI Attack Platform

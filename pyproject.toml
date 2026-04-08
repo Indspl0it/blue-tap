@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "blue-tap"
-version = "2.3.0"
+version = "2.3.1"
 description = "Bluetooth/BLE Penetration Testing Toolkit for Automotive IVI Systems"
 readme = "README.md"
 license = {text = "GPL-3.0-or-later"}
@@ -32,6 +32,7 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Security",
     "Topic :: System :: Networking",
 ]
