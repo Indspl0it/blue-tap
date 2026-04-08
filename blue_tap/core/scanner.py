@@ -283,47 +283,46 @@ async def scan_ble(duration: int = 10, passive: bool = False, adapter: str = "")
     # bleak's scanning_mode parameter: "active" sends SCAN_REQ, "passive" does not
     scanning_mode = "passive" if passive else "active"
     try:
-        kwargs = {"timeout": duration, "scanning_mode": scanning_mode}
+        kwargs = {"timeout": duration, "scanning_mode": scanning_mode, "return_adv": True}
         if adapter:
             kwargs["adapter"] = adapter
-        discovered = await BleakScanner.discover(**kwargs)
+        discovered_raw = await BleakScanner.discover(**kwargs)
     except Exception as e:
         error(f"BLE scan failed: {e}")
         return []
 
-    discovered = sorted(discovered, key=lambda d: d.rssi, reverse=True)
+    # discovered_raw is dict {address: (BLEDevice, AdvertisementData)} with return_adv=True
+    discovered = sorted(discovered_raw.values(), key=lambda pair: pair[1].rssi, reverse=True)
 
     devices = []
-    for d in discovered:
+    for d, adv in discovered:
+        rssi = adv.rssi
         dev = {
             "address": d.address,
-            "name": d.name or "Unknown",
-            "rssi": d.rssi,
+            "name": d.name or adv.local_name or "Unknown",
+            "rssi": rssi,
             "type": "BLE",
-            "distance_m": estimate_distance(d.rssi),
+            "distance_m": estimate_distance(rssi),
         }
 
-        # Parse advertising data if available
-        if hasattr(d, "metadata") and d.metadata:
-            dev["metadata"] = d.metadata
-            # Extract manufacturer-specific data
-            mfr_data = d.metadata.get("manufacturer_data", {})
-            if mfr_data:
-                dev["manufacturer_ids"] = list(mfr_data.keys())
-                dev["manufacturer_name"] = _lookup_ble_manufacturer(
-                    list(mfr_data.keys())[0] if mfr_data else 0
-                )
+        # Parse advertising data from AdvertisementData object
+        mfr_data = adv.manufacturer_data
+        if mfr_data:
+            dev["manufacturer_ids"] = list(mfr_data.keys())
+            dev["manufacturer_name"] = _lookup_ble_manufacturer(
+                list(mfr_data.keys())[0] if mfr_data else 0
+            )
 
-            # Extract service UUIDs
-            uuids = d.metadata.get("uuids", [])
-            if uuids:
-                dev["service_uuids"] = uuids
+        # Extract service UUIDs
+        uuids = adv.service_uuids
+        if uuids:
+            dev["service_uuids"] = uuids
 
-            # TX Power level (used for distance estimation)
-            tx_power = d.metadata.get("tx_power")
-            if tx_power is not None:
-                dev["tx_power"] = tx_power
-                dev["distance_m"] = estimate_distance(d.rssi, tx_power)
+        # TX Power level (used for distance estimation)
+        tx_power = adv.tx_power
+        if tx_power is not None:
+            dev["tx_power"] = tx_power
+            dev["distance_m"] = estimate_distance(rssi, tx_power)
 
         devices.append(dev)
 

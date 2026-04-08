@@ -12,7 +12,7 @@ from blue_tap.utils.output import info, success, error
 
 
 OBEX_CONNECT = 0x80
-OBEX_PUT = 0x82
+OBEX_PUT = 0x02
 OBEX_RESPONSE_SUCCESS = 0xA0
 OBEX_RESPONSE_CONTINUE = 0x90
 OBEX_HEADER_NAME = 0x01
