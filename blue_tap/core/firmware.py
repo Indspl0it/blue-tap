@@ -9,9 +9,9 @@ DarkFirmware extends the RTL8761B with vendor-specific HCI commands for:
   - Passive LMP monitoring via HCI Event 0xFF
 
 The BDADDR offset (0xAD85) was found by diffing the DarkFirmware 1337 and
-1338 firmware variants.  The DarkFirmware presence check reads Hook 1's
-backup location (0x80133FFC) which should contain 0x8010D891 when the
-custom firmware hooks are active.
+1338 firmware variants.  DarkFirmware is detected via two probes:
+  1. Hook 1 backup at 0x80133FFC is non-zero (stock returns all zeros)
+  2. VSC 0xFE22 echoes payload as vendor event 0xFF (stock does not)
 """
 
 from __future__ import annotations
@@ -34,9 +34,41 @@ FIRMWARE_ORIG = "/lib/firmware/rtl_bt/rtl8761bu_fw.bin.orig"
 BDADDR_OFFSET = 0xAD85
 USB_VID_PID = "2357:0604"
 
-# Hook 1 backup address — should contain 0x8010D891 if DarkFirmware active
-DARKFIRMWARE_CHECK_ADDR = 0x80133FFC
-DARKFIRMWARE_CHECK_VALUE = 0x8010D891
+# Hook backup addresses and expected values (from DarkFirmware RE)
+# Hook 1: HCI CMD handler — intercepts VSC 0xFE22 for LMP injection
+HOOK1_BACKUP_ADDR = 0x80133FFC
+HOOK1_EXPECTED = 0x8010D891       # Original OGF_3F handler saved by hook installer
+
+# Hook 2: LMP RX handler — logs incoming LMP + modification modes 0-5
+HOOK2_BACKUP_ADDR = 0x80133FF8
+HOOK2_EXPECTED = 0x8010DFB1       # Original tLMP handler saved by hook installer
+
+# Hook 3: tLC_TX — logs outgoing LMP (TXXX) + ACL (ACLX) packets
+# Shim code is in firmware binary but needs backup pointer written to RAM after boot.
+HOOK3_BACKUP_ADDR = 0x80133FF4
+HOOK3_ORIGINAL = 0x80042421       # ROM assoc_w_tLC_TX (+1 ISA bit for MIPS16e)
+
+# Hook 4: tLC_RX — logs all incoming Link Controller packets (LMP + BLE LL + ACL + SCO)
+# Same as Hook 3: shim present in binary, backup pointer needs RAM write.
+HOOK4_BACKUP_ADDR = 0x80133FEC
+HOOK4_ORIGINAL = 0x80042189       # ROM assoc_w_tLC_RX (+1 ISA bit for MIPS16e)
+
+# In-flight LMP modification control (Hook 2 modes)
+MOD_FLAG_ADDR = 0x80133FF0        # 1 byte: mode (0=passthrough, 1-5=modify/drop/etc.)
+MOD_TABLE_ADDR = 0x80133FE0       # 3 bytes: [byte_offset, new_value, target_opcode]
+AUTO_RESP_TRIGGER_ADDR = 0x80133FD8  # 2 bytes: [trigger_opcode, conn_index]
+
+# Modification modes
+MOD_PASSTHROUGH = 0    # Normal operation (log only)
+MOD_MODIFY = 1         # Overwrite data_buf[offset] with new_value (one-shot, auto-clears)
+MOD_DROP = 2           # Drop next incoming LMP packet entirely (one-shot)
+MOD_OPCODE_DROP = 3    # Drop only if opcode matches target_opcode (persistent)
+MOD_PERSISTENT = 4     # Same as MOD_MODIFY but does NOT auto-clear (sustained)
+MOD_AUTO_RESPOND = 5   # Send pre-loaded response when trigger_opcode seen, then passthrough
+
+# Backward compatibility aliases
+DARKFIRMWARE_CHECK_ADDR = HOOK1_BACKUP_ADDR
+DARKFIRMWARE_CHECK_VALUE = HOOK1_EXPECTED
 
 # Patchable instruction locations in DarkFirmware (verified from live firmware + file)
 # Both RAM addresses (for runtime patching) and file offsets (for persistent patching).
@@ -66,10 +98,21 @@ MEMORY_REGIONS: dict[str, tuple[int, int]] = {
     "hooks": (0x80133F00, 0x80134000),  # 256B hook/backup area
 }
 
-# Connection table layout in firmware RAM
+# Connection table layout in firmware RAM (from RE: param_1 * 0x2B8)
 CONNECTION_TABLE_BASE = 0x8012DC50  # bos[] array base address
-CONNECTION_SLOT_SIZE = 500          # ~500 bytes per slot (approximate)
+CONNECTION_SLOT_SIZE = 0x2B8        # 696 bytes per slot (confirmed via decompiled code)
 CONNECTION_MAX_SLOTS = 12           # RTL8761B supports up to 12 connections
+SECONDARY_PTR_OFFSET = 0x58        # Offset to secondary struct pointer in each slot
+
+# Secondary struct field offsets (from decompiled send_LMP_reply, LMP_COMB_KEY, etc.)
+SEC_OFF_STATE_BYTE = 0x01          # Connection state machine phase
+SEC_OFF_KEY_MATERIAL_SRC = 0x02    # 16 bytes: key material source
+SEC_OFF_PAIRING_STAGE = 0x12       # Pairing stage
+SEC_OFF_KEY_SIZE = 0x23            # Negotiated encryption key size (1-16 bytes)
+SEC_OFF_ENC_ENABLED = 0x26         # Encryption enabled boolean
+SEC_OFF_AUTH_STATE = 0x50          # Authentication state machine phase
+SEC_OFF_KEY_MATERIAL_COPY = 0x51   # 16 bytes: link key material (copied during COMB_KEY)
+SEC_OFF_SC_FLAG = 0x214            # Secure Connections enabled flag
 
 
 class DarkFirmwareManager:
@@ -123,53 +166,197 @@ class DarkFirmwareManager:
         return False
 
     def is_darkfirmware_loaded(self, hci: str = "hci1") -> bool:
-        """Check if DarkFirmware is active by reading controller memory.
+        """Check if DarkFirmware is active using two firmware-level probes.
 
-        Reads memory at DARKFIRMWARE_CHECK_ADDR via HCIVSCSocket.  If the
-        value matches DARKFIRMWARE_CHECK_VALUE, DarkFirmware is confirmed.
-        Falls back to checking if the BDADDR contains a 13:37 pattern
-        (default DarkFirmware address marker).
+        Primary: Read Hook 1 backup at 0x80133FFC via VSC 0xFC61.  Stock
+        firmware returns all zeros; DarkFirmware returns non-zero (the
+        original function pointer saved by the hook installer).
+
+        Fallback: Send VSC 0xFE22 (LMP TX) with a dummy payload.
+        DarkFirmware echoes it back as a vendor event (0xFF) before the
+        command-complete; stock firmware returns only the command-complete.
         """
-        # Primary: read Hook 1 backup via HCI VSC memory read
         try:
             from blue_tap.core.hci_vsc import HCIVSCSocket
 
             hci_idx = int(hci.replace("hci", ""))
             with HCIVSCSocket(hci_dev=hci_idx) as sock:
+                # Primary: Hook 1 backup — non-zero means hooks are installed.
+                # Firmware returns 1-2 bytes (not always 4), so check any data.
                 data = sock.read_memory(DARKFIRMWARE_CHECK_ADDR, 4)
-                if len(data) >= 4:
-                    value = struct.unpack("<I", data[:4])[0]
-                    if value == DARKFIRMWARE_CHECK_VALUE:
-                        info(f"DarkFirmware confirmed on {hci} (Hook 1 backup = 0x{value:08X})")
-                        return True
-                    else:
-                        warning(
-                            f"Hook 1 backup at 0x{DARKFIRMWARE_CHECK_ADDR:08X} = "
-                            f"0x{value:08X} (expected 0x{DARKFIRMWARE_CHECK_VALUE:08X})"
-                        )
-        except PermissionError:
-            warning(f"Cannot read controller memory on {hci} — need root or CAP_NET_RAW")
-        except OSError as exc:
-            warning(f"HCI socket error checking DarkFirmware on {hci}: {exc}")
-        except Exception as exc:
-            warning(f"DarkFirmware memory check failed on {hci}: {exc}")
+                if data and any(b != 0 for b in data):
+                    success(
+                        f"DarkFirmware confirmed on {hci} "
+                        f"(Hook 1 backup = {data.hex()})"
+                    )
+                    return True
 
-        # Fallback: check if BDADDR matches exact DarkFirmware default patterns
-        _DARKFIRMWARE_DEFAULT_ADDRS = {"13:37:13:37:13:37", "13:38:13:38:13:38"}
-        bdaddr = self.get_current_bdaddr(hci)
-        if bdaddr and bdaddr.upper() in _DARKFIRMWARE_DEFAULT_ADDRS:
-            info(f"DarkFirmware likely active on {hci} (BDADDR matches default: {bdaddr})")
-            return True
+                # Fallback: LMP TX vendor-event probe.
+                # DarkFirmware echoes the payload as HCI Event 0xFF before
+                # returning Command Complete.  Stock firmware does not.
+                if self._probe_lmp_tx_echo(sock, hci):
+                    return True
+
+        except PermissionError:
+            warning(f"Cannot probe DarkFirmware on {hci} — need root or CAP_NET_RAW")
+        except OSError as exc:
+            warning(f"HCI socket error probing DarkFirmware on {hci}: {exc}")
+        except Exception as exc:
+            warning(f"DarkFirmware probe failed on {hci}: {exc}")
 
         info(f"DarkFirmware not detected on {hci}")
         return False
+
+    @staticmethod
+    def _probe_lmp_tx_echo(sock: object, hci: str) -> bool:
+        """Send VSC 0xFE22 with a dummy payload and check for vendor event echo.
+
+        DarkFirmware processes LMP TX by echoing the payload as an HCI
+        vendor event (0xFF) before the command-complete.  Stock Realtek
+        firmware returns only the command-complete with status 0x01.
+        """
+        import select as _select
+
+        probe_payload = b"\xAA\xBB\xCC"
+        opcode = 0xFE22
+        pkt = (
+            bytes([0x01])
+            + struct.pack("<H", opcode)
+            + bytes([len(probe_payload)])
+            + probe_payload
+        )
+
+        raw_sock = sock._sock  # noqa: SLF001
+        if raw_sock is None:
+            return False
+
+        raw_sock.sendall(pkt)
+
+        # Collect events for up to 2 seconds
+        deadline = time.monotonic() + 2.0
+        saw_vendor_event = False
+        while time.monotonic() < deadline:
+            remaining = deadline - time.monotonic()
+            ready, _, _ = _select.select([raw_sock], [], [], min(remaining, 0.3))
+            if not ready:
+                if saw_vendor_event:
+                    break
+                continue
+
+            data = raw_sock.recv(512)
+            if len(data) < 3:
+                continue
+
+            event_code = data[1]
+            if event_code == 0xFF:
+                saw_vendor_event = True
+            elif event_code == 0x0E:
+                # Command Complete — done collecting
+                break
+
+        if saw_vendor_event:
+            success(f"DarkFirmware confirmed on {hci} (LMP TX vendor-event echo)")
+        return saw_vendor_event
+
+    def init_hooks(self, hci: str = "hci1") -> dict:
+        """Activate Hooks 3+4 by writing backup pointers to RAM.
+
+        Hooks 1+2 are persistent in the firmware binary — they survive USB
+        resets because the hook installer writes them into the patch area.
+
+        Hooks 3+4 have their shim code baked into the firmware binary, but
+        the boot process reinitializes the tLC_TX/tLC_RX function pointers
+        from ROM *after* patch loading.  The shim code reads the original
+        handler address from backup RAM locations to chain back.  We must
+        write those backup pointers here (<10ms, 2 memory writes).
+
+        Returns:
+            {"hook1": bool, "hook2": bool, "hook3": bool, "hook4": bool,
+             "all_ok": bool}
+        """
+        result = {
+            "hook1": False, "hook2": False,
+            "hook3": False, "hook4": False,
+            "all_ok": False,
+        }
+
+        try:
+            from blue_tap.core.hci_vsc import HCIVSCSocket
+
+            hci_idx = int(hci.replace("hci", ""))
+            with HCIVSCSocket(hci_dev=hci_idx) as sock:
+                # Verify Hooks 1+2 are already active (persistent)
+                h1_data = sock.read_memory(HOOK1_BACKUP_ADDR, 4)
+                h2_data = sock.read_memory(HOOK2_BACKUP_ADDR, 4)
+
+                result["hook1"] = bool(h1_data and any(b != 0 for b in h1_data))
+                result["hook2"] = bool(h2_data and any(b != 0 for b in h2_data))
+
+                if not result["hook1"]:
+                    warning(f"Hook 1 not active on {hci} — DarkFirmware may not be loaded")
+                    return result
+
+                # Write Hook 3 backup: original tLC_TX handler
+                ok3 = sock.write_memory(
+                    HOOK3_BACKUP_ADDR,
+                    struct.pack("<I", HOOK3_ORIGINAL),
+                )
+                if ok3:
+                    # Verify
+                    verify = sock.read_memory(HOOK3_BACKUP_ADDR, 4)
+                    result["hook3"] = bool(verify and any(b != 0 for b in verify))
+                    if result["hook3"]:
+                        info(f"Hook 3 (tLC_TX) activated on {hci}")
+                    else:
+                        warning(f"Hook 3 write succeeded but verify failed on {hci}")
+                else:
+                    warning(f"Hook 3 backup write failed on {hci}")
+
+                # Write Hook 4 backup: original tLC_RX handler
+                ok4 = sock.write_memory(
+                    HOOK4_BACKUP_ADDR,
+                    struct.pack("<I", HOOK4_ORIGINAL),
+                )
+                if ok4:
+                    verify = sock.read_memory(HOOK4_BACKUP_ADDR, 4)
+                    result["hook4"] = bool(verify and any(b != 0 for b in verify))
+                    if result["hook4"]:
+                        info(f"Hook 4 (tLC_RX) activated on {hci}")
+                    else:
+                        warning(f"Hook 4 write succeeded but verify failed on {hci}")
+                else:
+                    warning(f"Hook 4 backup write failed on {hci}")
+
+                result["all_ok"] = all(
+                    result[k] for k in ("hook1", "hook2", "hook3", "hook4")
+                )
+
+                if result["all_ok"]:
+                    success(f"All 4 DarkFirmware hooks active on {hci}")
+                else:
+                    active = [k for k in ("hook1", "hook2", "hook3", "hook4") if result[k]]
+                    failed = [k for k in ("hook1", "hook2", "hook3", "hook4") if not result[k]]
+                    warning(
+                        f"DarkFirmware hooks on {hci}: "
+                        f"active=[{', '.join(active)}] failed=[{', '.join(failed)}]"
+                    )
+
+        except PermissionError:
+            warning(f"Cannot init hooks on {hci} — need root or CAP_NET_RAW")
+        except OSError as exc:
+            warning(f"HCI socket error during hook init on {hci}: {exc}")
+        except Exception as exc:
+            warning(f"Hook init failed on {hci}: {exc}")
+
+        return result
 
     def get_firmware_status(self, hci: str = "hci1") -> dict:
         """Return firmware status information.
 
         Returns:
             {installed: bool, loaded: bool, bdaddr: str,
-             original_backed_up: bool, capabilities: list[str]}
+             original_backed_up: bool, capabilities: list[str],
+             hooks: dict}
         """
         status: dict = {
             "installed": os.path.exists(FIRMWARE_PATH),
@@ -177,6 +364,7 @@ class DarkFirmwareManager:
             "bdaddr": "",
             "original_backed_up": os.path.exists(FIRMWARE_ORIG),
             "capabilities": [],
+            "hooks": {},
         }
 
         status["bdaddr"] = self.get_current_bdaddr(hci)
@@ -190,6 +378,24 @@ class DarkFirmwareManager:
                     "memory_rw",
                     "bdaddr_patch",
                 ]
+                # Check individual hook status by reading backup addresses
+                try:
+                    from blue_tap.core.hci_vsc import HCIVSCSocket
+
+                    hci_idx = int(hci.replace("hci", ""))
+                    with HCIVSCSocket(hci_dev=hci_idx) as sock:
+                        for name, addr in (
+                            ("hook1_hci_cmd", HOOK1_BACKUP_ADDR),
+                            ("hook2_lmp_rx", HOOK2_BACKUP_ADDR),
+                            ("hook3_lc_tx", HOOK3_BACKUP_ADDR),
+                            ("hook4_lc_rx", HOOK4_BACKUP_ADDR),
+                        ):
+                            data = sock.read_memory(addr, 4)
+                            status["hooks"][name] = bool(
+                                data and any(b != 0 for b in data)
+                            )
+                except Exception:
+                    pass  # Non-fatal — hooks info is optional
 
         return status
 
@@ -786,3 +992,466 @@ class DarkFirmwareManager:
 
         success(f"Slot {slot} dump complete: {len(data)} bytes from 0x{slot_addr:08X}")
         return data
+
+
+# ---------------------------------------------------------------------------
+# Connection State Inspector
+# ---------------------------------------------------------------------------
+
+class ConnectionInspector:
+    """Read and manipulate live connection security state from RTL8761B RAM.
+
+    Uses VSC 0xFC61/0xFC62 to read the firmware's internal connection table.
+    The table has 12 slots at CONNECTION_TABLE_BASE (0x8012DC50), each
+    CONNECTION_SLOT_SIZE (0x2B8 = 696) bytes.  Each slot has a pointer at
+    +0x58 to a secondary struct containing encryption state, key material,
+    and authentication state.
+
+    All offsets were determined via Ghidra reverse engineering of the
+    RTL8761B ROM and patch firmware (decompiled send_LMP_reply,
+    LMP_ENCRYPTION_KEY_SIZE_REQ, LMP_COMB_KEY, LMP_AU_RAND).
+
+    Requires DarkFirmware loaded and root/CAP_NET_RAW for HCI socket access.
+    """
+
+    def _read_byte(self, sock: object, addr: int) -> int | None:
+        """Read a single byte from controller memory.
+
+        Uses aligned 4-byte read via VSC 0xFC61 and extracts the target
+        byte.  Handles firmware returning fewer than 4 bytes.
+        """
+        aligned = addr & ~3
+        offset = addr & 3
+        data = sock.read_memory(aligned, 4)
+        if not data:
+            return None
+        if offset < len(data):
+            return data[offset]
+        return None
+
+    def _read_bytes(self, sock: object, addr: int, count: int) -> bytes:
+        """Read N bytes from controller memory via sequential aligned reads.
+
+        Handles unaligned starting addresses correctly by tracking actual
+        bytes extracted (not assuming 4 per read).
+        """
+        result = bytearray()
+        pos = 0  # bytes collected so far
+        while pos < count:
+            cur_addr = addr + pos
+            aligned = cur_addr & ~3
+            byte_offset = cur_addr & 3
+            data = sock.read_memory(aligned, 4)
+            if data and len(data) >= 4:
+                # Extract bytes from this word starting at byte_offset
+                available = 4 - byte_offset
+                needed = count - pos
+                chunk = data[byte_offset:byte_offset + min(available, needed)]
+                result.extend(chunk)
+                pos += len(chunk)
+            elif data:
+                # Short read — take what we can
+                if byte_offset < len(data):
+                    chunk = data[byte_offset:]
+                    result.extend(chunk[:count - pos])
+                    pos += min(len(chunk), count - pos)
+                else:
+                    result.append(0)
+                    pos += 1
+            else:
+                result.append(0)
+                pos += 1
+        return bytes(result[:count])
+
+    def _write_byte(self, sock: object, addr: int, val: int) -> bool:
+        """Write a single byte via read-modify-write on aligned 4-byte word.
+
+        Reads the 4-byte aligned word, replaces one byte, writes back.
+        """
+        aligned = addr & ~3
+        data = sock.read_memory(aligned, 4)
+        if not data or len(data) < 4:
+            # Pad short reads to 4 bytes
+            if data:
+                data = data + b"\x00" * (4 - len(data))
+            else:
+                return False
+        word = struct.unpack("<I", data[:4])[0]
+        shift = (addr & 3) * 8
+        mask = ~(0xFF << shift) & 0xFFFFFFFF
+        new_word = (word & mask) | ((val & 0xFF) << shift)
+        return sock.write_memory(aligned, struct.pack("<I", new_word))
+
+    def _get_secondary_ptr(self, sock: object, conn_index: int) -> int | None:
+        """Read the secondary struct pointer for a connection slot."""
+        bos_addr = CONNECTION_TABLE_BASE + conn_index * CONNECTION_SLOT_SIZE
+        ptr_data = sock.read_memory(bos_addr + SECONDARY_PTR_OFFSET, 4)
+        if not ptr_data or len(ptr_data) < 4:
+            return None
+        sec_ptr = struct.unpack("<I", ptr_data[:4])[0]
+        # Validate pointer is in controller memory range
+        if sec_ptr < 0x80000000 or sec_ptr > 0x80140000:
+            return None
+        return sec_ptr
+
+    def inspect_connection(self, sock: object, conn_index: int) -> dict:
+        """Read security state for a connection slot.
+
+        Args:
+            sock: Open HCIVSCSocket instance.
+            conn_index: Connection slot (0-11).
+
+        Returns:
+            Dict with keys: active, conn_index, bdaddr, secondary_ptr,
+            enc_key_size, enc_enabled, auth_state, secure_connections,
+            state_machine_phase, pairing_stage,
+            key_material_src (16B hex), key_material_copy (16B hex).
+        """
+        result: dict = {"active": False, "conn_index": conn_index}
+
+        bos_addr = CONNECTION_TABLE_BASE + conn_index * CONNECTION_SLOT_SIZE
+
+        # Read BD_ADDR (first 6 bytes of slot, stored little-endian)
+        bdaddr_data = self._read_bytes(sock, bos_addr, 8)
+        bdaddr = bdaddr_data[:6]
+
+        # Slot is empty if BD_ADDR is all-zeros, all-FF, or the common
+        # initialized-but-unconnected pattern (00:00:00:FF:FF:FF or FF:FF:FF:00:00:00)
+        nonzero = sum(1 for b in bdaddr if b != 0)
+        non_ff = sum(1 for b in bdaddr if b != 0xFF)
+        if nonzero == 0 or non_ff == 0 or (nonzero <= 3 and non_ff <= 3):
+            return result  # Empty or unconnected slot
+
+        result["active"] = True
+        result["bdaddr"] = ":".join(f"{b:02X}" for b in reversed(bdaddr))
+
+        # Get secondary struct pointer
+        sec_ptr = self._get_secondary_ptr(sock, conn_index)
+        if sec_ptr is None:
+            result["error"] = "invalid secondary pointer"
+            return result
+        result["secondary_ptr"] = f"0x{sec_ptr:08X}"
+
+        # Read security-critical fields
+        fields = {
+            "state_machine_phase": SEC_OFF_STATE_BYTE,
+            "pairing_stage": SEC_OFF_PAIRING_STAGE,
+            "enc_key_size": SEC_OFF_KEY_SIZE,
+            "enc_enabled": SEC_OFF_ENC_ENABLED,
+            "auth_state": SEC_OFF_AUTH_STATE,
+        }
+        for name, offset in fields.items():
+            val = self._read_byte(sock, sec_ptr + offset)
+            result[name] = val
+
+        # Secure Connections flag (at larger offset, may be in different word)
+        sc = self._read_byte(sock, sec_ptr + SEC_OFF_SC_FLAG)
+        result["secure_connections"] = sc
+
+        # Key material (16-byte blocks)
+        key_src = self._read_bytes(sock, sec_ptr + SEC_OFF_KEY_MATERIAL_SRC, 16)
+        key_copy = self._read_bytes(sock, sec_ptr + SEC_OFF_KEY_MATERIAL_COPY, 16)
+        result["key_material_src"] = key_src.hex()
+        result["key_material_copy"] = key_copy.hex()
+
+        return result
+
+    def scan_all_connections(self, sock: object) -> list[dict]:
+        """Scan all 12 connection slots and return active ones with security state."""
+        results = []
+        for i in range(CONNECTION_MAX_SLOTS):
+            conn = self.inspect_connection(sock, i)
+            if conn.get("active"):
+                results.append(conn)
+        return results
+
+    # ------------------------------------------------------------------
+    # State manipulation (for security research)
+    # ------------------------------------------------------------------
+
+    def force_encryption(self, sock: object, conn_index: int, enable: bool) -> bool:
+        """Set or clear the encryption enabled flag in controller RAM."""
+        sec_ptr = self._get_secondary_ptr(sock, conn_index)
+        if sec_ptr is None:
+            error(f"No valid connection at slot {conn_index}")
+            return False
+        val = 1 if enable else 0
+        ok = self._write_byte(sock, sec_ptr + SEC_OFF_ENC_ENABLED, val)
+        if ok:
+            info(f"Slot {conn_index}: enc_enabled → {val}")
+        return ok
+
+    def force_auth_state(self, sock: object, conn_index: int, state: int = 0x04) -> bool:
+        """Force authentication state (0x04 = authenticated in RE)."""
+        sec_ptr = self._get_secondary_ptr(sock, conn_index)
+        if sec_ptr is None:
+            error(f"No valid connection at slot {conn_index}")
+            return False
+        ok = self._write_byte(sock, sec_ptr + SEC_OFF_AUTH_STATE, state)
+        if ok:
+            info(f"Slot {conn_index}: auth_state → 0x{state:02X}")
+        return ok
+
+    def clear_secure_connections(self, sock: object, conn_index: int) -> bool:
+        """Clear the Secure Connections flag (downgrade to legacy pairing)."""
+        sec_ptr = self._get_secondary_ptr(sock, conn_index)
+        if sec_ptr is None:
+            error(f"No valid connection at slot {conn_index}")
+            return False
+        ok = self._write_byte(sock, sec_ptr + SEC_OFF_SC_FLAG, 0x00)
+        if ok:
+            info(f"Slot {conn_index}: SC flag cleared")
+        return ok
+
+    def set_key_size(self, sock: object, conn_index: int, size: int) -> bool:
+        """Set negotiated encryption key size (1-16 bytes)."""
+        if not 1 <= size <= 16:
+            error(f"Key size must be 1-16, got {size}")
+            return False
+        sec_ptr = self._get_secondary_ptr(sock, conn_index)
+        if sec_ptr is None:
+            error(f"No valid connection at slot {conn_index}")
+            return False
+        ok = self._write_byte(sock, sec_ptr + SEC_OFF_KEY_SIZE, size)
+        if ok:
+            info(f"Slot {conn_index}: key_size → {size}")
+        return ok
+
+    def write_key_material(self, sock: object, conn_index: int, key: bytes) -> bool:
+        """Write 16-byte link key material to the connection slot."""
+        if len(key) != 16:
+            error(f"Key must be 16 bytes, got {len(key)}")
+            return False
+        sec_ptr = self._get_secondary_ptr(sock, conn_index)
+        if sec_ptr is None:
+            error(f"No valid connection at slot {conn_index}")
+            return False
+        # Write in 4-byte chunks
+        for off in range(0, 16, 4):
+            addr = sec_ptr + SEC_OFF_KEY_MATERIAL_COPY + off
+            chunk = key[off:off + 4]
+            if not sock.write_memory(addr, chunk):
+                error(f"Key write failed at offset {off}")
+                return False
+        info(f"Slot {conn_index}: key material written ({key.hex()})")
+        return True
+
+    def zero_key_material(self, sock: object, conn_index: int) -> bool:
+        """Zero out link key material."""
+        return self.write_key_material(sock, conn_index, b"\x00" * 16)
+
+
+# ---------------------------------------------------------------------------
+# DarkFirmware Watchdog — auto-reinit hooks after USB reset/replug
+# ---------------------------------------------------------------------------
+
+class DarkFirmwareWatchdog:
+    """Background watchdog that re-initializes DarkFirmware hooks after USB events.
+
+    During long fuzzing sessions (hours/days), the USB adapter may be
+    unplugged, replugged, or USB-reset by other operations.  When this
+    happens, the firmware is reloaded from ``/lib/firmware/`` — Hooks 1+2
+    survive (persistent in the binary) but Hooks 3+4 backup pointers in
+    RAM are zeroed and mod mode settings are lost.
+
+    The watchdog uses two complementary detection methods:
+
+    1. **udevadm monitor** — Watches for USB add/remove events on the
+       RTL8761B VID:PID (2357:0604).  Fires immediately on reconnect.
+    2. **Periodic health check** — Every *poll_interval* seconds, reads
+       Hook 3 backup address.  If zeroed, re-initializes all hooks.
+       Catches events that udevadm missed.
+
+    Usage::
+
+        watchdog = DarkFirmwareWatchdog("hci0")
+        watchdog.start()      # Background threads start
+        # ... long fuzzing session ...
+        watchdog.stop()       # Clean shutdown
+    """
+
+    def __init__(
+        self,
+        hci: str = "hci1",
+        poll_interval: float = 30.0,
+        on_reinit: object | None = None,
+    ) -> None:
+        """
+        Args:
+            hci:           HCI device to monitor.
+            poll_interval: Seconds between health checks (default 30s).
+            on_reinit:     Optional callback ``(hci: str, event: str) -> None``
+                           called after successful re-initialization.
+        """
+        import threading
+
+        self.hci = hci
+        self.poll_interval = poll_interval
+        self.on_reinit = on_reinit
+        self._stop_event = threading.Event()
+        self._udev_thread: threading.Thread | None = None
+        self._poll_thread: threading.Thread | None = None
+        self._fw = DarkFirmwareManager()
+        self._reinit_count = 0
+        self._last_reinit: float = 0.0
+
+    @property
+    def reinit_count(self) -> int:
+        """Number of times hooks have been re-initialized."""
+        return self._reinit_count
+
+    def start(self) -> None:
+        """Start both watchdog threads (udev monitor + periodic health check)."""
+        import threading
+
+        if self._poll_thread is not None:
+            return  # Already running
+
+        self._stop_event.clear()
+
+        self._poll_thread = threading.Thread(
+            target=self._health_check_loop,
+            name="darkfw-health",
+            daemon=True,
+        )
+        self._poll_thread.start()
+
+        self._udev_thread = threading.Thread(
+            target=self._udev_monitor_loop,
+            name="darkfw-udev",
+            daemon=True,
+        )
+        self._udev_thread.start()
+
+        info(
+            f"DarkFirmware watchdog started on {self.hci} "
+            f"(poll={self.poll_interval}s, udev=realtime)"
+        )
+
+    def stop(self) -> None:
+        """Stop both watchdog threads."""
+        self._stop_event.set()
+
+        if self._poll_thread is not None:
+            self._poll_thread.join(timeout=5.0)
+            self._poll_thread = None
+
+        if self._udev_thread is not None:
+            self._udev_thread.join(timeout=5.0)
+            self._udev_thread = None
+
+        info(f"DarkFirmware watchdog stopped (reinit_count={self._reinit_count})")
+
+    def _reinit_hooks(self, event: str) -> None:
+        """Re-initialize hooks and notify."""
+        # Debounce: don't reinit more than once per 5 seconds
+        now = time.monotonic()
+        if now - self._last_reinit < 5.0:
+            return
+
+        warning(f"DarkFirmware watchdog: {event} — re-initializing hooks on {self.hci}")
+
+        # Wait for HCI device to settle after USB event
+        time.sleep(3.0)
+
+        # Verify DarkFirmware is still loaded (firmware file is persistent)
+        if not self._fw.is_darkfirmware_loaded(self.hci):
+            warning(
+                f"DarkFirmware not detected on {self.hci} after {event} — "
+                f"firmware may have been replaced"
+            )
+            return
+
+        result = self._fw.init_hooks(self.hci)
+        self._last_reinit = time.monotonic()
+
+        if result.get("all_ok"):
+            self._reinit_count += 1
+            success(
+                f"DarkFirmware watchdog: hooks re-initialized on {self.hci} "
+                f"(total reinits: {self._reinit_count})"
+            )
+            if self.on_reinit:
+                try:
+                    self.on_reinit(self.hci, event)
+                except Exception:
+                    pass
+        else:
+            active = [k for k in ("hook1", "hook2", "hook3", "hook4") if result.get(k)]
+            failed = [k for k in ("hook1", "hook2", "hook3", "hook4") if not result.get(k)]
+            warning(
+                f"DarkFirmware watchdog: partial reinit on {self.hci} — "
+                f"active=[{', '.join(active)}] failed=[{', '.join(failed)}]"
+            )
+
+    def _health_check_loop(self) -> None:
+        """Periodic health check: read Hook 3 backup, reinit if zeroed."""
+        while not self._stop_event.is_set():
+            self._stop_event.wait(self.poll_interval)
+            if self._stop_event.is_set():
+                break
+
+            try:
+                from blue_tap.core.hci_vsc import HCIVSCSocket
+
+                hci_idx = int(self.hci.replace("hci", ""))
+                with HCIVSCSocket(hci_dev=hci_idx) as sock:
+                    # Check Hook 3 backup — zeroed means USB reset happened
+                    data = sock.read_memory(HOOK3_BACKUP_ADDR, 4)
+                    if not data or all(b == 0 for b in data):
+                        self._reinit_hooks("health check detected zeroed Hook 3")
+            except OSError:
+                # HCI device may be temporarily unavailable during USB event
+                pass
+            except Exception:
+                pass
+
+    def _udev_monitor_loop(self) -> None:
+        """Watch udevadm monitor for USB add/remove events on RTL8761B."""
+        import subprocess
+
+        while not self._stop_event.is_set():
+            try:
+                proc = subprocess.Popen(
+                    ["udevadm", "monitor", "--udev", "--subsystem-match=usb"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                )
+            except FileNotFoundError:
+                # udevadm not available — fall back to polling only
+                info("DarkFirmware watchdog: udevadm not found, using polling only")
+                return
+            except Exception:
+                return
+
+            try:
+                while not self._stop_event.is_set():
+                    line = proc.stdout.readline()
+                    if not line:
+                        break
+
+                    # Look for RTL8761B VID:PID in udev events
+                    # Format: "UDEV  [timestamp] add /devices/... (usb)"
+                    line_lower = line.lower()
+                    if "2357" in line and "0604" in line:
+                        if "add" in line_lower or "bind" in line_lower:
+                            info(f"DarkFirmware watchdog: USB reconnect detected")
+                            self._reinit_hooks("USB reconnect (udev add)")
+                        elif "remove" in line_lower or "unbind" in line_lower:
+                            warning(f"DarkFirmware watchdog: USB disconnect detected on {self.hci}")
+            except Exception:
+                pass
+            finally:
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=2)
+                except Exception:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+
+            # If udevadm exits, wait a bit and restart
+            if not self._stop_event.is_set():
+                self._stop_event.wait(5.0)
