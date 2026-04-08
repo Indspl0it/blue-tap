@@ -7,10 +7,17 @@ DarkFirmware custom firmware.  Supports three vendor-specific commands:
   - VSC 0xFC61: Read 32-bit-aligned memory from the Bluetooth controller
   - VSC 0xFC62: Write 32-bit-aligned memory on the Bluetooth controller
 
-Additionally, the firmware hooks incoming LMP packets and reports them as
-HCI Event 0xFF (vendor-specific) with a 56-byte structured log.  The
-:func:`parse_lmp_log` function decodes that log, and :meth:`HCIVSCSocket.start_lmp_monitor`
-runs a background thread to capture them continuously.
+Additionally, the firmware hooks traffic at the Link Controller layer and
+reports it as HCI Event 0xFF (vendor-specific) with structured logs:
+
+  - Hook 2 (tLC_RX_LMP): Incoming LMP, 56-byte log with AAAA marker
+  - Hook 3 (tLC_TX):      Outgoing LMP (12B, TXXX) and ACL (16B, ACLX)
+  - Hook 4 (tLC_RX):      All incoming LC frames (14B, RXLC)
+
+The parser functions :func:`parse_lmp_log`, :func:`parse_lmp_tx_log`,
+:func:`parse_acl_tx_log`, and :func:`parse_rxlc_log` decode these logs.
+:meth:`HCIVSCSocket.start_lmp_monitor` runs a background thread to capture
+them continuously.
 
 Requires root or ``CAP_NET_RAW`` on the process.  Falls back to ``hcitool cmd``
 via :func:`send_vsc_hcitool` when raw sockets are unavailable.
@@ -46,7 +53,78 @@ HCI_CHANNEL_RAW = 0
 
 
 # ---------------------------------------------------------------------------
-# Standalone parser
+# LMP opcode lookup tables (ported from DarkFirmware lmp_monitor.py)
+# ---------------------------------------------------------------------------
+
+# Complete LMP opcode table per Bluetooth Core Spec v5.4, Vol 2 Part C Section 4
+LMP_OPCODES = {
+    0x01: "LMP_NAME_REQ", 0x02: "LMP_NAME_RES", 0x03: "LMP_ACCEPTED",
+    0x04: "LMP_NOT_ACCEPTED", 0x05: "LMP_CLKOFFSET_REQ", 0x06: "LMP_CLKOFFSET_RES",
+    0x07: "LMP_DETACH", 0x08: "LMP_IN_RAND", 0x09: "LMP_COMB_KEY",
+    0x0A: "LMP_UNIT_KEY", 0x0B: "LMP_AU_RAND", 0x0C: "LMP_SRES",
+    0x0D: "LMP_TEMP_RAND", 0x0E: "LMP_TEMP_KEY",
+    0x0F: "LMP_ENCRYPTION_MODE_REQ", 0x10: "LMP_ENCRYPTION_KEY_SIZE_REQ",
+    0x11: "LMP_START_ENCRYPTION_REQ", 0x12: "LMP_STOP_ENCRYPTION_REQ",
+    0x13: "LMP_SWITCH_REQ", 0x14: "LMP_HOLD", 0x15: "LMP_HOLD_REQ",
+    0x16: "LMP_SNIFF", 0x17: "LMP_SNIFF_REQ", 0x18: "LMP_UNSNIFF_REQ",
+    0x19: "LMP_PARK_REQ", 0x1B: "LMP_SET_BROADCAST_SCAN_WINDOW",
+    0x1C: "LMP_MODIFY_BEACON", 0x1D: "LMP_SETUP_COMPLETE",
+    0x1E: "LMP_USE_SEMI_PERMANENT_KEY", 0x1F: "LMP_MAX_SLOT",
+    0x20: "LMP_MAX_SLOT_REQ", 0x21: "LMP_TIMING_ACCURACY_REQ",
+    0x22: "LMP_TIMING_ACCURACY_RES", 0x23: "LMP_DETACH_TEMP_KEY",
+    0x24: "LMP_SLOT_OFFSET", 0x25: "LMP_VERSION_REQ",
+    0x26: "LMP_VERSION_RES", 0x27: "LMP_FEATURES_REQ",
+    0x28: "LMP_FEATURES_RES", 0x29: "LMP_CLKADDR",
+    0x2A: "LMP_CHANNEL_CLASSIFICATION_REQ",
+    0x2B: "LMP_QUALITY_OF_SERVICE", 0x2C: "LMP_QUALITY_OF_SERVICE_REQ",
+    0x2D: "LMP_SCO_LINK_REQ", 0x2E: "LMP_REMOVE_SCO_LINK_REQ",
+    0x2F: "LMP_MAX_POWER", 0x30: "LMP_MIN_POWER",
+    0x31: "LMP_PAGE_MODE_REQ", 0x32: "LMP_PAGE_SCAN_MODE_REQ",
+    0x33: "LMP_SUPERVISION_TIMEOUT",
+    0x34: "LMP_TEST_ACTIVATE", 0x35: "LMP_TEST_CONTROL",
+    0x36: "LMP_ENCRYPTION_KEY_SIZE_MASK_REQ",
+    0x37: "LMP_ENCRYPTION_KEY_SIZE_MASK_RES",
+    0x38: "LMP_SET_AFH", 0x39: "LMP_ENCAPSULATED_HEADER",
+    0x3A: "LMP_ENCAPSULATED_PAYLOAD", 0x3B: "LMP_SIMPLE_PAIRING_CONFIRM",
+    0x3C: "LMP_SIMPLE_PAIRING_NUMBER", 0x3D: "LMP_DHKEY_CHECK",
+    0x7F: "LMP_ESCAPE_4",
+}
+
+# Extended opcodes (via LMP_ESCAPE_4 prefix 0x7F)
+LMP_EXT_OPCODES = {
+    0x01: "EXT_ACCEPTED", 0x02: "EXT_NOT_ACCEPTED",
+    0x03: "EXT_FEATURES_REQ", 0x04: "EXT_FEATURES_RES",
+    0x05: "EXT_PACKET_TYPE_TABLE_REQ",
+    0x06: "EXT_ESCO_LINK_REQ", 0x07: "EXT_REMOVE_ESCO_LINK_REQ",
+    0x08: "EXT_CHANNEL_CLASSIFICATION_REQ",
+    0x09: "EXT_CHANNEL_CLASSIFICATION",
+    0x0B: "EXT_IO_CAPABILITY_REQ", 0x0C: "EXT_IO_CAPABILITY_RES",
+    0x0D: "EXT_NUMERIC_COMPARISON_FAILED", 0x0E: "EXT_PASSKEY_FAILED",
+    0x0F: "EXT_OOB_FAILED", 0x10: "EXT_KEYPRESS_NOTIFICATION",
+    0x11: "EXT_POWER_CONTROL_REQ", 0x12: "EXT_POWER_CONTROL_RES",
+    0x13: "EXT_SAM_SET_TYPE0", 0x14: "EXT_SAM_DEFINE_MAP",
+    0x15: "EXT_SAM_SWITCH",
+    0x17: "EXT_PING_REQ", 0x18: "EXT_PING_RES",
+}
+
+
+def decode_lmp_opcode(opcode: int, ext_opcode: int | None = None) -> str:
+    """Decode LMP opcode to human-readable name.
+
+    Args:
+        opcode: Primary LMP opcode (7-bit).
+        ext_opcode: Extended opcode when primary is 0x7F (LMP_ESCAPE_4).
+
+    Returns:
+        Human-readable opcode name, or ``"UNKNOWN(0xNN)"`` if not recognised.
+    """
+    if opcode == 0x7F and ext_opcode is not None:
+        return LMP_EXT_OPCODES.get(ext_opcode, f"EXT_UNKNOWN(0x{ext_opcode:02x})")
+    return LMP_OPCODES.get(opcode, f"UNKNOWN(0x{opcode:02x})")
+
+
+# ---------------------------------------------------------------------------
+# Standalone parsers
 # ---------------------------------------------------------------------------
 
 def parse_lmp_log(event_params: bytes) -> dict | None:
@@ -91,12 +169,141 @@ def parse_lmp_log(event_params: bytes) -> dict | None:
     payload = event_params[0x18:0x34] if has_data else b""
 
     return {
+        "direction": "RX",
+        "type": "lmp",
         "opcode": opcode,
         "payload": payload,
         "has_data": has_data,
         "raw": event_params,
         "a0_ptr": a0_ptr,
         "data_buf_ptr": data_buf_ptr,
+    }
+
+
+def parse_lmp_tx_log(event_params: bytes) -> dict | None:
+    """Parse a 12-byte DarkFirmware LMP TX log from HCI Event 0xFF (Hook 3).
+
+    Format (12 bytes)::
+
+        Offset  Size  Description
+        ------  ----  -----------
+        0x00    4     0x58585854 (TXXX marker)
+        0x04    1     Connection index
+        0x05    1     Encoded opcode: (opcode << 1) | TID
+        0x06    5     LMP parameters
+        0x0B    1     Length - 1 (firmware convention)
+
+    Args:
+        event_params: The parameter bytes from the HCI Event 0xFF packet.
+
+    Returns:
+        A dict with direction, type, connection index, decoded opcode, TID,
+        params, length, and raw bytes, or *None* if not a valid LMP TX log.
+    """
+    if len(event_params) < HCIVSCSocket.LMP_TX_LOG_SIZE:
+        return None
+
+    marker = struct.unpack_from("<I", event_params, 0x00)[0]
+    if marker != HCIVSCSocket.MARKER_TXXX:
+        return None
+
+    conn_idx = event_params[0x04]
+    encoded_opcode = event_params[0x05]
+    lmp_opcode = (encoded_opcode >> 1) & 0x7F
+    tid = encoded_opcode & 0x01
+    params = event_params[0x06:0x0B]
+    length = event_params[0x0B] + 1  # firmware stores length-1
+
+    return {
+        "direction": "TX",
+        "type": "lmp",
+        "conn_index": conn_idx,
+        "lmp_opcode_decoded": lmp_opcode,
+        "tid": tid,
+        "params": params,
+        "length": length,
+        "raw": event_params,
+    }
+
+
+def parse_acl_tx_log(event_params: bytes) -> dict | None:
+    """Parse a 16-byte DarkFirmware ACL TX log from HCI Event 0xFF (Hook 3).
+
+    Format (16 bytes)::
+
+        Offset  Size  Description
+        ------  ----  -----------
+        0x00    4     0x584C4341 (ACLX marker)
+        0x04    4     HCI handle + flags + data length (packed)
+        0x08    8     First 8 bytes of ACL payload
+
+    Args:
+        event_params: The parameter bytes from the HCI Event 0xFF packet.
+
+    Returns:
+        A dict with direction, type, handle/flags, payload preview, and raw
+        bytes, or *None* if not a valid ACL TX log.
+    """
+    if len(event_params) < HCIVSCSocket.LMP_ACL_LOG_SIZE:
+        return None
+
+    marker = struct.unpack_from("<I", event_params, 0x00)[0]
+    if marker != HCIVSCSocket.MARKER_ACLX:
+        return None
+
+    handle_flags = struct.unpack_from("<I", event_params, 0x04)[0]
+    payload_preview = event_params[0x08:0x10]
+
+    return {
+        "direction": "TX",
+        "type": "acl",
+        "handle_flags": handle_flags,
+        "payload_preview": payload_preview,
+        "raw": event_params,
+    }
+
+
+def parse_rxlc_log(event_params: bytes) -> dict | None:
+    """Parse a 14-byte DarkFirmware RX Link Controller log from HCI Event 0xFF (Hook 4).
+
+    Format (14 bytes)::
+
+        Offset  Size  Description
+        ------  ----  -----------
+        0x00    4     0x434C5852 (RXLC marker)
+        0x04    2     Message type (little-endian): 0x32E=LMP, 0x320=ACL, 0x32A=SCO
+        0x06    4     First data word
+        0x0A    4     Second data word
+
+    Args:
+        event_params: The parameter bytes from the HCI Event 0xFF packet.
+
+    Returns:
+        A dict with direction, resolved type, message_type, two data words,
+        and raw bytes, or *None* if not a valid RXLC log.
+    """
+    if len(event_params) < HCIVSCSocket.LMP_RXLC_LOG_SIZE:
+        return None
+
+    marker = struct.unpack_from("<I", event_params, 0x00)[0]
+    if marker != HCIVSCSocket.MARKER_RXLC:
+        return None
+
+    message_type = struct.unpack_from("<H", event_params, 0x04)[0]
+    data_word1 = struct.unpack_from("<I", event_params, 0x06)[0]
+    data_word2 = struct.unpack_from("<I", event_params, 0x0A)[0]
+
+    # Resolve message type to a human-readable category
+    _MSG_TYPE_MAP = {0x32E: "lmp", 0x320: "acl", 0x32A: "sco"}
+    resolved_type = _MSG_TYPE_MAP.get(message_type, "unknown")
+
+    return {
+        "direction": "RX",
+        "type": resolved_type,
+        "message_type": message_type,
+        "data_word1": data_word1,
+        "data_word2": data_word2,
+        "raw": event_params,
     }
 
 
@@ -169,12 +376,25 @@ class HCIVSCSocket:
     MARKER_AAAA: int = 0x41414141
     MARKER_BBBB: int = 0x42424242
     MARKER_CCCC: int = 0x43434343
+
+    # Hook 3 markers (tLC_TX) — outgoing packet logging
+    MARKER_TXXX: int = 0x58585854   # Outgoing LMP packet
+    MARKER_ACLX: int = 0x584C4341   # Outgoing ACL data
+
+    # Hook 4 marker (tLC_RX) — incoming Link Controller logging
+    MARKER_RXLC: int = 0x434C5852   # All incoming LC (LMP + BLE LL + ACL + SCO)
+
     LMP_LOG_SIZE: int = 56
     LMP_OPCODE_PATH: int = 0x0480
 
-    # UB500 patched firmware: send_LMP_reply length raised to 0x11 (17 bytes)
-    # Original default was 0x0A (10). Raised via patch_send_length(0x11).
-    _LMP_TX_MAX_BYTES: int = 17
+    # Log sizes for each marker type
+    LMP_TX_LOG_SIZE: int = 12       # Hook 3 LMP TX log
+    LMP_ACL_LOG_SIZE: int = 16      # Hook 3 ACL TX log
+    LMP_RXLC_LOG_SIZE: int = 14     # Hook 4 RX LC log
+
+    # DarkFirmware patched buffer supports up to 0x1C (28 bytes) for
+    # BrakTooth-style oversize PDU injection. Original was 0x0A (10).
+    _LMP_TX_MAX_BYTES: int = 28
 
     def __init__(self, hci_dev: int = 1) -> None:
         self._hci_dev = hci_dev
@@ -445,20 +665,27 @@ class HCIVSCSocket:
     def read_memory(self, address: int, size: int = 4) -> bytes:
         """Read memory from the Bluetooth controller via VSC 0xFC61.
 
+        The RTL8761B firmware interprets the size parameter as a read mode:
+        ``0x20`` (32) reads a full 4-byte word and returns 4 data bytes;
+        smaller values (4, 8) return only 1 byte.  We always use 0x20 for
+        reliable 4-byte reads, matching the DarkFirmware standalone tools.
+
         Args:
-            address: 32-bit memory address to read from.
-            size:    Number of bytes to read (default 4).
+            address: 32-bit memory address to read from (should be 4-byte aligned).
+            size:    Ignored — always reads 4 bytes.  Kept for API compatibility.
 
         Returns:
-            The raw bytes read from the controller.
+            The raw bytes read from the controller (typically 4 bytes).
 
         Raises:
             OSError:      If the socket is not open.
             TimeoutError: If the command-complete is not received.
         """
-        info(f"Reading memory at {address:#010x}")
+        logger.debug("Reading memory at %#010x", address)
         # Params: size(1B) + address(4B LE)
-        params = struct.pack("<BI", size, address)
+        # Use 0x20 as size — firmware reads a full 32-bit word and returns 4 bytes.
+        # Smaller size values (4, 8) only return 1 byte on RTL8761B.
+        params = struct.pack("<BI", 0x20, address)
         result = self.send_vsc(self.VSC_MEM_READ, params)
 
         # Command complete returns: status(1) + data(...)
@@ -483,7 +710,7 @@ class HCIVSCSocket:
         Returns:
             *True* on success, *False* on failure.
         """
-        info(f"Writing memory at {address:#010x}")
+        logger.debug("Writing memory at %#010x", address)
         # Params: size(1B) + address(4B LE) + data
         params = struct.pack("<BI", len(data), address) + data
         try:
@@ -496,6 +723,136 @@ class HCIVSCSocket:
         except (OSError, TimeoutError) as exc:
             error(f"write_memory failed: {exc}")
             return False
+
+    # ------------------------------------------------------------------
+    # Raw ACL injection (below-stack)
+    # ------------------------------------------------------------------
+
+    def send_raw_acl(
+        self,
+        handle: int,
+        l2cap_data: bytes,
+        pb: int = 2,
+        bc: int = 0,
+    ) -> bool:
+        """Send raw HCI ACL data, bypassing the host Bluetooth stack.
+
+        The controller encrypts and transmits whatever payload is provided.
+        No L2CAP validation occurs — enables injection of malformed frames
+        that BlueZ would normally drop.
+
+        Combined with DarkFirmware's ACLX/RXLC hooks, we can observe both
+        the injected frame and the target's response.
+
+        Args:
+            handle:     ACL connection handle (12 bits, from ``hcitool con``).
+            l2cap_data: Raw L2CAP frame bytes (length + CID + payload).
+            pb:         Packet boundary flag (2 = first automatically flushable).
+            bc:         Broadcast flag (0 = point-to-point).
+
+        Returns:
+            *True* if the packet was sent, *False* on failure.
+        """
+        if self._sock is None:
+            raise OSError("HCI socket is not open")
+
+        handle_flags = (handle & 0xFFF) | ((pb & 0x3) << 12) | ((bc & 0x3) << 14)
+        # HCI ACL packet: [type=0x02] [handle_flags:2B LE] [data_len:2B LE] [data]
+        hci_pkt = struct.pack("<BHH", 0x02, handle_flags, len(l2cap_data)) + l2cap_data
+
+        info(
+            f"Sending raw ACL: handle=0x{handle:04X} "
+            f"pb={pb} bc={bc} len={len(l2cap_data)}"
+        )
+
+        try:
+            with self._lock:
+                self._sock.sendall(hci_pkt)
+            return True
+        except OSError as exc:
+            error(f"Raw ACL send failed: {exc}")
+            return False
+
+    # ------------------------------------------------------------------
+    # In-flight LMP modification (Hook 2 modes)
+    # ------------------------------------------------------------------
+
+    def set_mod_mode(
+        self,
+        mode: int,
+        byte_offset: int = 0,
+        new_value: int = 0,
+        target_opcode: int = 0,
+    ) -> bool:
+        """Set Hook 2 in-flight LMP modification mode.
+
+        The firmware's Hook 2 checks a mode flag in RAM on every incoming
+        LMP packet and can modify, drop, or auto-respond before the
+        original handler sees it.
+
+        Modes:
+            0 (passthrough): Normal operation — log only.
+            1 (modify):      Overwrite data_buf[byte_offset] with new_value.
+                             One-shot: auto-clears to mode 0 after first match.
+            2 (drop):        Silently drop the next incoming LMP packet.
+                             One-shot: auto-clears after one drop.
+            3 (opcode-drop): Drop only if opcode matches target_opcode.
+                             Persistent: keeps dropping until manually cleared.
+            4 (persistent):  Same as mode 1 but does NOT auto-clear.
+                             Sustained modification (e.g., KNOB key size rewrite).
+            5 (auto-respond):Send pre-loaded response when trigger seen.
+
+        Args:
+            mode:           0-5 as described above.
+            byte_offset:    Byte offset in data_buf to modify (modes 1, 4).
+            new_value:      Value to write at byte_offset (modes 1, 4).
+            target_opcode:  Only modify/drop if opcode matches (modes 3, 4).
+
+        Returns:
+            True if RAM writes succeeded, False otherwise.
+        """
+        from blue_tap.core.firmware import MOD_FLAG_ADDR, MOD_TABLE_ADDR
+
+        # Write mod_table first (3 bytes packed into a 4-byte word)
+        table_word = (
+            (byte_offset & 0xFF)
+            | ((new_value & 0xFF) << 8)
+            | ((target_opcode & 0xFF) << 16)
+        )
+        ok_table = self.write_memory(
+            MOD_TABLE_ADDR, struct.pack("<I", table_word)
+        )
+        if not ok_table:
+            error("Failed to write mod_table")
+            return False
+
+        # Write mod_flag (activates the mode)
+        ok_flag = self.write_memory(
+            MOD_FLAG_ADDR, struct.pack("<I", mode & 0xFF)
+        )
+        if not ok_flag:
+            error("Failed to write mod_flag")
+            return False
+
+        mode_names = {
+            0: "passthrough", 1: "modify", 2: "drop",
+            3: "opcode-drop", 4: "persistent", 5: "auto-respond",
+        }
+        info(
+            f"LMP mod mode set: {mode_names.get(mode, mode)} "
+            f"(offset={byte_offset}, value=0x{new_value:02X}, "
+            f"opcode=0x{target_opcode:02X})"
+        )
+        return True
+
+    def clear_mod_mode(self) -> bool:
+        """Reset LMP modification mode to passthrough (mode 0)."""
+        from blue_tap.core.firmware import MOD_FLAG_ADDR
+
+        ok = self.write_memory(MOD_FLAG_ADDR, struct.pack("<I", 0))
+        if ok:
+            info("LMP mod mode cleared (passthrough)")
+        return ok
 
     # ------------------------------------------------------------------
     # LMP monitor thread
@@ -569,11 +926,22 @@ class HCIVSCSocket:
                 self._cc_ready.set()
                 continue
 
-            # Process vendor events as LMP logs
+            # Process vendor events as DarkFirmware logs
             if event_code != self.HCI_VENDOR_EVENT:
                 continue
 
-            log = parse_lmp_log(event_params)
+            log = None
+            if len(event_params) >= 4:
+                marker = struct.unpack_from("<I", event_params, 0)[0]
+                if marker == self.MARKER_AAAA and len(event_params) >= self.LMP_LOG_SIZE:
+                    log = parse_lmp_log(event_params)
+                elif marker == self.MARKER_TXXX and len(event_params) >= self.LMP_TX_LOG_SIZE:
+                    log = parse_lmp_tx_log(event_params)
+                elif marker == self.MARKER_ACLX and len(event_params) >= self.LMP_ACL_LOG_SIZE:
+                    log = parse_acl_tx_log(event_params)
+                elif marker == self.MARKER_RXLC and len(event_params) >= self.LMP_RXLC_LOG_SIZE:
+                    log = parse_rxlc_log(event_params)
+
             if log is None:
                 continue
 
