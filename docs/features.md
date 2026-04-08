@@ -158,10 +158,10 @@ blue-tap knob attack <MAC> --key-size 1                # Force 1-byte key (256 c
 
 **Attack phases:**
 1. **Probe** — Check BT version (KNOB affects 2.1-5.0 pre-patch), read current encryption key size if connected, note firmware patch uncertainty
-2. **Negotiate** — Set minimum encryption key size via DarkFirmware LMP injection (RTL8761B) or btmgmt fallback, verify setting took effect via ConnectionInspector RAM read, restore adapter defaults after test
+2. **Negotiate** — Set minimum encryption key size via InternalBlue LMP injection (Broadcom/Cypress) or btmgmt fallback, verify setting took effect, restore adapter defaults after test
 3. **Brute force** — Capture encrypted ACL traffic from active connection (60s windows, up to 5 minutes with user-prompted extensions), XOR-decrypt each candidate, validate against L2CAP header structure (length field + CID range). Rich progress bar shows enumeration progress.
 
-Note: Full LMP-level manipulation requires DarkFirmware on RTL8761B (TP-Link UB500). The btmgmt fallback only controls local adapter preferences. HCI response parsing uses multiple regex patterns for cross-chipset compatibility.
+Note: Full LMP-level manipulation requires InternalBlue (Broadcom/Cypress chipset). The btmgmt fallback only controls local adapter preferences. HCI response parsing uses multiple regex patterns for cross-chipset compatibility.
 
 ---
 
@@ -229,28 +229,6 @@ blue-tap encryption-downgrade <MAC> -m all                       # Run all metho
 | reject-secure-connections | Reject SC PDUs during re-keying | Forces Legacy Secure Connections |
 
 Requires an active ACL connection to the target. Each method result shows VULNERABLE/Partially Accepted/Rejected status.
-
----
-
-### 6d. CTKD — Cross-Transport Key Derivation (CVE-2020-15802)
-
-Tests whether a dual-mode (BR/EDR + BLE) target shares key material across transports. A successful Classic Bluetooth attack (e.g., KNOB) can compromise BLE security if the target derives BLE keys from the weakened Classic key — and vice versa. Requires DarkFirmware for connection table inspection.
-
-```bash
-sudo blue-tap ctkd <MAC>                                # Probe for CTKD vulnerability
-sudo blue-tap ctkd <MAC> -m monitor                     # Continuous key material monitoring
-sudo blue-tap ctkd <MAC> -m monitor --interval 5        # Poll every 5 seconds
-```
-
-**Probe flow:**
-1. Verify DarkFirmware is loaded and hooks are active
-2. Snapshot key material across all connection slots (before)
-3. Execute KNOB attack on Classic transport to weaken key
-4. Snapshot key material again (after)
-5. Compare: if BLE slot keys changed after Classic attack → CTKD vulnerable
-6. Check for shared key material across BLE and Classic slots
-
-**Reference:** "BLURtooth: Exploiting Cross-Transport Key Derivation in Bluetooth Classic and Bluetooth Low Energy", Bluetooth SIG Advisory 2020
 
 ---
 
@@ -426,7 +404,7 @@ blue-tap fuzz campaign <MAC> -n 50000 --delay 0.1          # 50K iterations, fas
 blue-tap fuzz campaign --resume                            # Resume previous campaign
 ```
 
-#### Supported Protocols (14)
+#### Supported Protocols (12)
 
 | Protocol | Transport | Attack Surface |
 |----------|-----------|----------------|
@@ -442,8 +420,7 @@ blue-tap fuzz campaign --resume                            # Resume previous cam
 | `ble-att` | BLE CID 4 | ATT handles, writes, MTU, prepare writes, signed writes |
 | `ble-smp` | BLE CID 6 | Pairing, key sizes, ECDH curve points, sequencing |
 | `bnep` | L2CAP PSM 15 | Setup connection, ethernet frames, filter lists |
-| `lmp` | HCI VSC 0xFE22 | LMP opcodes, key negotiation, feature response, role switch, encryption setup (requires DarkFirmware) |
-| `raw-acl` | HCI raw ACL | Below-stack L2CAP injection bypassing BlueZ, malformed frame testing (requires DarkFirmware) |
+| `lmp` | HCI VSC 0xFE22 | LMP opcodes, key negotiation, feature response, role switch, encryption setup |
 
 #### Fuzzing Strategies
 
@@ -762,26 +739,19 @@ DarkFirmware is a custom firmware for RTL8761B-based USB Bluetooth adapters (TP-
 blue-tap adapter firmware-status                     # Check DarkFirmware status
 blue-tap adapter firmware-install                    # Install bundled DarkFirmware
 blue-tap adapter firmware-install --restore          # Revert to stock Realtek firmware
-blue-tap adapter firmware-init                       # Manually initialize all 4 firmware hooks
 blue-tap adapter firmware-spoof <MAC>                # BDADDR spoofing via firmware patch
 blue-tap adapter firmware-set <addr> <value>         # Direct firmware memory write
 blue-tap adapter firmware-dump --addr 0x200000 --len 256  # Dump controller memory
-blue-tap adapter connection-inspect                  # Dump connection table from controller RAM
 ```
-
-> **Note:** DarkFirmware is auto-detected at startup. If an RTL8761B is present without DarkFirmware, Blue-Tap prompts to install. After installation, hooks are initialized automatically and the USB watchdog starts for multi-day fuzzing stability.
 
 #### Capabilities Enabled by DarkFirmware
 
 | Capability | VSC Opcode | Description |
 |-----------|------------|-------------|
 | LMP Injection | 0xFE22 | Inject arbitrary LMP packets into live connections |
-| LMP Monitoring | Event 0xFF | Capture incoming/outgoing LMP, ACL, LC packets (4 hooks: AAAA/TXXX/ACLX/RXLC) |
+| LMP Monitoring | Event 0xFF | Capture incoming LMP packets as HCI vendor events |
 | Memory Read | 0xFC61 | Read 32-bit-aligned controller memory |
 | Memory Write | 0xFC62 | Write 32-bit-aligned controller memory |
-| In-flight Modification | Hook 2 modes | 6 modes: passthrough, modify, drop, opcode-drop, persistent-modify, auto-respond |
-| Connection Inspection | RAM read | Read encryption state, key material, auth flags across 12 connection slots |
-| Raw ACL Injection | VSC + HCI | Bypass BlueZ L2CAP stack for below-stack packet injection |
 
 #### LMP Sniffing and Monitoring
 
@@ -798,12 +768,10 @@ blue-tap recon combined-sniff <MAC>                  # Combined HCI + LMP monito
 |--------|---------|-----|
 | BLUFFS session key downgrade | `blue-tap bluffs` | CVE-2023-24023 |
 | Encryption downgrade | `blue-tap encryption-downgrade` | — |
-| CTKD cross-transport key derivation | `blue-tap ctkd` | CVE-2020-15802 |
 | BIAS LMP injection mode | `blue-tap bias attack --method lmp` | CVE-2020-10135 |
 | KNOB LMP key negotiation | `blue-tap knob attack` | CVE-2019-9506 |
 | LMP-level DoS | `blue-tap dos lmp` | — |
-| LMP protocol fuzzing | `blue-tap fuzz campaign -p lmp` | — |
-| Raw ACL fuzzing | `blue-tap fuzz campaign -p raw-acl` | — |
+| LMP protocol fuzzing | `blue-tap fuzz lmp` | — |
 
 #### Required Hardware
 
@@ -889,4 +857,3 @@ steps:
 ```
 
 ---
-
