@@ -172,20 +172,90 @@ def main(verbose, session_name):
     set_session(session)
     info(f"Session: [bold]{session_name}[/bold] -> {session.dir}")
 
-    # Runtime DarkFirmware detection — check once per session
+    # ---- Hardware detection, DarkFirmware auto-flash, hook init, watchdog ----
     try:
-        from blue_tap.core.firmware import DarkFirmwareManager
-        fw = DarkFirmwareManager()
-        for hci_dev in ("hci1", "hci0"):
-            if fw.detect_rtl8761b(hci_dev):
-                if fw.is_darkfirmware_loaded(hci_dev):
-                    info(f"[green]DarkFirmware active on {hci_dev}[/green] — LMP injection/monitoring enabled")
-                else:
-                    warning(f"RTL8761B detected on {hci_dev} but DarkFirmware not loaded. "
-                            f"Run: [bold]sudo blue-tap adapter firmware-install --hci {hci_dev}[/bold]")
-                break
+        _startup_hardware_check()
     except Exception:
-        pass  # Don't let firmware detection break CLI startup
+        pass  # Don't let hardware detection break CLI startup
+
+
+def _startup_hardware_check() -> None:
+    """Non-blocking hardware detection and DarkFirmware initialization.
+
+    Sequence:
+      1. Detect RTL8761B dongle via lsusb / sysfs
+      2. If not found → warn about unavailable features, skip DarkFirmware
+      3. If found → auto-flash DarkFirmware if not loaded
+      4. Init all 4 hooks (RAM writes for Hooks 3+4)
+      5. Start watchdog for USB reset/replug recovery
+    """
+    from blue_tap.core.firmware import DarkFirmwareManager, DarkFirmwareWatchdog
+    from blue_tap.utils.bt_helpers import run_cmd
+
+    fw = DarkFirmwareManager()
+
+    # Step 1: Detect RTL8761B hardware — prefer sysfs/hciconfig detection
+    # which is per-HCI, over lsusb which is global.
+    # Try hci0 first since it's the most common index for USB dongles.
+    dongle_hci = None
+    for hci_dev in ("hci0", "hci1", "hci2"):
+        if fw.detect_rtl8761b(hci_dev):
+            dongle_hci = hci_dev
+            break
+
+    if dongle_hci is None:
+        # Check if any BT adapter is present at all
+        bt_result = run_cmd(["hciconfig"])
+        has_any_adapter = bt_result.returncode == 0 and "hci" in bt_result.stdout.lower()
+
+        if has_any_adapter:
+            info(
+                "RTL8761B dongle not detected — using system Bluetooth adapter.\n"
+                "  [dim]Features unavailable without RTL8761B (TP-Link UB500):[/dim]\n"
+                "  [dim]  - LMP injection/monitoring (BLUFFS, KNOB via LMP, BIAS via LMP)[/dim]\n"
+                "  [dim]  - Encryption downgrade attacks[/dim]\n"
+                "  [dim]  - LMP fuzzing and state confusion tests[/dim]\n"
+                "  [dim]  - Below-stack L2CAP injection[/dim]\n"
+                "  [dim]  - Connection table inspection[/dim]\n"
+                "  [dim]All HCI-level features (scan, recon, vulnscan, hijack, fuzz L2CAP/RFCOMM/BLE, DoS) work normally.[/dim]"
+            )
+        else:
+            warning(
+                "No Bluetooth adapter detected.\n"
+                "  [dim]Plug in a USB Bluetooth adapter and retry.[/dim]\n"
+                "  [dim]Recommended: TP-Link UB500 (RTL8761B) for full feature access.[/dim]"
+            )
+        return
+
+    # Step 2: Check if DarkFirmware is loaded — prompt to install if not
+    # (Don't auto-flash: user may have custom firmware or not want changes)
+    if not fw.is_darkfirmware_loaded(dongle_hci):
+        warning(
+            f"RTL8761B detected on {dongle_hci} but DarkFirmware not loaded.\n"
+            f"  Install with: [bold]sudo blue-tap adapter firmware-install --hci {dongle_hci}[/bold]\n"
+            f"  [dim]Without DarkFirmware: LMP injection, BLUFFS, encryption downgrade, "
+            f"and LMP fuzzing are unavailable.[/dim]"
+        )
+        return
+
+    # Step 3: Initialize all 4 hooks (Hooks 3+4 need RAM writes)
+    hook_status = fw.init_hooks(dongle_hci)
+    if hook_status.get("all_ok"):
+        info(
+            f"[green]DarkFirmware active on {dongle_hci}[/green] — "
+            f"all 4 hooks initialized (LMP inject/monitor, LC TX/RX logging)"
+        )
+    else:
+        active = [k for k in ("hook1", "hook2", "hook3", "hook4") if hook_status.get(k)]
+        failed = [k for k in ("hook1", "hook2", "hook3", "hook4") if not hook_status.get(k)]
+        info(
+            f"[green]DarkFirmware active on {dongle_hci}[/green] — "
+            f"hooks: active=[{', '.join(active)}] failed=[{', '.join(failed)}]"
+        )
+
+    # Step 4: Start watchdog for USB reset/replug recovery
+    watchdog = DarkFirmwareWatchdog(dongle_hci, poll_interval=30.0)
+    watchdog.start()
 
 
 # ============================================================================
@@ -667,6 +737,136 @@ def adapter_firmware_install(source, restore, hci):
                     "adapter may need manual replug")
     else:
         error("Firmware installation failed")
+
+
+@adapter.command("firmware-init")
+@click.option("--hci", default="hci1", help="HCI device")
+def adapter_firmware_init(hci):
+    """Initialize DarkFirmware hooks (activate Hooks 3+4).
+
+    \b
+    Hooks 1+2 are persistent in the firmware binary and survive USB resets.
+    Hooks 3+4 need two RAM writes after each boot to activate bidirectional
+    traffic logging (outgoing LMP/ACL via Hook 3, incoming LC via Hook 4).
+
+    \b
+    This runs automatically at startup.  Use this command manually if you
+    plugged in the adapter after Blue-Tap started.
+    """
+    from blue_tap.core.firmware import DarkFirmwareManager
+
+    fw = DarkFirmwareManager()
+    if not fw.is_darkfirmware_loaded(hci):
+        error(f"DarkFirmware not detected on {hci}")
+        return
+
+    result = fw.init_hooks(hci)
+    if result.get("all_ok"):
+        success("All 4 hooks initialized")
+    else:
+        for hook in ("hook1", "hook2", "hook3", "hook4"):
+            status = "active" if result.get(hook) else "FAILED"
+            info(f"  {hook}: {status}")
+
+
+@adapter.command("connection-inspect")
+@click.option("--conn", type=int, default=-1, help="Slot 0-11, or -1 for all")
+@click.option("--watch", is_flag=True, help="Continuous monitoring")
+@click.option("--interval", type=float, default=3.0, help="Watch interval (seconds)")
+@click.option("--hci", default="hci0", help="HCI device with DarkFirmware")
+def adapter_connection_inspect(conn, watch, interval, hci):
+    """Inspect live connection security state from controller RAM.
+
+    \b
+    Reads the RTL8761B connection table via DarkFirmware to show:
+      - Encryption key size (KNOB vulnerability if key_size=1)
+      - Encryption enabled/disabled
+      - Authentication state
+      - Secure Connections flag
+      - Link key material
+
+    \b
+    Examples:
+      sudo blue-tap adapter connection-inspect              # scan all 12 slots
+      sudo blue-tap adapter connection-inspect --conn 0     # specific slot
+      sudo blue-tap adapter connection-inspect --watch      # continuous monitoring
+    """
+    from blue_tap.core.firmware import ConnectionInspector, DarkFirmwareManager
+    from blue_tap.core.hci_vsc import HCIVSCSocket
+
+    fw = DarkFirmwareManager()
+    if not fw.is_darkfirmware_loaded(hci):
+        error(f"DarkFirmware not detected on {hci}")
+        return
+
+    hci_idx = int(hci.replace("hci", ""))
+    inspector = ConnectionInspector()
+
+    if watch:
+        info(f"Watching connections on {hci} every {interval}s (Ctrl+C to stop)...")
+        try:
+            with HCIVSCSocket(hci_dev=hci_idx) as sock:
+                import time
+                while True:
+                    ts = time.strftime("%H:%M:%S")
+                    slots = [conn] if conn >= 0 else range(12)
+                    for s in slots:
+                        r = inspector.inspect_connection(sock, s)
+                        if r.get("active"):
+                            _display_connection(ts, r)
+                    time.sleep(interval)
+        except KeyboardInterrupt:
+            info("Stopped")
+    else:
+        try:
+            with HCIVSCSocket(hci_dev=hci_idx) as sock:
+                if conn >= 0:
+                    r = inspector.inspect_connection(sock, conn)
+                    if r.get("active"):
+                        _display_connection(None, r)
+                    else:
+                        info(f"Slot {conn}: no active connection")
+                else:
+                    active = inspector.scan_all_connections(sock)
+                    if active:
+                        for r in active:
+                            _display_connection(None, r)
+                    else:
+                        info("No active connections found")
+        except Exception as exc:
+            error(f"Connection inspect failed: {exc}")
+
+
+def _display_connection(ts, r):
+    """Format and display a connection inspection result."""
+    prefix = f"[{ts}] " if ts else ""
+    slot = r.get("conn_index", "?")
+    bdaddr = r.get("bdaddr", "unknown")
+    info(f"{prefix}Slot {slot}: {bdaddr}")
+    info(f"  Secondary struct: {r.get('secondary_ptr', 'N/A')}")
+
+    enc = r.get("enc_enabled")
+    key_size = r.get("enc_key_size")
+    sc = r.get("secure_connections")
+    auth = r.get("auth_state")
+
+    enc_str = "YES" if enc else "NO" if enc is not None else "?"
+    sc_str = "YES" if sc else "NO" if sc is not None else "?"
+    info(f"  Encryption: {enc_str} (key_size={key_size} bytes)")
+    info(f"  Secure Connections: {sc_str}")
+    info(f"  Auth state: 0x{auth:02X}" if auth is not None else "  Auth state: ?")
+
+    # KNOB check
+    if enc and key_size is not None:
+        if key_size == 1:
+            warning(f"  [!!!] KNOB VULNERABLE — 1-byte encryption key!")
+        elif key_size < 7:
+            warning(f"  [!!] WEAK ENCRYPTION — key_size={key_size} bytes")
+
+    # Key material
+    key_copy = r.get("key_material_copy", "")
+    if key_copy and key_copy != "00" * 32:
+        info(f"  Key material: {key_copy[:32]}...")
 
 
 @adapter.command("firmware-spoof")
@@ -4379,6 +4579,49 @@ def bluffs_attack(target, variant, hci, phone):
 
 
 # ============================================================================
+# CTKD - Cross-Transport Key Derivation (BLURtooth)
+# ============================================================================
+@main.command("ctkd")
+@click.argument("target", required=False, default=None)
+@click.option("-m", "--mode", type=click.Choice(["probe", "monitor"]), default="probe",
+              help="probe: one-shot CTKD test | monitor: watch key material changes")
+@click.option("-i", "--interface", "hci", default="hci1", help="HCI device with DarkFirmware")
+@click.option("--interval", type=float, default=3.0, help="Monitor polling interval (seconds)")
+def ctkd_cmd(target, mode, hci, interval):
+    """Test for Cross-Transport Key Derivation (CVE-2020-15802).
+
+    \b
+    Checks whether a dual-mode (BR/EDR + BLE) target shares key material
+    across transports.  A Classic attack (KNOB) can compromise BLE keys
+    if CTKD is active.
+
+    \b
+    Requires DarkFirmware for connection table inspection.
+
+    \b
+    Examples:
+      sudo blue-tap ctkd AA:BB:CC:DD:EE:FF              # Probe for CTKD
+      sudo blue-tap ctkd AA:BB:CC:DD:EE:FF -m monitor    # Watch key changes
+    """
+    from blue_tap.attack.ctkd import CTKDAttack
+
+    target = target or _resolve_target()
+    if not target:
+        return
+
+    attack = CTKDAttack(target, hci)
+
+    if mode == "probe":
+        result = attack.probe()
+        _log_attack_result("ctkd", result)
+        if result.get("vulnerable"):
+            success(f"CTKD: Target {target} may be VULNERABLE")
+        else:
+            info(f"CTKD: No vulnerability detected on {target}")
+    elif mode == "monitor":
+        attack.monitor(interval=interval)
+
+
 # ENCRYPTION-DOWNGRADE - Beyond KNOB
 # ============================================================================
 @main.command("encryption-downgrade")
@@ -4630,9 +4873,60 @@ def _save_json(data, filepath):
     success(f"Saved: {filepath}")
 
 
+@main.command("demo", hidden=True)
+@click.option("-o", "--output", default="demo_output", help="Output directory")
+def demo_cmd(output):
+    """Run a full demo pentest with simulated IVI data (no hardware needed)."""
+    from blue_tap.demo.runner import run_demo
+    run_demo(output_dir=output)
+
+
+def _check_privileges() -> bool:
+    """Check if running with root/sudo.  Returns True if privileged."""
+    import os
+    return os.geteuid() == 0
+
+
+# Commands that can run without root
+_NO_ROOT_COMMANDS = {"--help", "-h", "--version", "demo"}
+
+
 def cli():
     """Entry point that shows the banner before any Click processing."""
+    import sys
+
     banner()
+
+    # Allow --help, --version, and demo without root
+    args_lower = {a.lower().lstrip("-") for a in sys.argv[1:]}
+    raw_args = set(sys.argv[1:])
+
+    needs_root_check = True
+    if not sys.argv[1:]:
+        needs_root_check = False  # No args = show help
+    elif raw_args & {"--help", "-h", "--version"}:
+        needs_root_check = False
+    elif args_lower & {"help", "version"}:
+        needs_root_check = False
+    elif "demo" in args_lower:
+        needs_root_check = False
+
+    if needs_root_check and not _check_privileges():
+        error(
+            "Blue-Tap requires root privileges for most operations.\n"
+            "\n"
+            "  Why: Raw HCI sockets, L2CAP/RFCOMM sockets, adapter control,\n"
+            "       DarkFirmware VSC commands, and firmware writes all require\n"
+            "       root or CAP_NET_RAW.\n"
+            "\n"
+            "  Run with:  [bold]sudo blue-tap[/bold] <command>\n"
+            "\n"
+            "  Or grant capabilities:  sudo setcap cap_net_raw+eip $(which python3)\n"
+            "\n"
+            "  Commands that work without root: --help, --version, demo"
+        )
+        sys.exit(1)
+
     main()
 
 
