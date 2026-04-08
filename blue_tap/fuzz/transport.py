@@ -10,7 +10,12 @@ the underlying socket type.
 from __future__ import annotations
 
 import collections
+import ctypes
+import ctypes.util
+import fcntl
+import os
 import re
+import select
 import socket
 import struct
 import time
@@ -468,7 +473,7 @@ class BLETransport(BluetoothTransport):
         address: str,
         cid: int = ATT_CID,
         address_type: int = BDADDR_LE_PUBLIC,
-        timeout: float = 5.0,
+        timeout: float = 15.0,
         max_reconnects: int = 3,
         security_level: int = 1,
     ) -> None:
@@ -477,29 +482,106 @@ class BLETransport(BluetoothTransport):
         self.address_type = address_type
         self.security_level = security_level
 
+    @staticmethod
+    def _mac_to_bytes(mac: str) -> bytes:
+        """Convert MAC string to bytes in reversed (little-endian) order."""
+        return bytes(reversed([int(x, 16) for x in mac.split(":")]))
+
+    @staticmethod
+    def _make_sockaddr_l2(bdaddr_str: str, psm: int, cid: int, bdaddr_type: int) -> bytes:
+        """Build a raw ``sockaddr_l2`` struct for BLE L2CAP.
+
+        Layout: uint16 family, uint16 psm, bdaddr[6], uint16 cid, uint8 bdaddr_type
+        """
+        bdaddr = BLETransport._mac_to_bytes(bdaddr_str)
+        return struct.pack("<HH6sHB", AF_BLUETOOTH, psm, bdaddr, cid, bdaddr_type)
+
+    # Cache detected address types to avoid repeated probes
+    _addr_type_cache: dict[str, int] = {}
+
+    @staticmethod
+    def _detect_address_type(address: str) -> int:
+        """Auto-detect BLE address type by attempting a quick connection.
+
+        Tries PUBLIC first, then falls back to RANDOM.  Results are
+        cached so the probe only runs once per address.
+        """
+        if address in BLETransport._addr_type_cache:
+            return BLETransport._addr_type_cache[address]
+
+        libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+        for addr_type in (BDADDR_LE_PUBLIC, BDADDR_LE_RANDOM):
+            try:
+                sock = socket.socket(AF_BLUETOOTH, socket.SOCK_SEQPACKET, BTPROTO_L2CAP)
+                fd = sock.fileno()
+                bind_addr = BLETransport._make_sockaddr_l2(
+                    "00:00:00:00:00:00", 0, 0x0004, BDADDR_LE_PUBLIC
+                )
+                libc.bind(fd, bind_addr, len(bind_addr))
+
+                old_flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+                fcntl.fcntl(fd, fcntl.F_SETFL, old_flags | os.O_NONBLOCK)
+
+                conn_addr = BLETransport._make_sockaddr_l2(address, 0, 0x0004, addr_type)
+                ret = libc.connect(fd, conn_addr, len(conn_addr))
+                errno_val = ctypes.get_errno()
+
+                if ret != 0 and errno_val == 115:  # EINPROGRESS
+                    _, writable, _ = select.select([], [sock], [], 5)
+                    if writable:
+                        err = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+                        if err == 0:
+                            sock.close()
+                            # Wait for device to accept new connections
+                            time.sleep(1)
+                            BLETransport._addr_type_cache[address] = addr_type
+                            return addr_type
+                elif ret == 0:
+                    sock.close()
+                    time.sleep(1)
+                    BLETransport._addr_type_cache[address] = addr_type
+                    return addr_type
+                sock.close()
+            except OSError:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+
+        # Fallback to bit-based heuristic
+        first_octet = int(address.split(":")[0], 16)
+        result = BDADDR_LE_RANDOM if first_octet & 0x40 else BDADDR_LE_PUBLIC
+        BLETransport._addr_type_cache[address] = result
+        return result
+
     def _create_socket(self) -> socket.socket:
         """Create a BLE L2CAP socket with security and CID configuration.
 
-        Binds to the local adapter with the target CID and sets the
-        BLE security level via ``BT_SECURITY`` socket option.
+        Uses raw ctypes bind to construct a proper ``sockaddr_l2`` with
+        BLE address type, since Python 3.13+ does not support the 3-tuple
+        L2CAP address format natively.
         """
         sock = socket.socket(AF_BLUETOOTH, socket.SOCK_SEQPACKET, BTPROTO_L2CAP)
 
-        # Bind to local adapter with CID.
-        # For BLE L2CAP the bind address is: (bdaddr, addr_type, cid)
-        # Some kernels accept the 2-tuple; we try the 3-tuple first.
-        try:
-            sock.bind(("00:00:00:00:00:00", BDADDR_LE_PUBLIC, self.cid))
-        except TypeError:
-            # Older kernel/PyBluez: fall back to 2-tuple bind with CID
-            try:
-                sock.bind(("", self.cid))
-            except OSError as exc:
-                warning(f"BLE bind to CID {self.cid:#06x} failed: {exc}")
+        # Bind to local adapter with CID using raw sockaddr_l2.
+        # Some CIDs (like SMP 0x0006) can't be bound directly — fall back to
+        # binding with the target CID in the connect address instead.
+        libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+        bind_addr = self._make_sockaddr_l2(
+            "00:00:00:00:00:00", 0, self.cid, BDADDR_LE_PUBLIC
+        )
+        ret = libc.bind(sock.fileno(), bind_addr, len(bind_addr))
+        if ret != 0:
+            # Retry with CID=0 (let kernel pick) - needed for SMP
+            bind_addr = self._make_sockaddr_l2(
+                "00:00:00:00:00:00", 0, 0, BDADDR_LE_PUBLIC
+            )
+            ret = libc.bind(sock.fileno(), bind_addr, len(bind_addr))
+            if ret != 0:
+                errno = ctypes.get_errno()
+                warning(f"BLE bind to CID {self.cid:#06x} failed: errno={errno} ({os.strerror(errno)})")
 
         # Set BLE security level
-        # struct bt_security { uint8_t level; uint8_t key_size; }
-        # Padded to 4 bytes on most kernels.
         try:
             sec_struct = struct.pack("<BBH", self.security_level, 0, 0)
             sock.setsockopt(SOL_BLUETOOTH, BT_SECURITY, sec_struct)
@@ -509,18 +591,38 @@ class BLETransport(BluetoothTransport):
         return sock
 
     def _connect_socket(self, sock: socket.socket) -> None:
-        """Connect to the BLE device using the LE address type.
+        """Connect to the BLE device using raw ctypes for proper LE addressing.
 
-        The kernel expects a 3-tuple ``(address, address_type, cid)`` for
-        BLE L2CAP connections.  Falls back to 2-tuple if the kernel does
-        not support the extended form.
+        Python 3.13+ does not support the 3-tuple ``(address, address_type, cid)``
+        for BLE L2CAP.  We use ctypes to call ``connect()`` directly with a
+        properly structured ``sockaddr_l2`` that includes the BLE address type.
         """
-        try:
-            sock.connect((self.address, self.address_type, self.cid))
-        except TypeError:
-            # Fallback: some kernel builds only accept (address, psm)
-            # where psm doubles as CID for fixed channels
-            sock.connect((self.address, self.cid))
+        libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+        conn_addr = self._make_sockaddr_l2(
+            self.address, 0, self.cid, self.address_type
+        )
+
+        # Use non-blocking connect + select for timeout control
+        fd = sock.fileno()
+        flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+
+        ret = libc.connect(fd, conn_addr, len(conn_addr))
+        errno = ctypes.get_errno()
+
+        if ret != 0 and errno == 115:  # EINPROGRESS
+            _, writable, _ = select.select([], [sock], [], self.timeout)
+            if writable:
+                err = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+                if err != 0:
+                    raise OSError(err, os.strerror(err))
+            else:
+                raise OSError("BLE connect timed out")
+        elif ret != 0:
+            raise OSError(errno, os.strerror(errno))
+
+        # Restore blocking mode
+        fcntl.fcntl(fd, fcntl.F_SETFL, flags)
 
     def is_alive(self) -> bool:
         """Check BLE device reachability.
@@ -532,16 +634,30 @@ class BLETransport(BluetoothTransport):
         probe_sock = None
         try:
             probe_sock = socket.socket(AF_BLUETOOTH, socket.SOCK_SEQPACKET, BTPROTO_L2CAP)
-            probe_sock.settimeout(3.0)
-            try:
-                probe_sock.bind(("00:00:00:00:00:00", BDADDR_LE_PUBLIC, self.ATT_CID))
-            except TypeError:
-                probe_sock.bind(("", self.ATT_CID))
-            try:
-                probe_sock.connect((self.address, self.address_type, self.ATT_CID))
-            except TypeError:
-                probe_sock.connect((self.address, self.ATT_CID))
-            return True
+            libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+
+            bind_addr = self._make_sockaddr_l2(
+                "00:00:00:00:00:00", 0, self.ATT_CID, BDADDR_LE_PUBLIC
+            )
+            libc.bind(probe_sock.fileno(), bind_addr, len(bind_addr))
+
+            fd = probe_sock.fileno()
+            flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+            fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+
+            conn_addr = self._make_sockaddr_l2(
+                self.address, 0, self.ATT_CID, self.address_type
+            )
+            ret = libc.connect(fd, conn_addr, len(conn_addr))
+            errno_val = ctypes.get_errno()
+
+            if ret != 0 and errno_val == 115:  # EINPROGRESS
+                _, writable, _ = select.select([], [probe_sock], [], 3.0)
+                if writable:
+                    err = probe_sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+                    return err == 0
+                return False
+            return ret == 0
         except OSError:
             return False
         finally:
@@ -750,6 +866,56 @@ class LMPTransport(BluetoothTransport):
                 pass
             self._sock = None
 
+    def send_and_collect(self, data: bytes, response_timeout: float = 0.5) -> tuple[int, list[dict]]:
+        """Send LMP packet and collect responses for response_timeout seconds.
+
+        Clears the receive queue, sends the packet, then waits up to
+        *response_timeout* for LMP log events to arrive via the monitor
+        thread.
+
+        Returns:
+            (bytes_sent, list_of_response_log_dicts) where each dict has
+            keys like 'direction', 'type', 'lmp_opcode_decoded', 'payload', etc.
+        """
+        # Clear rx_queue before sending
+        if self._rx_queue is not None:
+            self._rx_queue.clear()
+
+        sent = self.send(data)
+
+        # Wait for responses to arrive via the monitor thread
+        time.sleep(response_timeout)
+
+        # Drain all log dicts from rx_queue (populated by _on_lmp_received callback)
+        log_responses: list[dict] = []
+        if self._rx_queue:
+            while self._rx_queue:
+                log_responses.append(self._rx_queue.popleft())
+
+        # Also grab any logs from the HCI socket's buffer that the callback
+        # may not have caught (e.g., if they arrived between queue clears)
+        if self._hci_vsc is not None:
+            for entry in list(self._hci_vsc.lmp_log_buffer):
+                if entry not in log_responses:
+                    log_responses.append(entry)
+
+        return sent, log_responses
+
+    def check_alive(self) -> bool:
+        """Check if the DarkFirmware dongle is still responsive.
+
+        Sends a basic HCI Read BD Addr and checks for a response.
+        If no response within 2s, the controller may have crashed.
+        """
+        if self._hci_vsc is None:
+            return False
+        try:
+            # HCI Read BD Addr: OGF=0x04 OCF=0x0009 => opcode 0x1009
+            result = self._hci_vsc.send_vsc(0x1009, b"", timeout=2.0)
+            return len(result) > 0 and result[0] == 0x00
+        except (OSError, TimeoutError):
+            return False
+
     def is_alive(self) -> bool:
         """Check ACL connection still exists (not l2ping -- LMP is below L2CAP)."""
         return self._find_acl_handle() is not None
@@ -762,3 +928,178 @@ class LMPTransport(BluetoothTransport):
             else ""
         )
         return f"<LMPTransport addr={self.address} hci{self.hci_dev}{handle} {state}>"
+
+
+class RawACLTransport(BluetoothTransport):
+    """Transport for below-stack L2CAP injection via DarkFirmware.
+
+    Sends raw HCI ACL data packets directly to the Bluetooth controller,
+    bypassing BlueZ's L2CAP stack entirely.  The controller encrypts and
+    transmits whatever payload is provided — no L2CAP validation occurs.
+
+    This enables injection of malformed L2CAP frames that BlueZ would
+    normally drop before they leave the host (truncated headers, invalid
+    CIDs, oversized payloads, etc.).
+
+    Combined with DarkFirmware's Hook 3 (ACLX marker) and Hook 4 (RXLC
+    marker), both sent and received ACL data are logged.
+
+    Requires:
+      - DarkFirmware loaded on the adapter
+      - An existing ACL connection to the target (provides the handle)
+      - Root or CAP_NET_RAW for raw HCI socket access
+
+    Args:
+        address:  Target BD_ADDR.
+        hci_dev:  HCI device index for the DarkFirmware adapter.
+        timeout:  Timeout for connection verification.
+        max_reconnects: Max reconnect attempts.
+    """
+
+    def __init__(
+        self,
+        address: str,
+        hci_dev: int = 1,
+        timeout: float = 5.0,
+        max_reconnects: int = 3,
+    ) -> None:
+        super().__init__(address, timeout=timeout, max_reconnects=max_reconnects)
+        self.hci_dev = hci_dev
+        self._hci_vsc = None
+        self._connection_handle: int | None = None
+        self._rx_queue: collections.deque | None = None
+
+    def _create_socket(self) -> socket.socket:
+        """Placeholder — RawACLTransport uses HCI VSC socket, not L2CAP."""
+        return socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+    def _connect_socket(self, sock: socket.socket) -> None:
+        """Placeholder — connection managed via HCI."""
+        pass
+
+    def connect(self) -> bool:
+        """Open HCI VSC socket and find the ACL connection handle."""
+        from blue_tap.core.hci_vsc import HCIVSCSocket
+
+        try:
+            self._hci_vsc = HCIVSCSocket(hci_dev=self.hci_dev)
+            self._hci_vsc.open()
+        except OSError as exc:
+            error(f"Cannot open HCI socket on hci{self.hci_dev}: {exc}")
+            return False
+
+        # Find ACL handle for the target
+        self._connection_handle = self._find_acl_handle()
+        if self._connection_handle is None:
+            # Try to establish ACL via a quick L2CAP SDP probe
+            self._establish_acl()
+            self._connection_handle = self._find_acl_handle()
+
+        if self._connection_handle is None:
+            warning(f"No ACL connection to {self.address} — raw ACL injection requires an active link")
+            return False
+
+        # Start monitor for Hook 3/4 events (ACLX, RXLC)
+        self._rx_queue = collections.deque(maxlen=1000)
+        self._hci_vsc.start_lmp_monitor(lambda evt: self._rx_queue.append(evt))
+
+        self._connected = True
+        info(
+            f"RawACL transport ready: {self.address} "
+            f"handle=0x{self._connection_handle:04X} hci{self.hci_dev}"
+        )
+        return True
+
+    def _find_acl_handle(self) -> int | None:
+        """Parse hcitool con for the ACL handle to target."""
+        result = run_cmd(["hcitool", "-i", f"hci{self.hci_dev}", "con"])
+        if result.returncode != 0:
+            return None
+        for line in result.stdout.splitlines():
+            if self.address.upper() in line.upper():
+                m = re.search(r"handle\s+(\d+)", line)
+                if m:
+                    return int(m.group(1))
+        return None
+
+    def _establish_acl(self) -> bool:
+        """Quick L2CAP SDP probe to establish ACL link."""
+        try:
+            s = socket.socket(AF_BLUETOOTH, socket.SOCK_SEQPACKET, BTPROTO_L2CAP)
+            s.settimeout(5.0)
+            s.connect((self.address, 1))  # SDP PSM
+            s.close()
+            time.sleep(0.5)
+            return True
+        except OSError:
+            return False
+
+    def send(self, data: bytes) -> int:
+        """Send raw ACL data (L2CAP frame) via DarkFirmware.
+
+        The *data* parameter should be a complete L2CAP frame:
+        [length:2B LE] [CID:2B LE] [payload...].
+        """
+        if self._hci_vsc is None or not self._connected:
+            if not self.reconnect():
+                raise ConnectionError("Not connected and reconnect failed")
+        if self._connection_handle is None:
+            error("No ACL handle — cannot send raw ACL")
+            return 0
+        try:
+            ok = self._hci_vsc.send_raw_acl(self._connection_handle, data)
+            if ok:
+                self.stats.bytes_sent += len(data)
+                self.stats.packets_sent += 1
+                return len(data)
+            self.stats.errors += 1
+            return 0
+        except OSError as exc:
+            self.stats.errors += 1
+            error(f"Raw ACL send error: {exc}")
+            return 0
+
+    def recv(self, bufsize: int = 4096, recv_timeout: float | None = None) -> bytes | None:
+        """Receive ACL/LC log events from DarkFirmware hooks."""
+        if self._rx_queue is None or not self._connected:
+            return None
+        timeout = recv_timeout if recv_timeout is not None else self.timeout
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self._rx_queue:
+                log_entry = self._rx_queue.popleft()
+                raw = log_entry.get("raw", b"")
+                if raw:
+                    self.stats.bytes_received += len(raw)
+                    self.stats.packets_received += 1
+                    return raw
+            time.sleep(0.05)
+        return b""
+
+    def close(self) -> None:
+        """Stop monitor and close HCI socket."""
+        info(f"Closing RawACL transport to {self.address}")
+        self._connected = False
+        if self._hci_vsc is not None:
+            try:
+                self._hci_vsc.stop_lmp_monitor()
+                self._hci_vsc.close()
+            except OSError:
+                pass
+            self._hci_vsc = None
+        self._rx_queue = None
+        if self._sock is not None:
+            try:
+                self._sock.close()
+            except OSError:
+                pass
+            self._sock = None
+
+    def is_alive(self) -> bool:
+        """Check ACL connection still exists."""
+        return self._find_acl_handle() is not None
+
+    def __repr__(self) -> str:
+        state = "connected" if self._connected else "disconnected"
+        handle = f" handle=0x{self._connection_handle:04X}" if self._connection_handle else ""
+        return f"<RawACLTransport addr={self.address} hci{self.hci_dev}{handle} {state}>"

@@ -62,6 +62,7 @@ try:
         RFCOMMTransport,
         BLETransport,
         LMPTransport,
+        RawACLTransport,
     )
     _HAS_TRANSPORT = True
 except ImportError:
@@ -145,6 +146,7 @@ PROTOCOL_TRANSPORT_MAP: dict[str, dict[str, Any]] = {
     "ble-att":      {"type": "ble",    "cid": 4},
     "ble-smp":      {"type": "ble",    "cid": 6},
     "lmp":          {"type": "lmp",    "hci_dev": 1},
+    "raw-acl":      {"type": "raw-acl", "hci_dev": 1},
 }
 
 #: Severity classification for crash types.
@@ -719,12 +721,18 @@ class FuzzCampaign:
                 elif ttype == "ble":
                     transports[protocol] = BLETransport(
                         self.target, cid=spec["cid"],
+                        address_type=BLETransport._detect_address_type(self.target),
                     )
                 elif ttype == "lmp":
                     transports[protocol] = LMPTransport(
                         self.target,
                         hci_dev=spec.get("hci_dev", 1),
                         timeout=spec.get("timeout", 5.0),
+                    )
+                elif ttype == "raw-acl":
+                    transports[protocol] = RawACLTransport(
+                        self.target,
+                        hci_dev=spec.get("hci_dev", 1),
                     )
             else:
                 transports[protocol] = _StubTransport(
