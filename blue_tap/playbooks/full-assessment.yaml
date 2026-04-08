@@ -1,0 +1,20 @@
+name: Full Security Assessment
+description: Comprehensive non-destructive assessment with active probing
+duration: ~10 minutes
+risk: low (active probing may be detected)
+
+steps:
+  - command: assess {target} --active -i {hci}
+    description: Full assessment with DarkFirmware active probing
+
+  - command: recon rfcomm-scan {target}
+    description: Scan all 30 RFCOMM channels
+
+  - command: recon l2cap-scan {target}
+    description: Scan L2CAP PSM range
+
+  - command: recon lmp-sniff {target} -d 30 --filter security --hci {hci} -o lmp_capture.json
+    description: Capture LMP security negotiation
+
+  - command: report -o assessment_report.html
+    description: Generate HTML report

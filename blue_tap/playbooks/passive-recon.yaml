@@ -1,0 +1,17 @@
+name: Passive Reconnaissance
+description: Passive-only monitoring (no connections to target)
+duration: ~5 minutes
+risk: none (completely passive)
+
+steps:
+  - command: scan classic -d 20
+    description: Extended Classic BT scan
+
+  - command: scan ble -d 20 --passive
+    description: Passive BLE advertisement scan
+
+  - command: adapter firmware-status
+    description: Check DarkFirmware availability
+
+  - command: report -o passive_recon.html
+    description: Generate recon report

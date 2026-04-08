@@ -1,0 +1,17 @@
+name: Quick Reconnaissance
+description: Fast, non-destructive scan of a Bluetooth target
+duration: ~2 minutes
+risk: none
+
+steps:
+  - command: scan classic -d 10
+    description: Discover nearby Bluetooth Classic devices
+
+  - command: recon fingerprint {target}
+    description: Fingerprint target device (version, features)
+
+  - command: recon sdp {target}
+    description: Enumerate SDP services
+
+  - command: vulnscan {target}
+    description: Run vulnerability assessment

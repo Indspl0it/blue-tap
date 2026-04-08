@@ -1317,7 +1317,8 @@ def _crash_commands(fuzz_group):
             elif ttype == "rfcomm":
                 transport = RFCOMMTransport(target_addr, channel=spec["channel"])
             elif ttype == "ble":
-                transport = BLETransport(target_addr, cid=spec["cid"])
+                transport = BLETransport(target_addr, cid=spec["cid"],
+                                         address_type=BLETransport._detect_address_type(target_addr))
             else:
                 error(f"Unsupported transport type: {ttype}")
                 _cleanup_capture(hci_capture)

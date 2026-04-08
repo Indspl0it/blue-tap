@@ -399,8 +399,10 @@ def register_extra_commands(fuzz_group):
 
             info(f"Generated {len(cases)} ATT fuzz cases")
 
+            addr_type = BLETransport._detect_address_type(address)
+
             def transport_factory(addr):
-                return BLETransport(addr)
+                return BLETransport(addr, address_type=addr_type)
 
             result = _run_fuzz_cases(
                 address, "ble-att", cases, transport_factory,
@@ -466,8 +468,10 @@ def register_extra_commands(fuzz_group):
 
             info(f"Generated {len(cases)} SMP fuzz cases")
 
+            addr_type = BLETransport._detect_address_type(address)
+
             def transport_factory(addr):
-                return BLETransport(addr)
+                return BLETransport(addr, cid=BLETransport.SMP_CID, address_type=addr_type)
 
             result = _run_fuzz_cases(
                 address, "ble-smp", cases, transport_factory,
@@ -876,7 +880,7 @@ def register_extra_commands(fuzz_group):
             elif ttype == "ble":
                 cid = spec.get("cid", 4)
                 def transport_factory(addr):
-                    return BLETransport(addr, cid=cid)
+                    return BLETransport(addr, cid=cid, address_type=BLETransport._detect_address_type(addr))
             else:
                 psm = spec.get("psm", 1)
                 def transport_factory(addr):
@@ -1154,8 +1158,9 @@ def register_extra_commands(fuzz_group):
                 elif ttype == "ble":
                     from blue_tap.fuzz.transport import BLETransport
                     _cid = spec.get("cid", 4)
+                    _addr_type = BLETransport._detect_address_type(target)
                     def transport_factory():
-                        return BLETransport(target, cid=_cid)
+                        return BLETransport(target, cid=_cid, address_type=_addr_type)
                 else:
                     _psm = spec.get("psm", 1)
                     def transport_factory():
