@@ -603,7 +603,21 @@ Campaign results feed directly into the pentest report (`blue-tap report`):
 
 ### 11. Denial of Service
 
-15 protocol-level DoS attacks targeting different layers of the Bluetooth stack.
+Registry-driven DoS testing with a structured runner, transport-aware recovery monitoring, and reportable evidence. Use `dos run` to execute a controlled battery of checks sequentially, or `dos check` to trigger one check manually with explicit parameter overrides.
+
+```bash
+blue-tap dos list                                      # List all registered DoS checks and defaults
+blue-tap dos run <MAC>                                 # Run the default DoS battery sequentially
+blue-tap dos run <MAC> --checks l2cap_storm,sdp_continuation
+blue-tap dos check sdp_des_bomb <MAC> --set depth=150
+blue-tap dos check lmp_invalid_opcode <MAC> -i hci1 --set count=200 --set delay=0.005
+```
+
+`dos run` waits for target recovery after a disruptive check. Recovery probes are selected per check and can use Classic reachability (`l2ping`, remote name) or BLE reachability (ATT reconnect and advertisement reappearance). If the device does not come back within the configured recovery window, Blue-Tap records that in the result set and stops the remaining sequence. Session logs and reports preserve per-check status, evidence, raw result data, recovery timing, and probe strategy.
+
+Coverage reference: see [DoS Guide](./dos-guide.md) for operator workflow and recovery semantics, and [DoS CVE Matrix](./dos-cve-matrix.md) for the registered CVE-backed destructive checks, including which ones need DarkFirmware or a pre-existing bond.
+
+#### Modular Check Families
 
 #### Pairing-Level
 
@@ -634,6 +648,10 @@ blue-tap dos obex-connect-flood <MAC>                  # OBEX session exhaustion
 blue-tap dos hfp-at-flood <MAC>                        # HFP AT command flood (overwhelm AT parser)
 blue-tap dos hfp-slc-confuse <MAC>                     # HFP SLC state machine confusion (out-of-order commands)
 ```
+
+Registered CVE-backed DoS coverage includes BlueBorne BNEP crash probes, SDP continuation exhaustion and race paths, BlueFrag via raw ACL, SweynTooth SMP/ATT destructive checks, AVDTP malformed `SET_CONFIGURATION`, AVRCP event-handler crash probes, and the pairing-gated HFP reconnect race.
+
+These legacy one-off commands remain available, but the modular `dos run` / `dos check` workflow is the preferred path because it emits structured results that the session logger and report generator can parse directly.
 
 ---
 

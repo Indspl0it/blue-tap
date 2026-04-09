@@ -153,8 +153,8 @@ blue-tap -s pentest recon rfcomm-scan AA:BB:CC:DD:EE:FF
 blue-tap -s pentest recon l2cap-scan AA:BB:CC:DD:EE:FF
 blue-tap -s pentest recon gatt AA:BB:CC:DD:EE:FF
 
-# 3. Vulnerability assessment (with active BIAS probe)
-blue-tap -s pentest vulnscan AA:BB:CC:DD:EE:FF --phone CC:DD:EE:FF:00:11
+# 3. Vulnerability assessment
+blue-tap -s pentest vulnscan AA:BB:CC:DD:EE:FF
 
 # 4. Pairing attacks
 blue-tap -s pentest ssp-downgrade probe AA:BB:CC:DD:EE:FF
@@ -172,8 +172,14 @@ blue-tap -s pentest fuzz campaign AA:BB:CC:DD:EE:FF \
   -p sdp -p rfcomm -p obex-pbap --duration 1h --capture
 
 # 8. DoS testing
-blue-tap -s pentest dos l2cap-storm AA:BB:CC:DD:EE:FF
-blue-tap -s pentest dos rfcomm-sabm-flood AA:BB:CC:DD:EE:FF
+blue-tap -s pentest dos run AA:BB:CC:DD:EE:FF --checks l2cap_storm,rfcomm_sabm_flood
+blue-tap -s pentest dos check sdp_des_bomb AA:BB:CC:DD:EE:FF --set depth=150
+
+# Pairing-gated DoS example
+blue-tap -s pentest dos check cve_2025_48593_hfp_reconnect AA:BB:CC:DD:EE:FF --set attempts=20
+
+# Detailed workflow and result semantics
+# See docs/dos-guide.md and docs/dos-cve-matrix.md
 
 # 9. Report
 blue-tap -s pentest report -f html

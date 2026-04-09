@@ -267,6 +267,12 @@ tr:hover td { background: #f8fafc; }
 .status-inconclusive { color: #d97706; font-weight: 600; }
 .status-pairing_required { color: #2563eb; font-weight: 600; }
 .status-not_applicable { color: #64748b; }
+.status-success { color: #16a34a; font-weight: 600; }
+.status-recovered { color: #2563eb; font-weight: 600; }
+.status-unresponsive { color: #dc2626; font-weight: 700; }
+.status-error { color: #dc2626; font-weight: 600; }
+.status-failed { color: #d97706; font-weight: 600; }
+.status-skipped { color: #64748b; }
 .reproduced-yes { color: #16a34a; font-weight: 600; }
 .reproduced-no { color: #dc2626; }
 .tag { display: inline-block; background: #f1f5f9; border: 1px solid #e2e8f0; padding: 2px 10px;
@@ -327,6 +333,7 @@ class ReportGenerator:
         self.recon_results: list[dict] = []
         self.fuzz_results: list = []
         self.dos_results: list = []
+        self.dos_runs: list[dict] = []
         self.fingerprint_results: dict = {}
         self.audio_captures: list[dict] = []
         self.other_data: dict = {}
@@ -389,6 +396,10 @@ class ReportGenerator:
         self.fuzz_results.append(data)
 
     def add_dos_results(self, data: dict):
+        if isinstance(data, dict) and data.get("schema") == "blue_tap.dos.result":
+            self.dos_runs.append(data)
+            self.dos_results.extend(data.get("checks", []))
+            return
         self.dos_results.append(data)
 
     def add_fingerprint(self, data: dict):
@@ -1866,6 +1877,52 @@ class ReportGenerator:
                  'The following tests were conducted across multiple Bluetooth protocol '
                  'layers.</p>')
 
+        if self.dos_runs:
+            latest = self.dos_runs[-1]
+            summary = latest.get("summary", {})
+            s.append('<p><strong>Structured DoS Run Summary:</strong> '
+                     f'total={_esc(str(summary.get("total", 0)))}, '
+                     f'success={_esc(str(summary.get("success", 0)))}, '
+                     f'recovered={_esc(str(summary.get("recovered", 0)))}, '
+                     f'unresponsive={_esc(str(summary.get("unresponsive", 0)))}, '
+                     f'error={_esc(str(summary.get("error", 0)))}</p>')
+            run_meta = []
+            if latest.get("selected_checks"):
+                run_meta.append(f"selected={', '.join(str(x) for x in latest.get('selected_checks', []))}")
+            if latest.get("recovery_timeout") is not None:
+                run_meta.append(f"recovery_timeout={latest.get('recovery_timeout')}s")
+            if latest.get("interrupted_on"):
+                run_meta.append(f"interrupted_on={latest.get('interrupted_on')}")
+            if latest.get("abort_reason"):
+                run_meta.append(f"abort_reason={latest.get('abort_reason')}")
+            if run_meta:
+                s.append(f"<p><strong>Run Metadata:</strong> {_esc(' | '.join(run_meta))}</p>")
+            checks = latest.get("checks", [])
+            if checks:
+                s.append('<h3>DoS Check Execution</h3>')
+                s.append('<table><tr><th>Check ID</th><th>Check</th><th>CVE</th><th>Protocol</th><th>Pairing</th><th>Status</th><th>Recovery</th><th>Evidence</th></tr>')
+                for check in checks:
+                    recovery = check.get("recovery", {})
+                    recovery_text = ""
+                    if recovery:
+                        recovery_text = (
+                            f"recovered={recovery.get('recovered')} "
+                            f"waited={recovery.get('waited_seconds', 0)}s"
+                        )
+                        if recovery.get("probe_strategy"):
+                            recovery_text += f" via {','.join(str(x) for x in recovery.get('probe_strategy', []))}"
+                    s.append(
+                        f'<tr><td>{_esc(check.get("check_id", ""))}</td>'
+                        f'<td>{_esc(check.get("title", ""))}</td>'
+                        f'<td>{_esc(", ".join(str(x) for x in check.get("cves", [])))}</td>'
+                        f'<td>{_esc(check.get("protocol", ""))}</td>'
+                        f'<td>{_esc("yes" if check.get("requires_pairing") else "no")}</td>'
+                        f'<td class="status-{_esc(check.get("status", "unknown"))}">{_esc(check.get("status", "unknown"))}</td>'
+                        f'<td>{_esc(recovery_text)}</td>'
+                        f'<td>{_esc(check.get("evidence", ""))}</td></tr>'
+                    )
+                s.append('</table>')
+
         # Group results by protocol layer
         layer_keywords = {
             "L2CAP": ["l2cap", "l2ping", "cid_exhaust", "connection_storm", "data_flood", "echo"],
@@ -1873,6 +1930,10 @@ class ReportGenerator:
             "RFCOMM": ["rfcomm", "sabm", "mux_command", "credit_exhaust", "dlci"],
             "OBEX": ["obex", "setpath", "connect_flood"],
             "HFP": ["hfp", "at_command", "slc_", "handsfree", "hands-free"],
+            "AVDTP": ["avdtp", "a2dp", "setconf"],
+            "AVRCP": ["avrcp", "avctp", "register_notification"],
+            "BLE": ["ble", "att", "smp", "eatt", "sweyntooth"],
+            "Raw ACL": ["raw_acl", "bluefrag"],
             "Pairing": ["pair", "ssp", "pin", "auth", "name_flood", "rate_test"],
         }
         grouped: dict[str, list[dict]] = {}
@@ -1881,9 +1942,21 @@ class ReportGenerator:
             if not isinstance(data, dict):
                 grouped.setdefault("Other", []).append(data)
                 continue
-            test_name = str(data.get("attack", data.get("test", data.get("command",
-                           data.get("attack_name",
-                           entry.get("source", "") if isinstance(entry, dict) else ""))))).lower()
+            if "check_id" in data and "raw_result" in data:
+                raw = data.get("raw_result", {})
+                test_name = " ".join(
+                    str(part) for part in (
+                        data.get("protocol", ""),
+                        data.get("check_id", ""),
+                        data.get("title", ""),
+                        raw.get("attack", ""),
+                        raw.get("attack_name", ""),
+                    ) if part
+                ).lower()
+            else:
+                test_name = str(data.get("attack", data.get("test", data.get("command",
+                               data.get("attack_name",
+                               entry.get("source", "") if isinstance(entry, dict) else ""))))).lower()
             placed = False
             for layer, keywords in layer_keywords.items():
                 if any(kw in test_name for kw in keywords):
@@ -1906,8 +1979,19 @@ class ReportGenerator:
                              f'{_esc(json.dumps(data, indent=2, default=str)[:500])}'
                              f'</pre></td></tr>')
                     continue
-                result_str = str(data.get("result", data.get("status", "unknown")))
-                impact_str = str(data.get("impact", data.get("effect", "")))
+                if "check_id" in data and "raw_result" in data:
+                    raw = data.get("raw_result", {})
+                    result_str = str(data.get("status", "unknown"))
+                    impact_str = str(raw.get("notes", raw.get("error", data.get("evidence", ""))))
+                    packets_sent = raw.get("packets_sent", raw.get("packets", "N/A"))
+                    duration = raw.get("duration", raw.get("duration_seconds", "N/A"))
+                    test_name = data.get("title", data.get("check_id", "dos"))
+                else:
+                    result_str = str(data.get("result", data.get("status", "unknown")))
+                    impact_str = str(data.get("impact", data.get("effect", "")))
+                    packets_sent = data.get("packets_sent", data.get("packets", "N/A"))
+                    duration = data.get("duration", data.get("duration_seconds", "N/A"))
+                    test_name = str(data.get("attack", data.get("test", data.get("command", data.get("attack_name", "dos")))))
                 is_unresponsive = any(
                     kw in (result_str + impact_str).lower()
                     for kw in ("unresponsive", "crash", "timeout", "reboot",
@@ -1915,10 +1999,10 @@ class ReportGenerator:
                 if is_unresponsive:
                     unresponsive_count += 1
                 s.append(
-                    f'<tr><td>{_esc(str(data.get("attack", data.get("test", data.get("command", data.get("attack_name", "dos"))))))}</td>'
-                    f'<td class="mono">{_esc(str(data.get("target", "")))}</td>'
-                    f'<td>{_esc(str(data.get("duration", data.get("duration_seconds", "N/A"))))}</td>'
-                    f'<td>{_esc(str(data.get("packets_sent", data.get("packets", "N/A"))))}</td>'
+                    f'<tr><td>{_esc(test_name)}</td>'
+                    f'<td class="mono">{_esc(str(data.get("target", raw.get("target", "")) if "check_id" in data and "raw_result" in data else data.get("target", "")))}</td>'
+                    f'<td>{_esc(str(duration))}</td>'
+                    f'<td>{_esc(str(packets_sent))}</td>'
                     f'<td>{_esc(result_str)}</td>'
                     f'<td>{_esc(impact_str)}</td></tr>'
                 )
@@ -2217,6 +2301,7 @@ class ReportGenerator:
             "attack_results": self.attack_results,
             "recon_results": self.recon_results,
             "fuzzing": fuzz_data if fuzz_data else self.fuzz_results,
+            "dos_runs": self.dos_runs,
             "fuzzing_intelligence": {
                 "state_coverage": self._fuzz_state_coverage,
                 "field_weights": self._fuzz_field_weights,

@@ -2904,6 +2904,114 @@ def dos():
     """DoS attacks and pairing abuse."""
 
 
+def _parse_key_value_overrides(pairs: tuple[str, ...]) -> dict[str, str | int | float | bool]:
+    """Parse repeated key=value CLI options into a typed dict."""
+    parsed: dict[str, str | int | float | bool] = {}
+    for pair in pairs:
+        if "=" not in pair:
+            raise click.BadParameter(f"Invalid override '{pair}'. Expected key=value.")
+        key, raw_value = pair.split("=", 1)
+        key = key.strip()
+        value = raw_value.strip()
+        if not key:
+            raise click.BadParameter(f"Invalid override '{pair}'. Missing key.")
+        lowered = value.lower()
+        if lowered in {"true", "false"}:
+            parsed[key] = lowered == "true"
+            continue
+        try:
+            if "." in value:
+                parsed[key] = float(value)
+            else:
+                parsed[key] = int(value)
+            continue
+        except ValueError:
+            parsed[key] = value
+    return parsed
+
+
+@dos.command("list")
+def dos_list():
+    """List modular DoS checks available to the DoS runner."""
+    from blue_tap.attack.dos_runner import list_dos_checks
+
+    checks = list_dos_checks()
+    table = Table(title="DoS Check Registry")
+    table.add_column("Check ID", style="bold cyan")
+    table.add_column("CVE", style="yellow")
+    table.add_column("Protocol", style="magenta")
+    table.add_column("DarkFirmware", style="yellow")
+    table.add_column("Pairing", style="yellow")
+    table.add_column("Recovery Probes", style="green")
+    table.add_column("Default Params", style="dim")
+    table.add_column("Description", style="white")
+
+    for check in checks:
+        table.add_row(
+            check["check_id"],
+            ",".join(check.get("cves", [])),
+            check["protocol"],
+            "yes" if check["requires_darkfirmware"] else "no",
+            "yes" if check.get("requires_pairing") else "no",
+            ",".join(check.get("recovery_probes", [])),
+            json.dumps(check["default_params"], sort_keys=True),
+            check["description"],
+        )
+    console.print(table)
+
+
+@dos.command("run")
+@click.argument("address", required=False, default=None)
+@click.option("-i", "--hci", default="hci0", help="HCI adapter")
+@click.option("--checks", default="", help="Comma-separated check ids to run (default: all)")
+@click.option("--recovery-timeout", default=180, type=int, help="Seconds to wait for target recovery after an unresponsive result")
+def dos_run(address, hci, checks, recovery_timeout):
+    """Run the modular DoS battery sequentially with recovery monitoring."""
+    address = resolve_address(address)
+    if not address:
+        return
+    from blue_tap.attack.dos_runner import run_dos_checks
+    from blue_tap.attack.dos_framework import summarize_dos_checks
+    from blue_tap.utils.session import log_command
+
+    selected = [item.strip() for item in checks.split(",") if item.strip()] or None
+    info(f"Running DoS battery against [bold]{address}[/bold] via {hci}")
+    result = run_dos_checks(address, hci=hci, check_ids=selected, recovery_timeout=recovery_timeout)
+    summary = summarize_dos_checks(result.get("checks", []))
+    success(
+        f"DoS battery complete: {summary['total']} check(s), "
+        f"{summary['success']} success, {summary['recovered']} recovered, "
+        f"{summary['unresponsive']} unresponsive, {summary['error']} error"
+    )
+    log_command("dos_run", result, category="dos", target=address)
+
+
+@dos.command("check")
+@click.argument("check_id")
+@click.argument("address", required=False, default=None)
+@click.option("-i", "--hci", default="hci0", help="HCI adapter")
+@click.option("--set", "overrides", multiple=True, help="Override a default param with key=value (repeatable)")
+@click.option("--recovery-timeout", default=180, type=int, help="Seconds to wait for target recovery after an unresponsive result")
+def dos_check(check_id, address, hci, overrides, recovery_timeout):
+    """Run a single modular DoS check with optional parameter overrides."""
+    address = resolve_address(address)
+    if not address:
+        return
+    from blue_tap.attack.dos_runner import run_dos_checks
+    from blue_tap.utils.session import log_command
+
+    params = _parse_key_value_overrides(overrides)
+    info(f"Running DoS check [bold]{check_id}[/bold] against [bold]{address}[/bold]")
+    result = run_dos_checks(
+        address,
+        hci=hci,
+        check_ids=[check_id],
+        param_overrides={check_id: params},
+        recovery_timeout=recovery_timeout,
+    )
+    log_command(f"dos_check_{check_id}", result, category="dos", target=address)
+
+
 @dos.command("pair-flood")
 @click.argument("address", required=False, default=None)
 @click.option("--count", default=50, help="Number of pairing attempts")

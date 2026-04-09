@@ -198,7 +198,7 @@ Full command reference and examples: **[docs/features.md](docs/features.md)**
 - **Audio Interception** — HFP call capture/injection/DTMF, A2DP media stream capture, mic eavesdropping, audio playback injection
 - **AVRCP Media Control** — Play/pause/skip/volume, volume ramp, skip flood DoS, metadata surveillance
 - **Protocol Fuzzing** — 12 protocols, 4 strategies, 6-layer intelligence, live dashboard, crash DB + minimization, PCAP replay, CVE reproduction
-- **Denial of Service** — 15 protocol-level attacks: pairing flood, L2CAP storm/CID exhaust, SDP continuation/DES bomb, RFCOMM SABM flood, HFP AT flood
+- **Denial of Service** — Modular registry-driven DoS runner with sequential execution, transport-aware recovery monitoring for Classic and BLE targets, per-check structured evidence, and manual single-check invocation via `dos run` / `dos check`
 - **MAC Spoofing and Adapter Management** — 3 spoofing methods with fallback, full identity clone, persistent save/restore, adapter info/up/down/reset
 - **Session Management and Reporting** — Auto-logging sessions, HTML/JSON reports with executive summary, SVG charts, crash hexdumps, fuzzing intelligence
 - **DarkFirmware and Below-HCI Attacks** — RTL8761B LMP injection/monitoring, connection table inspection, in-flight LMP modification (6 modes), raw ACL injection, USB watchdog
@@ -274,6 +274,8 @@ sudo blue-tap vulnscan <MAC>        # Run vulnerability checks
 
 - **[Features](docs/features.md)** — Every command, option, and example for all feature categories
 - **[Vulnscan CVE Matrix](docs/vulnscan-cve-matrix.md)** — Exact CVEs checked by `blue-tap vulnscan`
+- **[DoS Guide](docs/dos-guide.md)** — DoS workflow, recovery model, pairing constraints, and reporting format
+- **[DoS CVE Matrix](docs/dos-cve-matrix.md)** — Exact CVE-backed destructive checks registered in `blue-tap dos`
 - **[Usage Guide](docs/usage-guide.md)** — Global options, command reference, and 9 complete pentest workflows
 - **[Troubleshooting](docs/troubleshooting.md)** — Adapter, scanning, connection, SDP, fuzzing, audio, MAC spoofing, and report issues
 - **[IVI Simulator and Demo](docs/ivi-simulator.md)** — Vulnerable IVI simulator setup, exposed services, built-in vulnerabilities, demo mode
