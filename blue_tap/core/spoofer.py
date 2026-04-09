@@ -201,6 +201,7 @@ def spoof_btmgmt(hci: str, target_mac: str) -> bool:
         return False
 
     # Try public-addr first (changes BD_ADDR for BR/EDR + BLE public)
+    public_failed = True
     try:
         result = run_cmd(["sudo", "btmgmt", "--index", idx, "public-addr", target_mac])
         combined = (result.stdout + result.stderr).lower()
@@ -212,6 +213,8 @@ def spoof_btmgmt(hci: str, target_mac: str) -> bool:
             # hciconfig. It won't help for BR/EDR spoofing so skip it to avoid
             # false hope.
             info("static-addr only affects BLE random address, skipping for BR/EDR spoof")
+    except Exception as exc:
+        warning(f"btmgmt public-addr call failed: {exc}")
     finally:
         # Power back on — always runs even if public-addr fails
         import time
