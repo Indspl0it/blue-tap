@@ -5,6 +5,125 @@ All notable changes to Blue-Tap are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.2] - 2026-04-09
+
+### Added — Structured Vulnerability Scanner Framework
+
+This release turns `vulnscan` into the single end-to-end vulnerability assessment entry point, adds modular OTA CVE detection coverage, and extends the report pipeline to preserve per-check execution evidence for both CVE and non-CVE checks.
+
+#### CVE Detection Framework
+
+- **Shared CVE result framework** (`attack/cve_framework.py`) — centralized finding builder, status constants, per-check summary helpers, structured `CveCheck` / `CveSection` metadata, and vulnscan result envelope generation
+- **Structured vulnscan envelope** — `blue_tap.vulnscan.result` now carries scanner metadata, finding summaries, CVE execution logs, and non-CVE execution logs for report generation and downstream parsing
+- **Per-check execution logging** — scanner records primary status, finding count, status counts, and evidence samples for each check instead of only emitting a flat findings list
+
+#### Modular OTA CVE Probe Coverage
+
+- **Airoha RACE checks** (`attack/cve_checks_airoha.py`) — OTA detection for:
+  - `CVE-2025-20700` unauthenticated RACE over GATT
+  - `CVE-2025-20701` unauthenticated RACE over BR/EDR
+  - `CVE-2025-20702` link-key disclosure over confirmed RACE transport
+- **AVRCP checks** (`attack/cve_checks_avrcp.py`) — OTA behavioral probes for:
+  - `CVE-2021-0507`
+  - `CVE-2022-39176`
+- **BNEP checks** (`attack/cve_checks_bnep.py`) — OTA probes for:
+  - `CVE-2017-0783`
+  - `CVE-2017-13258`
+  - `CVE-2017-13260`
+  - `CVE-2017-13261`
+  - `CVE-2017-13262`
+- **BLE SMP checks** (`attack/cve_checks_ble_smp.py`) — pairing-aware OTA checks for:
+  - `CVE-2024-34722`
+  - `CVE-2018-9365`
+- **GATT / ATT checks** (`attack/cve_checks_gatt.py`) — OTA differential checks for:
+  - `CVE-2022-0204`
+  - `CVE-2023-35681`
+- **HID / HOGP checks** (`attack/cve_checks_hid.py`) — OTA checks for:
+  - `CVE-2020-0556`
+  - `CVE-2023-45866`
+- **L2CAP checks** (`attack/cve_checks_l2cap.py`) — OTA differential checks for:
+  - `CVE-2019-3459`
+  - `CVE-2018-9359`
+  - `CVE-2018-9360`
+  - `CVE-2018-9361`
+  - `CVE-2020-12352`
+  - `CVE-2022-42896`
+  - `CVE-2022-20345`
+  - `CVE-2022-42895`
+  - `CVE-2026-23395`
+- **BR/EDR pairing checks** (`attack/cve_checks_pairing.py`) — pairing-driven probes for:
+  - `CVE-2020-26558`
+  - `CVE-2022-25837`
+  - `CVE-2019-2225`
+- **Raw ACL check** (`attack/cve_checks_raw_acl.py`) — DarkFirmware-backed BlueFrag boundary probe for `CVE-2020-0022`
+- **SDP continuation check** (`attack/cve_checks_sdp.py`) — OTA continuation-state replay probe for `CVE-2017-0785`
+
+#### Non-CVE Modular Scanner Coverage
+
+- **RFCOMM / OBEX non-CVE module** (`attack/non_cve_checks_rfcomm.py`) with structured checks for:
+  - sensitive RFCOMM profile reachability
+  - hidden RFCOMM channels
+  - low-security RFCOMM acceptance
+  - OBEX authorization posture
+  - automotive diagnostics and serial responder detection
+- **BLE non-CVE module** (`attack/non_cve_checks_ble.py`) with structured checks for:
+  - writable GATT surface classification
+  - sensitive writable BLE control/DFU/debug surfaces
+  - EATT capability posture
+  - pairing-method posture with IO-capability context
+- **Security-posture module** (`attack/non_cve_checks_posture.py`) with structured checks for:
+  - legacy PIN lockout / throttling behavior
+  - device-class posture and corroboration
+  - LMP feature posture and prerequisites
+
+#### Reporting and Documentation
+
+- **Dedicated vulnscan matrix** (`docs/vulnscan-cve-matrix.md`) listing the CVEs actually checked by `blue-tap vulnscan` plus the modular non-CVE checks that are part of the same scan path
+- **HTML report enhancement** — report generator now renders:
+  - `Non-CVE Check Execution` table
+  - `CVE Check Execution` table
+  - richer finding metadata from the structured vulnscan envelope
+- **JSON report enhancement** — exported vulnerability report data now preserves structured vulnscan runs instead of flattening everything into findings only
+
+### Changed
+
+- **`vulnscan` command model** — `blue-tap vulnscan` now runs the full scanner in one invocation; `--active` is no longer required to enable the main vulnerability-scan path
+- **BIAS input handling** — `--phone` remains available as optional paired-phone context for the BIAS auto-reconnect probe instead of serving as a gate for the entire scanner
+- **Non-CVE finding semantics** — exposure and posture checks now distinguish:
+  - reachable transport vs actual unauthenticated data access
+  - protocol capability vs security weakness
+  - naming hints vs confirmed diagnostic / control responders
+- **Writable GATT analysis** — scanner now separates generic writable characteristics from sensitive writable surfaces such as control, DFU, debug, pairing, or HID report paths
+- **EATT reporting** — EATT is now treated as protocol capability / posture instead of being implicitly framed as a weakness
+- **PIN lockout analysis** — lockout logic now uses stronger retry sampling and timing interpretation instead of a minimal fast/slow split
+- **Device class and LMP feature reporting** — these checks now serve as scanner posture/context signals rather than overstating every capability bit as a vulnerability finding
+- **Public docs** — README, features guide, usage guide, and playbooks now describe `vulnscan` as the primary assessment path and document the current structured report model
+
+### Fixed
+
+- **Airoha false positives** — GATT RACE detection no longer treats a writable characteristic alone as `CVE-2025-20700` confirmation; detection now requires a valid unauthenticated RACE response
+- **Airoha RFCOMM overclaim** — BR/EDR RACE detection no longer guesses RFCOMM channel 1 or treats generic HFP openness as confirmed `CVE-2025-20701`
+- **Airoha link-key confirmation** — `CVE-2025-20702` now chains from confirmed RACE transport and structured response parsing instead of standalone assumptions
+- **L2CAP patched-response handling** — `CVE-2022-20345` now accepts documented patched reject outcomes instead of flagging them as vulnerable
+- **L2CAP duplicate-identifier logic** — `CVE-2026-23395` now evaluates the second duplicate response instead of treating any two responses as a hit
+- **LE credit-based response parsing** — corrected response-field parsing in both `CVE-2022-42896` and `CVE-2023-35681` checks
+- **Off-by-one L2CAP response guard** — corrected the length guard in `cve_checks_l2cap.py` so result-code parsing requires a full 12-byte buffer
+- **Pairing CVE overclaims** — `CVE-2019-2225` and `CVE-2022-25837` no longer overclaim confirmation from weak evidence paths
+- **BlueFrag confirmation heuristic** — raw ACL BlueFrag probe no longer confirms from arbitrary response bytes; it now stays conservative unless the boundary probe produces defensible evidence
+- **Android GATT CVE overclaims** — removed incomplete scanner coverage for:
+  - `CVE-2023-40129`
+  - `CVE-2024-0039`
+  - `CVE-2024-49748`
+  because the required target-specific trigger construction was not robust enough for scanner-grade confirmation
+- **Parallel active-probe nondeterminism** — L2CAP/CVE active probes are no longer treated as loosely parallelized behavior; the scanner executes transport-mutating checks in a more deterministic sequence
+- **Report/rendering mismatch** — report generation now understands the structured vulnscan envelope and newer finding statuses instead of assuming a legacy flat findings list
+
+### Removed
+
+- **Top-level `assess` command** — removed the redundant “assessment without exploitation” wrapper; `vulnscan` is now the single CLI entry point for vulnerability scanning
+- **`vulnscan --active` public workflow** — documentation and CLI help no longer advertise a split scanner mode
+- **Stale assess-based playbooks and docs** — playbooks, README, and feature docs no longer route users through a separate `assess` workflow for vulnerability scanning
+
 ## [2.3.1] - 2026-04-08
 
 ### Added — Deep DarkFirmware Integration

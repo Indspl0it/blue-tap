@@ -7,8 +7,8 @@ requires:
   - Phone MAC address (--phone)
 
 steps:
-  - command: assess {target} --active -i {hci}
-    description: Initial assessment
+  - command: vulnscan {target} -i {hci}
+    description: Initial vulnerability scan
 
   - command: adapter firmware-set lmp-size 17
     description: Unlock full LMP PDU injection

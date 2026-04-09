@@ -388,10 +388,13 @@ def vuln_table(findings: list[dict], title: str = "Vulnerability Findings") -> T
         "confirmed": f"bold {GREEN}",
         "potential": YELLOW,
         "unverified": DIM,
+        "not_applicable": DIM,
+        "inconclusive": YELLOW,
+        "pairing_required": BLUE,
     }
     table.add_column("#", style=DIM, width=4, justify="right")
     table.add_column("Severity", width=10)
-    table.add_column("Status", width=12)
+    table.add_column("Status", width=18)
     table.add_column("Name", style="bold white")
     table.add_column("CVE", style=YELLOW)
     table.add_column("Description", max_width=45)

@@ -21,7 +21,7 @@ click.rich_click.STYLE_COMMAND = "bold"
 # Command grouping — pentest flow order
 click.rich_click.COMMAND_GROUPS = {
     "python -m blue_tap.cli": [
-        {"name": "Assessment", "commands": ["assess", "vulnscan", "fleet"]},
+        {"name": "Assessment", "commands": ["vulnscan", "fleet"]},
         {"name": "Discovery & Reconnaissance", "commands": ["scan", "recon", "adapter"]},
         {"name": "Exploitation", "commands": ["hijack", "bias", "knob", "bluffs", "encryption-downgrade", "ssp-downgrade", "spoof"]},
         {"name": "Data Extraction & Audio", "commands": ["pbap", "map", "at", "opp", "hfp", "audio", "avrcp"]},
@@ -256,296 +256,6 @@ def _startup_hardware_check() -> None:
     # Step 4: Start watchdog for USB reset/replug recovery
     watchdog = DarkFirmwareWatchdog(dongle_hci, poll_interval=30.0)
     watchdog.start()
-
-
-# ============================================================================
-# ASSESS - Safe Non-Destructive Security Assessment
-# ============================================================================
-@main.command("assess")
-@click.argument("target")
-@click.option("-i", "--hci", default="hci0", help="HCI adapter")
-@click.option("-o", "--output", default=None, help="Save assessment to JSON file")
-@click.option("--active", is_flag=True, help="Enable active LMP probing (requires DarkFirmware)")
-def assess_target(target, hci, output, active):
-    """Safe, non-destructive security assessment of a Bluetooth target.
-
-    \b
-    Runs fingerprinting, service enumeration, and vulnerability scanning
-    WITHOUT exploitation. Shows a clear summary with recommended next steps.
-
-    \b
-    Phases:
-      1. Fingerprint — BT version, chipset, LMP features
-      2. Service discovery — SDP browse, RFCOMM/L2CAP scan
-      3. Vulnerability scan — 20+ CVE checks
-      4. DarkFirmware probe — active LMP feature/version check (if --active)
-      5. Summary — findings table + recommended attack commands
-
-    \b
-    Examples:
-      blue-tap assess AA:BB:CC:DD:EE:FF
-      blue-tap assess AA:BB:CC:DD:EE:FF --active -i hci1
-      blue-tap assess AA:BB:CC:DD:EE:FF -o assessment.json
-    """
-    import time as _time
-
-    from blue_tap.utils.bt_helpers import normalize_mac
-    from blue_tap.utils.session import log_command
-
-    target = normalize_mac(target)
-    results: dict = {"target": target, "hci": hci, "phases": {}}
-    total_start = _time.time()
-
-    # ── Phase 1: Fingerprint ──────────────────────────────────────────
-    info(f"[Assess] Phase 1/5: Fingerprinting [bold]{target}[/bold]...")
-    phase_start = _time.time()
-    fp = {}
-    try:
-        from blue_tap.recon.fingerprint import fingerprint_device
-        fp = fingerprint_device(target, hci)
-        elapsed = _time.time() - phase_start
-        results["phases"]["fingerprint"] = {**fp, "_elapsed_seconds": round(elapsed, 1)}
-        bt_ver = fp.get("bt_version") or "unknown"
-        manufacturer = fp.get("manufacturer") or "unknown"
-        lmp_ver = fp.get("lmp_version") or "unknown"
-        name = fp.get("name") or "unknown"
-        info(f"[Assess] Phase 1 complete ({elapsed:.1f}s) - "
-             f"{name}, BT {bt_ver}, {manufacturer}, LMP {lmp_ver}")
-    except Exception as exc:
-        elapsed = _time.time() - phase_start
-        warning(f"[Assess] Phase 1 failed ({elapsed:.1f}s): {exc}")
-        results["phases"]["fingerprint"] = {"status": "failed", "error": str(exc),
-                                            "_elapsed_seconds": round(elapsed, 1)}
-
-    # ── Phase 2: Service Discovery ────────────────────────────────────
-    info(f"[Assess] Phase 2/5: Discovering services on [bold]{target}[/bold]...")
-    phase_start = _time.time()
-    services: list[dict] = []
-    rfcomm_channels: list[dict] = []
-    try:
-        from blue_tap.recon.sdp import browse_services
-        services = browse_services(target, hci=hci)
-
-        from blue_tap.recon.rfcomm_scan import RFCOMMScanner
-        scanner = RFCOMMScanner(target)
-        rfcomm_channels = scanner.scan_all_channels(hci=hci)
-
-        open_channels = [ch for ch in rfcomm_channels if ch.get("status") == "open"]
-        elapsed = _time.time() - phase_start
-        results["phases"]["services"] = {
-            "sdp_services": services,
-            "rfcomm_channels": rfcomm_channels,
-            "_elapsed_seconds": round(elapsed, 1),
-        }
-        info(f"[Assess] Phase 2 complete ({elapsed:.1f}s) - "
-             f"{len(services)} SDP services, {len(open_channels)} open RFCOMM channels")
-
-        # Display services table
-        if services:
-            svc_table = Table(title="[bold cyan]Discovered Services[/bold cyan]",
-                              show_lines=False, border_style="dim")
-            svc_table.add_column("#", style="dim", width=4, justify="right")
-            svc_table.add_column("Service", style="bold white")
-            svc_table.add_column("Channel/PSM", style="cyan")
-            svc_table.add_column("Protocol", style="dim")
-            for idx, svc in enumerate(services, 1):
-                svc_name = svc.get("name", svc.get("service", "Unknown"))
-                channel = str(svc.get("channel", svc.get("psm", "")))
-                protocol = svc.get("protocol", "")
-                svc_table.add_row(str(idx), svc_name, channel, protocol)
-            console.print(svc_table)
-    except Exception as exc:
-        elapsed = _time.time() - phase_start
-        warning(f"[Assess] Phase 2 failed ({elapsed:.1f}s): {exc}")
-        results["phases"]["services"] = {"status": "failed", "error": str(exc),
-                                         "_elapsed_seconds": round(elapsed, 1)}
-
-    # ── Phase 3: Vulnerability Scan ───────────────────────────────────
-    info(f"[Assess] Phase 3/5: Scanning for vulnerabilities on [bold]{target}[/bold]...")
-    phase_start = _time.time()
-    findings: list[dict] = []
-    try:
-        from blue_tap.attack.vuln_scanner import scan_vulnerabilities
-        findings = scan_vulnerabilities(target, hci=hci, active=active)
-        elapsed = _time.time() - phase_start
-        results["phases"]["vulnscan"] = {
-            "findings": findings,
-            "_elapsed_seconds": round(elapsed, 1),
-        }
-
-        sev_counts: dict[str, int] = {}
-        for f in findings:
-            sev = f.get("severity", "info").upper()
-            sev_counts[sev] = sev_counts.get(sev, 0) + 1
-        sev_summary = ", ".join(f"{c} {s}" for s, c in sorted(sev_counts.items()))
-        info(f"[Assess] Phase 3 complete ({elapsed:.1f}s) - "
-             f"{len(findings)} findings ({sev_summary})")
-
-        # Display findings table using the standard vuln_table helper
-        if findings:
-            from blue_tap.utils.output import vuln_table
-            console.print(vuln_table(findings, title="Assessment Findings"))
-    except Exception as exc:
-        elapsed = _time.time() - phase_start
-        warning(f"[Assess] Phase 3 failed ({elapsed:.1f}s): {exc}")
-        results["phases"]["vulnscan"] = {"status": "failed", "error": str(exc),
-                                         "_elapsed_seconds": round(elapsed, 1)}
-
-    # ── Phase 4: DarkFirmware Active LMP Probing (optional) ──────────
-    lmp_features_result = None
-    lmp_version_result = None
-    if active:
-        info(f"[Assess] Phase 4/5: Active LMP probing via DarkFirmware on [bold]{target}[/bold]...")
-        phase_start = _time.time()
-        try:
-            from blue_tap.attack.vuln_scanner import _probe_lmp_features, _probe_lmp_version
-            lmp_features_result = _probe_lmp_features(target, hci)
-            lmp_version_result = _probe_lmp_version(target, hci)
-            elapsed = _time.time() - phase_start
-            results["phases"]["darkfirmware_probe"] = {
-                "lmp_features": lmp_features_result,
-                "lmp_version": lmp_version_result,
-                "_elapsed_seconds": round(elapsed, 1),
-            }
-
-            if lmp_features_result or lmp_version_result:
-                probe_table = Table(title="[bold cyan]DarkFirmware LMP Probe Results[/bold cyan]",
-                                    show_lines=False, border_style="dim")
-                probe_table.add_column("Property", style="bold white")
-                probe_table.add_column("Value", style="cyan")
-                if lmp_version_result:
-                    probe_table.add_row("LMP Version",
-                                        str(lmp_version_result.get("lmp_version", "N/A")))
-                    probe_table.add_row("Company ID",
-                                        str(lmp_version_result.get("company_id", "N/A")))
-                    probe_table.add_row("Sub-version",
-                                        str(lmp_version_result.get("sub_version", "N/A")))
-                if lmp_features_result:
-                    features = lmp_features_result.get("features", {})
-                    probe_table.add_row("Feature Bitmap",
-                                        lmp_features_result.get("raw_bitmap", "N/A"))
-                    probe_table.add_row("Encryption Support",
-                                        str(features.get("encryption", "N/A")))
-                    probe_table.add_row("Secure Connections",
-                                        str(features.get("secure_connections", "N/A")))
-                console.print(probe_table)
-
-            info(f"[Assess] Phase 4 complete ({elapsed:.1f}s)")
-        except Exception as exc:
-            elapsed = _time.time() - phase_start
-            warning(f"[Assess] Phase 4 failed ({elapsed:.1f}s): {exc}")
-            results["phases"]["darkfirmware_probe"] = {
-                "status": "failed", "error": str(exc),
-                "_elapsed_seconds": round(elapsed, 1),
-            }
-    else:
-        info("[Assess] Phase 4/5: Skipped (use --active for DarkFirmware LMP probing)")
-
-    # ── Phase 5: Summary & Recommendations ────────────────────────────
-    info(f"[Assess] Phase 5/5: Generating assessment summary...")
-    total_elapsed = _time.time() - total_start
-
-    # Build severity counts
-    sev_counts_final: dict[str, int] = {}
-    for f in findings:
-        sev = f.get("severity", "info").upper()
-        sev_counts_final[sev] = sev_counts_final.get(sev, 0) + 1
-
-    bt_ver_display = fp.get("bt_version", "unknown") if fp else "unknown"
-    manufacturer_display = fp.get("manufacturer", "unknown") if fp else "unknown"
-    sev_line_parts = []
-    for sev_name in ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"):
-        count = sev_counts_final.get(sev_name, 0)
-        if count > 0:
-            sev_line_parts.append(f"{count} {sev_name}")
-    sev_line = ", ".join(sev_line_parts) if sev_line_parts else "none"
-
-    # Security-relevant services
-    security_profiles = {"PBAP", "MAP", "OPP", "SPP", "DUN", "HFP", "HFP AG"}
-    sec_relevant = [s for s in services
-                    if any(p in s.get("name", s.get("service", ""))
-                           for p in security_profiles)]
-
-    summary_items = {
-        "Target": target,
-        "BT Version": str(bt_ver_display),
-        "Manufacturer": str(manufacturer_display),
-        "Services": f"{len(services)} found ({len(sec_relevant)} security-relevant)",
-        "Findings": sev_line,
-        "Total Time": f"{total_elapsed:.1f}s",
-    }
-    summary_panel("Assessment Summary", summary_items, style="cyan")
-
-    # Recommended next steps — actionable commands for high/medium findings
-    high_medium = [f for f in findings
-                   if f.get("severity", "").lower() in ("critical", "high", "medium")]
-    if high_medium:
-        console.print()
-        console.print("[bold cyan]Recommended next steps:[/bold cyan]")
-        _sev_styles = {
-            "critical": "bold red",
-            "high": "red",
-            "medium": "yellow",
-        }
-        for finding in high_medium:
-            sev = finding.get("severity", "").lower()
-            name = finding.get("name", "Unknown")
-            style = _sev_styles.get(sev, "dim")
-            sev_label = sev.upper()
-
-            # Map finding names to recommended commands
-            cmd_suggestion = _suggest_command(name, target, hci)
-            console.print(f"  [{style}]{sev_label:<8}[/{style}] {name}")
-            if cmd_suggestion:
-                console.print(f"           [dim]-> {cmd_suggestion}[/dim]")
-    elif findings:
-        info("[Assess] No critical/high/medium findings - target looks reasonably hardened")
-    else:
-        info("[Assess] No vulnerability findings generated")
-
-    info(f"[Assess] Assessment complete in {total_elapsed:.1f}s")
-
-    # Save results
-    results["summary"] = summary_items
-    results["_total_elapsed_seconds"] = round(total_elapsed, 1)
-    log_command("assess", results, category="vuln", target=target)
-
-    if output:
-        _save_json(results, output)
-
-
-def _suggest_command(finding_name: str, target: str, hci: str) -> str:
-    """Map a vulnerability finding name to a recommended blue-tap command."""
-    name_lower = finding_name.lower()
-    if "knob" in name_lower:
-        return f"blue-tap knob probe {target} -i {hci}"
-    if "bluffs" in name_lower:
-        return f"blue-tap bluffs {target} --variant probe -i {hci}"
-    if "bias" in name_lower:
-        return f"blue-tap bias {target} -i {hci}"
-    if "ssp" in name_lower or "pairing" in name_lower:
-        return f"blue-tap ssp-downgrade {target} -i {hci}"
-    if "encryption" in name_lower:
-        return f"blue-tap encryption-downgrade {target} -i {hci}"
-    if "pbap" in name_lower or "phonebook" in name_lower:
-        return f"blue-tap pbap dump {target} -i {hci}"
-    if "map" in name_lower or "message" in name_lower:
-        return f"blue-tap map dump {target} -i {hci}"
-    if "opp" in name_lower or "object push" in name_lower:
-        return f"blue-tap opp {target} -i {hci}"
-    if "rfcomm" in name_lower or "serial" in name_lower:
-        return f"blue-tap recon rfcomm-scan {target}"
-    if "sdp" in name_lower:
-        return f"blue-tap recon sdp {target}"
-    if "hfp" in name_lower or "hands-free" in name_lower:
-        return f"blue-tap hfp {target} -i {hci}"
-    if "spoof" in name_lower:
-        return f"blue-tap spoof {target} -i {hci}"
-    if "dos" in name_lower or "denial" in name_lower:
-        return f"blue-tap dos l2cap-flood {target} -i {hci}"
-    if "fuzz" in name_lower:
-        return f"blue-tap fuzz lmp {target} -i {hci}"
-    return ""
 
 
 # ============================================================================
@@ -2646,54 +2356,46 @@ def at_snarf(address, memory, entry_range):
 @click.argument("address", required=False, default=None)
 @click.option("-i", "--hci", default="hci0")
 @click.option("-o", "--output", default=None, help="Output file (JSON)")
-@click.option("--active", is_flag=True, help="Enable active/invasive checks (BIAS probe, PIN lockout)")
-@click.option("--phone", default=None, help="Paired phone MAC for BIAS probe (prompted if --active)")
-def vulnscan(address, hci, output, active, phone):
+@click.option("--phone", default=None, help="Paired phone MAC for the BIAS auto-reconnect probe")
+def vulnscan(address, hci, output, phone):
     """Scan target for vulnerabilities and attack-surface indicators.
 
     \b
     Evidence-based checks: SSP/legacy pairing, service exposure (active
     RFCOMM probe), KNOB, BLURtooth, BIAS, BlueBorne, pairing method,
-    writable GATT characteristics. Findings are classified as confirmed,
-    potential, or unverified with confidence ratings.
+    writable GATT characteristics, and modular CVE differential probes.
+    Findings are classified as confirmed, inconclusive, pairing_required,
+    not_applicable, or legacy heuristic statuses where applicable.
 
     \b
-    Use --active to enable invasive checks (BIAS auto-reconnect probe,
-    PIN lockout detection). BIAS probe requires the paired phone's MAC —
-    provide via --phone or select interactively from discovered devices.
+    This command runs the full vulnscan pass, including active checks such as
+    PIN lockout, raw ACL BlueFrag, and the BIAS auto-reconnect probe.
+    Provide --phone if you want the BIAS probe to test reconnect behavior
+    against the target's normally paired phone identity.
     """
     address = resolve_address(address)
     if not address:
         return
 
-    # For active BIAS probe, we need the paired phone's MAC
     phone_address = None
-    if active:
-        if phone:
-            phone_address = resolve_address(phone, prompt="Verify phone address")
-        else:
-            info("Active BIAS probe needs the paired phone's MAC address.")
-            info("Select the phone that is normally paired with the target device.")
-            from blue_tap.utils.interactive import pick_device
-            phone_address = pick_device(
-                prompt="Select paired PHONE for BIAS probe",
-                scan_duration=8, hci=hci,
-            )
-            if not phone_address:
-                warning("No phone selected — BIAS auto-reconnect test will be skipped")
+    if phone:
+        phone_address = resolve_address(phone, prompt="Verify phone address")
 
-    from blue_tap.attack.vuln_scanner import scan_vulnerabilities
+    from blue_tap.attack.vuln_scanner import run_vulnerability_scan
+    from blue_tap.attack.cve_framework import summarize_findings
     info(f"Starting vulnerability assessment on [bold]{address}[/bold]...")
     info("  Running 20+ checks: SSP, KNOB, BIAS, BlueBorne, BLURtooth, BLUFFS, PerfektBlue, BrakTooth...")
-    findings = scan_vulnerabilities(address, hci, active=active, phone_address=phone_address)
-
-    confirmed = sum(1 for f in findings if f.get("status") == "confirmed")
-    potential = sum(1 for f in findings if f.get("status") == "potential")
+    result = run_vulnerability_scan(address, hci, active=True, phone_address=phone_address)
+    findings = result["findings"]
+    summary = summarize_findings(findings)
     critical = sum(1 for f in findings if f.get("severity", "").upper() == "CRITICAL")
     high = sum(1 for f in findings if f.get("severity", "").upper() == "HIGH")
-    success(f"Assessment complete: {len(findings)} finding(s) — "
-            f"{confirmed} confirmed, {potential} potential "
-            f"({critical} CRITICAL, {high} HIGH)")
+    success(
+        f"Assessment complete: {summary['displayed']} finding(s) — "
+        f"{summary['confirmed']} confirmed, {summary['inconclusive']} inconclusive, "
+        f"{summary['pairing_required']} pairing-required "
+        f"({critical} CRITICAL, {high} HIGH)"
+    )
 
     # Recommended next steps based on findings
     if findings:
@@ -2712,7 +2414,7 @@ def vulnscan(address, hci, output, active, phone):
                 recommendations.append(f"  BLUFFS: blue-tap bluffs {address} --variant probe -i {hci}")
                 shown.add("bluffs")
             elif ("blurtooth" in name or "ctkd" in name) and "blurtooth" not in shown:
-                recommendations.append(f"  BLURtooth: blue-tap vulnscan {address} --active -i {hci}")
+                recommendations.append(f"  BLURtooth: blue-tap vulnscan {address} -i {hci}")
                 shown.add("blurtooth")
             elif "service" in name and "expos" in name and "service" not in shown:
                 _phone = phone or "PHONE_MAC"
@@ -2725,10 +2427,10 @@ def vulnscan(address, hci, output, active, phone):
                 info(rec)
 
     from blue_tap.utils.session import log_command
-    log_command("vulnscan", findings, category="vuln", target=address)
+    log_command("vulnscan", result, category="vuln", target=address)
 
     if output:
-        _save_json(findings, output)
+        _save_json(result, output)
 
 
 # ============================================================================
@@ -4703,7 +4405,7 @@ def encryption_downgrade(target, method, hci):
 # ============================================================================
 @main.group()
 def fleet():
-    """Fleet-wide Bluetooth assessment — scan, classify, assess multiple devices."""
+    """Fleet-wide Bluetooth assessment — scan, classify, and vulnscan multiple devices."""
 
 
 @fleet.command("scan")
@@ -4757,16 +4459,16 @@ def fleet_scan(duration, hci):
     log_command("fleet_scan", devices, category="scan")
 
 
-@fleet.command("assess")
+@fleet.command("vulnscan")
 @click.option("-d", "--duration", default=15, type=int, help="Scan duration")
 @click.option("-i", "--hci", default="hci0")
 @click.option("--all-devices", is_flag=True, help="Assess all devices, not just IVIs")
 def fleet_assess(duration, hci, all_devices):
-    """Scan, classify, and run vulnerability assessment on all IVIs.
+    """Scan, classify, and run vulnerability scans on all IVIs.
 
     \b
-    By default, only assesses devices classified as IVI.
-    Use --all-devices to assess everything discovered.
+    By default, only scans devices classified as IVI.
+    Use --all-devices to scan everything discovered.
     """
     from blue_tap.attack.fleet import FleetAssessment
 
@@ -4784,10 +4486,10 @@ def fleet_assess(duration, hci, all_devices):
                          if device_class is None or d.get("classification") == device_class]
 
     if not targets_to_assess:
-        warning(f"No {class_label} found to assess")
+        warning(f"No {class_label} found to scan")
         return
 
-    info(f"Assessing {len(targets_to_assess)} {class_label}...")
+    info(f"Running vulnscan on {len(targets_to_assess)} {class_label}...")
     results = assessment.assess(targets=targets_to_assess)
 
     console.print()
@@ -4811,7 +4513,7 @@ def fleet_assess(duration, hci, all_devices):
     log_command("fleet_assess", report, category="vuln")
 
     console.print()
-    success(f"Fleet assessment complete: {report.get('assessed', 0)} devices assessed, "
+    success(f"Fleet vulnscan complete: {report.get('assessed', 0)} devices scanned, "
             f"overall risk: [{risk_color}]{report.get('overall_risk', '?')}[/{risk_color}]")
 
 
@@ -4822,11 +4524,11 @@ def fleet_assess(duration, hci, all_devices):
 @click.option("-f", "--format", "fmt", default="html", type=click.Choice(["html", "json"]))
 @click.option("--all-devices", is_flag=True, help="Assess all devices, not just IVIs")
 def fleet_report(duration, hci, output, fmt, all_devices):
-    """Generate a consolidated fleet assessment report."""
+    """Generate a consolidated fleet vulnerability report."""
     from blue_tap.attack.fleet import FleetAssessment
 
     assessment = FleetAssessment(hci=hci, scan_duration=duration)
-    info(f"Running full fleet assessment (scan + classify + assess)...")
+    info("Running full fleet vulnerability workflow (scan + classify + vulnscan)...")
 
     devices = assessment.scan()
     if not devices:
@@ -4841,7 +4543,7 @@ def fleet_report(duration, hci, output, fmt, all_devices):
     if targets:
         assessment.assess(targets=targets)
     else:
-        warning("No devices to assess")
+        warning("No devices to scan")
 
     report_data = assessment.report()
 

@@ -1,9 +1,11 @@
 """Bluetooth vulnerability and attack-surface scanner.
 
 This scanner emphasizes evidence-based classification:
-- confirmed: directly observed behavior
-- potential: heuristic/version-based susceptibility
-- unverified: requires active exploit testing
+- confirmed: directly observed vulnerable behavior
+- inconclusive: check reached the target but the response was not definitive
+- pairing_required: the target must enter pairing/bonding mode to validate
+- not_applicable: wrong target role, transport, or prerequisites absent
+- potential/unverified: legacy heuristic checks retained elsewhere in the scanner
 
 It avoids declaring definitive CVE exploitation unless direct evidence exists.
 """
@@ -12,7 +14,18 @@ import errno
 import re
 import socket
 import struct
+from datetime import datetime, timezone
 
+from blue_tap.attack.cve_framework import (
+    CveCheck,
+    CveSection,
+    ScanCheck,
+    ScanSection,
+    build_vulnscan_result,
+    make_cve_finding,
+    summarize_check,
+    summarize_findings,
+)
 from blue_tap.recon.sdp import browse_services, check_ssp, get_raw_sdp
 from blue_tap.recon.rfcomm_scan import RFCOMMScanner
 from blue_tap.utils.bt_helpers import run_cmd, check_tool
@@ -64,17 +77,18 @@ def _finding(
     confidence: str = "medium",
     evidence: str = "",
 ) -> dict:
-    return {
-        "severity": severity,
-        "name": name,
-        "description": description,
-        "impact": impact,
-        "cve": cve,
-        "remediation": remediation,
-        "status": status,
-        "confidence": confidence,
-        "evidence": evidence,
-    }
+    return make_cve_finding(
+        severity,
+        name,
+        description,
+        cve=cve,
+        impact=impact,
+        remediation=remediation,
+        status=status,
+        confidence=confidence,
+        evidence=evidence,
+        category="heuristic" if cve == "N/A" else "cve",
+    )
 
 
 def _parse_bt_version(raw_version: str | None) -> float | None:
@@ -107,76 +121,8 @@ def _extract_lmp_version(address: str, hci: str) -> tuple[str | None, str]:
 
 
 def _check_service_exposure(address: str, services: list[dict]) -> list[dict]:
-    """Actively probe sensitive RFCOMM services to determine reachability."""
-    findings: list[dict] = []
-
-    keywords = (
-        "pbap",
-        "phonebook",
-        "map",
-        "message",
-        "object push",
-        "file transfer",
-    )
-
-    targets = []
-    for svc in services:
-        name = svc.get("name", "")
-        lname = name.lower()
-        if not any(k in lname for k in keywords):
-            continue
-        if svc.get("protocol") != "RFCOMM":
-            continue
-        ch = svc.get("channel")
-        if isinstance(ch, int):
-            targets.append((name, ch))
-
-    if not targets:
-        return findings
-
-    scanner = RFCOMMScanner(address)
-    confirmed = []
-    blocked = []
-
-    for svc_name, ch in targets:
-        probe = scanner.probe_channel(ch, timeout=RFCOMM_PROBE_TIMEOUT)
-        if probe.get("status") == "open":
-            confirmed.append((svc_name, ch, probe.get("response_type", "unknown")))
-        else:
-            blocked.append((svc_name, ch, probe.get("status", "closed")))
-
-    if confirmed:
-        desc = ", ".join(f"{n} (ch {c})" for n, c, _ in confirmed)
-        evidence = "; ".join(
-            f"{n}/ch{c}=open({r})" for n, c, r in confirmed
-        )
-        findings.append(
-            _finding(
-                "MEDIUM",
-                "Sensitive RFCOMM Services Reachable",
-                f"Sensitive services are actively reachable over RFCOMM: {desc}",
-                impact="Data-access profiles may be reachable depending on target-side auth policy.",
-                remediation="Require authentication/authorization before allowing profile operations.",
-                status="confirmed",
-                confidence="high",
-                evidence=evidence,
-            )
-        )
-
-    if blocked and not confirmed:
-        evidence = "; ".join(f"{n}/ch{c}={s}" for n, c, s in blocked)
-        findings.append(
-            _finding(
-                "INFO",
-                "Sensitive Services Not Directly Reachable",
-                "Sensitive services were advertised but RFCOMM probe did not confirm direct access.",
-                status="confirmed",
-                confidence="medium",
-                evidence=evidence,
-            )
-        )
-
-    return findings
+    from blue_tap.attack.non_cve_checks_rfcomm import check_service_exposure
+    return check_service_exposure(address, services, RFCOMM_PROBE_TIMEOUT)
 
 
 def _check_darkfirmware_available(hci: str = "hci0") -> bool:
@@ -310,6 +256,15 @@ def _check_perfektblue(address: str, services: list[dict],
     is_confirmed_stack = any(s in combined for s in ["opensynergy", "bluesdk", "blue sdk"])
 
     if not is_suspect and not is_confirmed_stack:
+        findings.append(_finding(
+            "INFO", "CVE-2024-45431/32/33/34: Not Applicable",
+            "PerfektBlue check skipped — target does not match known OpenSynergy BlueSDK "
+            "indicators (manufacturer, SDP strings). Check only applies to automotive IVI "
+            "systems using OpenSynergy BlueSDK (VW, Audi, Mercedes, Stellantis, etc.).",
+            cve="CVE-2024-45431,CVE-2024-45432,CVE-2024-45433,CVE-2024-45434",
+            status="not_applicable", confidence="high",
+            evidence="No OpenSynergy/BlueSDK manufacturer or SDP string found",
+        ))
         return findings
 
     evidence_parts = []
@@ -636,82 +591,13 @@ def _check_blueborne(address: str) -> list[dict]:
 
 
 def _check_pairing_method(address: str, hci: str) -> list[dict]:
-    findings: list[dict] = []
-    try:
-        from blue_tap.recon.hci_capture import detect_pairing_mode
-
-        mode = detect_pairing_mode(address, hci)
-        method = mode.get("pairing_method", "Unknown")
-        if method == "Just Works":
-            findings.append(
-                _finding(
-                    "MEDIUM",
-                    "Just Works Pairing Observed",
-                    "Pairing method resolved to Just Works (no MITM confirmation).",
-                    impact="Susceptible to machine-in-the-middle during pairing under appropriate conditions.",
-                    remediation="Prefer Numeric Comparison / Passkey with user confirmation.",
-                    status="confirmed",
-                    confidence="medium",
-                    evidence=f"Pairing probe result: {method}",
-                )
-            )
-        elif method != "Unknown":
-            findings.append(
-                _finding(
-                    "INFO",
-                    "Pairing Method Identified",
-                    f"Pairing method observed: {method}",
-                    status="confirmed",
-                    confidence="medium",
-                    evidence=f"Pairing probe result: {method}",
-                )
-            )
-    except Exception as exc:
-        verbose(f"Pairing mode probe unavailable: {exc}")
-
-    return findings
+    from blue_tap.attack.non_cve_checks_ble import check_pairing_method
+    return check_pairing_method(address, hci)
 
 
 def _check_writable_gatt(address: str) -> list[dict]:
-    findings: list[dict] = []
-    try:
-        from blue_tap.recon.gatt import enumerate_services_sync
-
-        services = enumerate_services_sync(address)
-    except Exception as exc:
-        verbose(f"GATT enumeration unavailable: {exc}")
-        return findings
-
-    writable = []
-    for svc in services:
-        for char in svc.get("characteristics", []):
-            props = {p.lower() for p in char.get("properties", [])}
-            if "write" in props or "write-without-response" in props:
-                writable.append(
-                    {
-                        "service": svc.get("description", "Unknown"),
-                        "char": char.get("description", "Unknown"),
-                        "uuid": char.get("uuid", ""),
-                        "props": sorted(props),
-                    }
-                )
-
-    if writable:
-        sample = ", ".join(f"{w['char']} ({w['uuid']})" for w in writable[:5])
-        findings.append(
-            _finding(
-                "INFO",
-                "Writable GATT Characteristics Present",
-                f"Found {len(writable)} writable characteristic(s). Sample: {sample}",
-                impact="Writable characteristics increase attack surface; exploitability depends on authz and value validation.",
-                remediation="Require authentication and strict value validation for sensitive writes.",
-                status="confirmed",
-                confidence="medium",
-                evidence=f"Enumerated writable GATT chars: {len(writable)}",
-            )
-        )
-
-    return findings
+    from blue_tap.attack.non_cve_checks_ble import check_writable_gatt
+    return check_writable_gatt(address)
 
 
 # Known BrakTooth-vulnerable chipset manufacturers/keywords
@@ -777,295 +663,30 @@ def _check_braktooth_chipset(address: str, hci: str) -> list[dict]:
 
 
 def _check_eatt_support(address: str) -> list[dict]:
-    """Probe for EATT (Enhanced ATT) support via L2CAP PSM 0x0027.
-
-    EATT was introduced in BT 5.2. If the target accepts L2CAP connection
-    to PSM 0x0027, it supports BT 5.2+ EATT — indicates a newer stack
-    with parallel GATT capability and mandatory encryption.
-    """
-
-    findings: list[dict] = []
-
-    try:
-        sock = socket.socket(
-            getattr(socket, "AF_BLUETOOTH", 31),
-            socket.SOCK_SEQPACKET,
-            getattr(socket, "BTPROTO_L2CAP", 0),
-        )
-        sock.settimeout(L2CAP_PROBE_TIMEOUT)
-        try:
-            sock.connect((address, 0x0027))
-            findings.append(
-                _finding(
-                    "INFO",
-                    "EATT Supported (BT 5.2+)",
-                    "Target accepted L2CAP connection on PSM 0x0027 (EATT). "
-                    "Indicates BT 5.2+ stack with Enhanced Attribute Protocol.",
-                    impact="EATT allows parallel GATT operations — increased attack surface "
-                           "for race conditions in GATT servers. Encryption is mandatory on EATT.",
-                    status="confirmed",
-                    confidence="high",
-                    evidence="L2CAP PSM 0x0027 connection succeeded",
-                )
-            )
-            success("EATT supported (BT 5.2+)")
-        except OSError as exc:
-            if exc.errno == errno.ECONNREFUSED:
-                info("EATT not supported (PSM 0x0027 refused)")
-            elif exc.errno == errno.EACCES:
-                findings.append(
-                    _finding(
-                        "INFO",
-                        "EATT Present but Auth Required (BT 5.2+)",
-                        "PSM 0x0027 requires authentication — EATT is available but "
-                        "properly secured.",
-                        status="confirmed",
-                        confidence="high",
-                        evidence="L2CAP PSM 0x0027 returned EACCES",
-                    )
-                )
-                info("EATT present but requires auth (correctly secured)")
-            else:
-                verbose(f"EATT probe: {exc}")
-        finally:
-            sock.close()
-    except OSError:
-        pass
-
-    return findings
+    from blue_tap.attack.non_cve_checks_ble import check_eatt_support
+    return check_eatt_support(address, L2CAP_PROBE_TIMEOUT)
 
 
 def _check_hidden_rfcomm(address: str, services: list[dict]) -> list[dict]:
-    """Diff RFCOMM scan against SDP to find unadvertised services."""
-    findings: list[dict] = []
-
-    sdp_channels = []
-    for svc in services:
-        if svc.get("protocol") == "RFCOMM":
-            ch = svc.get("channel")
-            if isinstance(ch, int):
-                sdp_channels.append(ch)
-
-    if not sdp_channels:
-        verbose("No SDP RFCOMM channels to diff against; skipping hidden-service check")
-        return findings
-
-    try:
-        scanner = RFCOMMScanner(address)
-        hidden = scanner.find_hidden_services(sdp_channels)
-    except Exception as exc:
-        verbose(f"Hidden RFCOMM scan failed: {exc}")
-        return findings
-
-    severity_map = {
-        "at_modem": "CRITICAL",
-        "obex": "HIGH",
-        "silent_open": "MEDIUM",
-        "raw_data": "MEDIUM",
-    }
-
-    for h in hidden:
-        ch = h["channel"]
-        rtype = h.get("response_type", "unknown")
-        sev = severity_map.get(rtype, "MEDIUM")
-        findings.append(
-            _finding(
-                sev,
-                f"Hidden RFCOMM Service (ch {ch})",
-                f"Channel {ch} is open but not advertised in SDP. Response type: {rtype}.",
-                impact="Unadvertised services may be debug/factory interfaces lacking auth controls.",
-                remediation="Disable or authenticate unadvertised RFCOMM channels.",
-                status="confirmed",
-                confidence="high",
-                evidence=f"Channel {ch} open ({rtype}), not in SDP channels {sdp_channels}",
-            )
-        )
-
-    return findings
+    from blue_tap.attack.non_cve_checks_rfcomm import check_hidden_rfcomm
+    return check_hidden_rfcomm(address, services, RFCOMM_PROBE_TIMEOUT)
 
 
 def _check_encryption_enforcement(address: str, services: list[dict]) -> list[dict]:
-    """Test whether sensitive RFCOMM services accept unencrypted connections."""
-    findings: list[dict] = []
-
-    SOL_BLUETOOTH = 274
-    BT_SECURITY = 4
-
-    sensitive_keywords = ("pbap", "phonebook", "map", "message", "hfp", "hands-free", "handsfree")
-    targets = []
-    for svc in services:
-        name = svc.get("name", "")
-        lname = name.lower()
-        if not any(k in lname for k in sensitive_keywords):
-            continue
-        if svc.get("protocol") != "RFCOMM":
-            continue
-        ch = svc.get("channel")
-        if isinstance(ch, int):
-            targets.append((name, ch))
-
-    AF_BLUETOOTH = getattr(socket, "AF_BLUETOOTH", 31)
-    BTPROTO_RFCOMM = getattr(socket, "BTPROTO_RFCOMM", 3)
-
-    for svc_name, ch in targets:
-        sock = None
-        try:
-            sock = socket.socket(AF_BLUETOOTH, socket.SOCK_STREAM, BTPROTO_RFCOMM)
-            sock.settimeout(ENCRYPTION_TIMEOUT)
-            # Set security level to BT_SECURITY_LOW (1)
-            sec_struct = struct.pack("BBH", 1, 0, 0)
-            sock.setsockopt(SOL_BLUETOOTH, BT_SECURITY, sec_struct)
-            try:
-                sock.connect((address, ch))
-                # Connection succeeded without encryption
-                findings.append(
-                    _finding(
-                        "HIGH",
-                        f"No Encryption Required ({svc_name})",
-                        f"{svc_name} on channel {ch} accepted connection at BT_SECURITY_LOW.",
-                        impact="Data transferred over this profile may be sent unencrypted.",
-                        remediation="Enforce BT_SECURITY_MEDIUM or higher on sensitive services.",
-                        status="confirmed",
-                        confidence="high",
-                        evidence=f"RFCOMM ch {ch} ({svc_name}) connected with BT_SECURITY_LOW",
-                    )
-                )
-                sock.close()
-            except OSError as exc:
-                sock.close()
-                if exc.errno == errno.EACCES:
-                    findings.append(
-                        _finding(
-                            "INFO",
-                            f"Encryption Enforced ({svc_name})",
-                            f"{svc_name} on channel {ch} correctly refused unencrypted connection.",
-                            status="confirmed",
-                            confidence="high",
-                            evidence=f"RFCOMM ch {ch} ({svc_name}) returned EACCES at BT_SECURITY_LOW",
-                        )
-                    )
-                else:
-                    verbose(f"Encryption check for {svc_name}/ch{ch}: {exc}")
-        except OSError as exc:
-            verbose(f"Socket setup failed for encryption check on {svc_name}/ch{ch}: {exc}")
-            if sock is not None:
-                try:
-                    sock.close()
-                except OSError:
-                    pass
-
-    return findings
+    from blue_tap.attack.non_cve_checks_rfcomm import check_encryption_enforcement
+    return check_encryption_enforcement(address, services, ENCRYPTION_TIMEOUT, OBEX_PROBE_TIMEOUT)
 
 
 def _check_pin_lockout(address: str, hci: str, ssp: bool | None) -> list[dict]:
-    """Test whether legacy-pairing target implements PIN lockout."""
-    findings: list[dict] = []
-
-    if ssp is not False:
-        verbose("SSP is enabled or unknown; skipping PIN lockout check")
-        return findings
-
-    try:
-        from blue_tap.attack.pin_brute import PINBruteForce
-
-        brute = PINBruteForce(address, hci=hci)
-        result = brute.detect_lockout(attempts=2)
-    except Exception as exc:
-        verbose(f"PIN lockout detection failed: {exc}")
-        return findings
-
-    locked_out = result.get("locked_out", False)
-    timings = result.get("timings", [])
-    timing_str = ", ".join(f"{t:.3f}s" for t in timings)
-
-    if not locked_out:
-        avg_time = sum(timings) / len(timings) if timings else 0
-        if avg_time < 2.0:
-            findings.append(
-                _finding(
-                    "HIGH",
-                    "No PIN Lockout (Fast Rejections)",
-                    "Target rejected wrong PINs quickly with no lockout. Brute force is feasible.",
-                    impact="An attacker can enumerate all 10,000 4-digit PINs in minutes.",
-                    remediation="Implement exponential backoff or lockout after repeated failed pairings.",
-                    status="confirmed",
-                    confidence="high",
-                    evidence=f"Timings: [{timing_str}], no lockout detected",
-                )
-            )
-        else:
-            findings.append(
-                _finding(
-                    "MEDIUM",
-                    "No PIN Lockout Detected",
-                    "Target did not lock out after wrong PINs, but rejections were not fast.",
-                    impact="PIN brute force may be feasible but slower than expected.",
-                    remediation="Implement lockout after repeated failed pairings.",
-                    status="confirmed",
-                    confidence="medium",
-                    evidence=f"Timings: [{timing_str}], no lockout detected",
-                )
-            )
-    else:
-        findings.append(
-            _finding(
-                "INFO",
-                "PIN Lockout Detected",
-                "Target implements lockout or backoff after repeated wrong PINs.",
-                status="confirmed",
-                confidence="high",
-                evidence=f"Timings: [{timing_str}], lockout detected",
-            )
-        )
-
-    return findings
+    from blue_tap.attack.non_cve_checks_posture import check_pin_lockout
+    return check_pin_lockout(address, hci, ssp)
 
 
-def _check_device_class(address: str, hci: str) -> list[dict]:
-    """Parse device class of device and flag interesting service bits."""
-    findings: list[dict] = []
-
-    if not check_tool("hcitool"):
-        return findings
-
-    result = _run_hcitool_info(address, hci)
-    if result.returncode != 0:
-        return findings
-
-    m = re.search(r"Class:\s*(0x[0-9a-fA-F]+)", result.stdout)
-    if not m:
-        return findings
-
-    from blue_tap.core.scanner import parse_device_class
-
-    cod = parse_device_class(m.group(1))
-    svc_list = cod.get("services", [])
-    major = cod.get("major", "Unknown")
-    minor = cod.get("minor", "Unknown")
-
-    flagged = []
-    if "Object Transfer" in svc_list:
-        flagged.append("Object Transfer")
-    if "Networking" in svc_list:
-        flagged.append("Networking")
-
-    if flagged:
-        findings.append(
-            _finding(
-                "MEDIUM",
-                "Interesting Device Class Services",
-                f"Device class advertises attack-relevant services: {', '.join(flagged)}.",
-                impact="Object Transfer / Networking service bits increase OBEX/network attack surface.",
-                remediation="Disable unnecessary service class bits in device firmware.",
-                status="confirmed",
-                confidence="medium",
-                evidence=f"CoD {cod.get('raw', m.group(1))}: major={major}, minor={minor}, services={svc_list}",
-            )
-        )
-    else:
-        info(f"Device class: {major}/{minor}, services: {svc_list}")
-
-    return findings
+def _check_device_class(address: str, hci: str, services: list[dict], hcitool_info_result=None) -> list[dict]:
+    from blue_tap.attack.non_cve_checks_posture import check_device_class
+    if hcitool_info_result is None:
+        hcitool_info_result = _run_hcitool_info(address, hci) if check_tool("hcitool") else None
+    return check_device_class(address, hci, services, hcitool_info_result)
 
 
 def _extract_lmp_features_dict(address: str, hci: str) -> dict | None:
@@ -1107,331 +728,19 @@ def _extract_lmp_features_dict(address: str, hci: str) -> dict | None:
 
 
 def _check_lmp_features(address: str, hci: str) -> list[dict]:
-    """Parse LMP feature bits from hcitool info and flag missing security features."""
-    findings: list[dict] = []
-
-    if not check_tool("hcitool"):
-        return findings
-
-    result = _run_hcitool_info(address, hci)
-    if result.returncode != 0:
-        return findings
-
-    m = re.search(r"Features:\s*(0x[0-9a-fA-F]+(?:\s+0x[0-9a-fA-F]+)*)", result.stdout)
-    if not m:
-        verbose("No Features line in hcitool info output")
-        return findings
-
-    raw_features = m.group(1)
-    byte_strs = raw_features.strip().split()
-    feature_bytes = []
-    for bs in byte_strs:
-        try:
-            feature_bytes.append(int(bs, 16))
-        except ValueError:
-            feature_bytes.append(0)
-
-    # Pad to at least 8 bytes
-    while len(feature_bytes) < 8:
-        feature_bytes.append(0)
-
-    def has_bit(byte_idx: int, bit: int) -> bool:
-        if byte_idx >= len(feature_bytes):
-            return False
-        return bool(feature_bytes[byte_idx] & (1 << bit))
-
-    # Check security-relevant bits
-    if not has_bit(0, 2):
-        findings.append(
-            _finding(
-                "CRITICAL",
-                "LMP: Encryption Not Supported",
-                "Target LMP features indicate encryption is not supported.",
-                impact="All Bluetooth traffic to this device is unencrypted.",
-                remediation="Device firmware must support encryption. Consider replacing hardware.",
-                status="confirmed",
-                confidence="high",
-                evidence=f"Features byte 0 bit 2 = 0 (features: {raw_features})",
-            )
-        )
-
-    if has_bit(0, 5):
-        findings.append(
-            _finding(
-                "INFO",
-                "LMP: Role Switch Supported",
-                "Target supports role switch. This is a prerequisite for BIAS attacks.",
-                cve="CVE-2020-10135",
-                status="confirmed",
-                confidence="medium",
-                evidence=f"Features byte 0 bit 5 = 1 (features: {raw_features})",
-            )
-        )
-
-    if has_bit(5, 3):
-        findings.append(
-            _finding(
-                "MEDIUM",
-                "LMP: Pause Encryption Supported",
-                "Target supports pause encryption, which is related to KNOB attack surface.",
-                cve="CVE-2019-9506",
-                impact="Pause encryption can facilitate key length negotiation attacks.",
-                remediation="Verify firmware enforces minimum key length regardless of pause encryption.",
-                status="confirmed",
-                confidence="medium",
-                evidence=f"Features byte 5 bit 3 = 1 (features: {raw_features})",
-            )
-        )
-
-    if not has_bit(6, 3):
-        findings.append(
-            _finding(
-                "HIGH",
-                "LMP: SSP Not Supported in Features",
-                "Target LMP features do not include Secure Simple Pairing support.",
-                impact="Device relies on legacy PIN pairing, vulnerable to passive eavesdropping of pairing exchange.",
-                remediation="Use hardware that supports SSP (Bluetooth 2.1+).",
-                status="confirmed",
-                confidence="high",
-                evidence=f"Features byte 6 bit 3 = 0 (features: {raw_features})",
-            )
-        )
-
-    if not has_bit(7, 3):
-        findings.append(
-            _finding(
-                "MEDIUM",
-                "LMP: Secure Connections Not Supported",
-                "Target does not support Secure Connections (P-256 ECDH).",
-                impact="Falls back to legacy pairing crypto (P-192), weaker against offline brute force.",
-                remediation="Use hardware supporting Bluetooth 4.1+ Secure Connections.",
-                status="confirmed",
-                confidence="high",
-                evidence=f"Features byte 7 bit 3 = 0 (features: {raw_features})",
-            )
-        )
-
-    return findings
+    from blue_tap.attack.non_cve_checks_posture import check_lmp_features
+    result = _run_hcitool_info(address, hci) if check_tool("hcitool") else None
+    return check_lmp_features(address, hci, result)
 
 
 def _check_authorization_model(address: str, services: list[dict]) -> list[dict]:
-    """Test if PBAP/MAP services allow unauthenticated OBEX access."""
-    findings: list[dict] = []
-
-    AF_BLUETOOTH = getattr(socket, "AF_BLUETOOTH", 31)
-    BTPROTO_RFCOMM = getattr(socket, "BTPROTO_RFCOMM", 3)
-
-    # OBEX target UUIDs per profile
-    PBAP_UUID = bytes.fromhex("796135f0f0c511d809660800200c9a66")
-    MAP_UUID = bytes.fromhex("bb582b40420c11dbb0de0800200c9a66")
-
-    profile_channels = []
-    for svc in services:
-        name = svc.get("name", "")
-        lname = name.lower()
-        if svc.get("protocol") != "RFCOMM":
-            continue
-        ch = svc.get("channel")
-        if not isinstance(ch, int):
-            continue
-        if any(k in lname for k in ("pbap", "phonebook", "map", "message")):
-            profile_channels.append((name, ch))
-
-    for svc_name, ch in profile_channels:
-        # Select correct OBEX target UUID based on service name
-        svc_lower = svc_name.lower()
-        target_uuid = MAP_UUID if any(k in svc_lower for k in ("map", "message")) else PBAP_UUID
-        try:
-            sock = socket.socket(AF_BLUETOOTH, socket.SOCK_STREAM, BTPROTO_RFCOMM)
-            sock.settimeout(OBEX_PROBE_TIMEOUT)
-            try:
-                sock.connect((address, ch))
-            except OSError as exc:
-                sock.close()
-                if exc.errno == errno.EACCES:
-                    findings.append(
-                        _finding(
-                            "INFO",
-                            f"RFCOMM Auth Required ({svc_name})",
-                            f"{svc_name} on channel {ch} requires authentication to connect.",
-                            status="confirmed",
-                            confidence="high",
-                            evidence=f"RFCOMM ch {ch} ({svc_name}) returned EACCES on connect",
-                        )
-                    )
-                else:
-                    verbose(f"RFCOMM connect to {svc_name}/ch{ch} failed: {exc}")
-                continue
-
-            # Connected — send OBEX Connect with target UUID
-            # OBEX Connect: opcode=0x80, version=0x10, flags=0x00, maxlen=0xFFFF
-            # Target header: HI=0x46, length=2+16
-            target_header = b"\x46" + struct.pack(">H", 3 + len(target_uuid)) + target_uuid
-            obex_body = b"\x10\x00" + struct.pack(">H", 0xFFFF) + target_header
-            obex_connect = b"\x80" + struct.pack(">H", 3 + len(obex_body)) + obex_body
-
-            try:
-                sock.sendall(obex_connect)
-                sock.settimeout(OBEX_PROBE_TIMEOUT)
-                resp = sock.recv(1024)
-            except (TimeoutError, OSError):
-                resp = b""
-            finally:
-                sock.close()
-
-            if resp and resp[0] == 0xA0:
-                findings.append(
-                    _finding(
-                        "CRITICAL",
-                        f"Unauthenticated OBEX Access ({svc_name})",
-                        f"{svc_name} on channel {ch} returned OBEX Success (0xA0) without authentication.",
-                        impact="Phonebook/message data may be accessible without pairing.",
-                        remediation="Require authentication and authorization before OBEX profile access.",
-                        status="confirmed",
-                        confidence="high",
-                        evidence=f"OBEX Connect to ch {ch} ({svc_name}) returned 0x{resp[0]:02X}",
-                    )
-                )
-            elif resp and resp[0] in (0xC1, 0xC3):
-                findings.append(
-                    _finding(
-                        "INFO",
-                        f"OBEX Authorization Enforced ({svc_name})",
-                        f"{svc_name} on channel {ch} returned Unauthorized/Forbidden (0x{resp[0]:02X}).",
-                        status="confirmed",
-                        confidence="high",
-                        evidence=f"OBEX Connect to ch {ch} ({svc_name}) returned 0x{resp[0]:02X}",
-                    )
-                )
-            elif resp and resp[0] in (0xC0, 0x44, 0xD0):
-                verbose(f"OBEX rejected from {svc_name}/ch{ch}: 0x{resp[0]:02X}")
-            elif resp:
-                verbose(f"OBEX response from {svc_name}/ch{ch}: 0x{resp[0]:02X}")
-        except OSError as exc:
-            verbose(f"Authorization check socket error for {svc_name}/ch{ch}: {exc}")
-
-    return findings
+    from blue_tap.attack.non_cve_checks_rfcomm import check_authorization_model
+    return check_authorization_model(address, services, OBEX_PROBE_TIMEOUT)
 
 
 def _check_automotive_diagnostics(address: str, services: list[dict]) -> list[dict]:
-    """Probe for automotive diagnostic interfaces via SPP/DUN channels."""
-    findings: list[dict] = []
-
-    AF_BLUETOOTH = getattr(socket, "AF_BLUETOOTH", 31)
-    BTPROTO_RFCOMM = getattr(socket, "BTPROTO_RFCOMM", 3)
-
-    # Find SPP (0x1101) and DUN (0x1103) channels
-    diag_channels = []
-    diag_keywords = ("diagnostic", "obd", "can", "ecu", "debug", "factory", "gateway")
-
-    for svc in services:
-        uuid = svc.get("uuid", "").lower()
-        name = svc.get("name", "")
-        lname = name.lower()
-        ch = svc.get("channel")
-        if svc.get("protocol") != "RFCOMM" or not isinstance(ch, int):
-            continue
-
-        is_spp = "1101" in uuid
-        is_dun = "1103" in uuid
-        has_keyword = any(k in lname for k in diag_keywords)
-
-        if is_spp or is_dun or has_keyword:
-            diag_channels.append((name, ch, is_spp, is_dun, has_keyword))
-
-    # Check SDP names for diagnostic keywords even without SPP/DUN UUID
-    for svc in services:
-        name = svc.get("name", "")
-        lname = name.lower()
-        if any(k in lname for k in diag_keywords):
-            ch = svc.get("channel")
-            if isinstance(ch, int) and not any(d[1] == ch for d in diag_channels):
-                diag_channels.append((name, ch, False, False, True))
-
-    if not diag_channels:
-        return findings
-
-    # Flag keyword matches in SDP names
-    for name, ch, is_spp, is_dun, has_keyword in diag_channels:
-        if has_keyword:
-            findings.append(
-                _finding(
-                    "HIGH",
-                    f"Diagnostic Service Name ({name})",
-                    f"SDP service '{name}' on channel {ch} matches automotive diagnostic keywords.",
-                    impact="May provide access to vehicle diagnostic or CAN bus interfaces.",
-                    remediation="Remove or authenticate diagnostic Bluetooth services in production.",
-                    status="confirmed",
-                    confidence="medium",
-                    evidence=f"SDP name '{name}' matches diagnostic keywords, ch {ch}",
-                )
-            )
-
-    # Actively probe SPP/DUN channels
-    probes = [b"ATI\r\n", b"ATZ\r\n", b"0100\r\n"]
-    for name, ch, is_spp, is_dun, has_keyword in diag_channels:
-        if not (is_spp or is_dun):
-            continue
-        try:
-            sock = socket.socket(AF_BLUETOOTH, socket.SOCK_STREAM, BTPROTO_RFCOMM)
-            sock.settimeout(OBEX_PROBE_TIMEOUT)
-            try:
-                sock.connect((address, ch))
-            except OSError:
-                sock.close()
-                continue
-
-            responses = []
-            for probe in probes:
-                try:
-                    sock.sendall(probe)
-                    sock.settimeout(AT_PROBE_TIMEOUT)
-                    data = sock.recv(1024)
-                    if data:
-                        responses.append((probe.strip().decode(errors="replace"), data))
-                except (TimeoutError, OSError):
-                    continue
-
-            sock.close()
-
-            for probe_name, resp in responses:
-                resp_text = resp.decode("ascii", errors="replace")
-                if "ELM" in resp_text or any(
-                    c in resp_text for c in ("41 00", "41 0C", "7E8")
-                ):
-                    findings.append(
-                        _finding(
-                            "CRITICAL",
-                            f"CAN Bus Access via Bluetooth ({name})",
-                            f"Channel {ch} responded to OBD probe with ELM/PID data.",
-                            impact="Direct CAN bus access enables vehicle diagnostics, "
-                                   "ECU interrogation, and potentially safety-critical commands.",
-                            remediation="Remove Bluetooth-to-CAN bridges or require strong auth.",
-                            status="confirmed",
-                            confidence="high",
-                            evidence=f"Probe '{probe_name}' on ch {ch} returned: {resp_text[:100]}",
-                        )
-                    )
-                    break
-                elif b"OK" in resp or b"ERROR" in resp or b"AT" in resp.upper():
-                    findings.append(
-                        _finding(
-                            "HIGH",
-                            f"Diagnostic Serial Access ({name})",
-                            f"Channel {ch} responded to AT command with modem-style response.",
-                            impact="AT-command serial access may allow modem control or diagnostic operations.",
-                            remediation="Authenticate and restrict AT-command interfaces.",
-                            status="confirmed",
-                            confidence="high",
-                            evidence=f"Probe '{probe_name}' on ch {ch} returned: {resp_text[:100]}",
-                        )
-                    )
-                    break
-
-        except OSError as exc:
-            verbose(f"Diagnostic probe on {name}/ch{ch} failed: {exc}")
-
-    return findings
+    from blue_tap.attack.non_cve_checks_rfcomm import check_automotive_diagnostics
+    return check_automotive_diagnostics(address, services, OBEX_PROBE_TIMEOUT, AT_PROBE_TIMEOUT)
 
 
 # ---------------------------------------------------------------------------
@@ -1599,20 +908,31 @@ def _probe_lmp_version(address: str, hci: str) -> dict | None:
         return None
 
 
-def scan_vulnerabilities(address: str, hci: str = "hci0", active: bool = False,
-                         phone_address: str | None = None) -> list[dict]:
+def run_vulnerability_scan(address: str, hci: str = "hci0", active: bool = False,
+                           phone_address: str | None = None) -> dict:
     """Run vulnerability and attack-surface checks against a target.
 
     Output is evidence-based and intentionally avoids definitive CVE claims
     without active exploit verification.
     """
+    started_at = datetime.now(timezone.utc).isoformat()
     info(f"Scanning {address} for vulnerabilities and attack-surface indicators...")
     findings: list[dict] = []
+    cve_check_log: list[dict] = []
+    non_cve_check_log: list[dict] = []
 
     from blue_tap.utils.bt_helpers import ensure_adapter_ready
     if not ensure_adapter_ready(hci):
         error("Adapter not ready — cannot scan")
-        return findings
+        return build_vulnscan_result(
+            target=address,
+            adapter=hci,
+            active=active,
+            findings=findings,
+            cve_checks=cve_check_log,
+            non_cve_checks=non_cve_check_log,
+            started_at=started_at,
+        )
 
     section("Check 1: Secure Simple Pairing", style="bt.cyan")
     ssp = check_ssp(address, hci)
@@ -1635,9 +955,7 @@ def scan_vulnerabilities(address: str, hci: str = "hci0", active: bool = False,
     else:
         warning("Could not determine SSP support")
 
-    section("Check 2: Service Exposure", style="bt.cyan")
     services = browse_services(address)
-    findings.extend(_check_service_exposure(address, services))
 
     section("Check 3: Reachability", style="bt.cyan")
     if check_tool("l2ping"):
@@ -1691,6 +1009,43 @@ def scan_vulnerabilities(address: str, hci: str = "hci0", active: bool = False,
         if mfr_m:
             manufacturer = mfr_m.group(1).strip()
 
+    def _run_non_cve_check(spec: ScanCheck, section_title: str):
+        results = []
+        verbose(f"[NON-CVE] {spec.check_id} — {spec.title}")
+        try:
+            results = spec.runner(*spec.args)
+        except Exception as exc:
+            warning(f"{spec.check_id}: check failed ({exc})")
+            non_cve_check_log.append({
+                "check_id": spec.check_id,
+                "title": spec.title,
+                "section": section_title,
+                "error": str(exc),
+                "finding_count": 0,
+                "primary_status": "error",
+                "status_counts": {"error": 1},
+                "evidence_samples": [],
+            })
+            return
+        for result in results:
+            result.setdefault("check_title", spec.title)
+            result.setdefault("category", result.get("category", "exposure"))
+            result.setdefault("section", section_title)
+            status = result.get("status")
+            if status == "not_applicable":
+                verbose(f"SKIP {spec.check_id}: {result.get('evidence', 'not applicable')}")
+            elif status == "inconclusive":
+                warning(f"INCONCLUSIVE {spec.check_id}: {result.get('evidence', 'probe did not produce a definitive answer')}")
+            elif status == "confirmed":
+                info(f"{spec.check_id}: {result.get('name', spec.title)}")
+        non_cve_check_log.append({
+            "check_id": spec.check_id,
+            "title": spec.title,
+            "section": section_title,
+            **summarize_check(results),
+        })
+        findings.extend(results)
+
     # --- Local analysis checks (parallel, no active connections needed) ---
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -1703,8 +1058,6 @@ def scan_vulnerabilities(address: str, hci: str = "hci0", active: bool = False,
         lambda: _check_invalid_curve(bt_version, raw_version, lmp_feats),
         *([] if active else [lambda: _check_bias(ssp)]),
         lambda: _check_braktooth_chipset(address, hci),
-        lambda: _check_lmp_features(address, hci),
-        lambda: _check_device_class(address, hci),
         lambda: _check_blueborne(address),
     ]
 
@@ -1716,21 +1069,39 @@ def scan_vulnerabilities(address: str, hci: str = "hci0", active: bool = False,
             except Exception as e:
                 warning(f"Check failed: {e}")
 
-    # --- Sequential active checks (require active connections, can't overlap) ---
-    section("Check 5: Encryption Enforcement", style="bt.cyan")
-    findings.extend(_check_encryption_enforcement(address, services))
+    non_cve_sections = [
+        ScanSection(
+            "Check 5: Non-CVE RFCOMM and Exposure Checks",
+            (
+                ScanCheck("service_exposure", "Sensitive RFCOMM Profile Reachability", _check_service_exposure, (address, services)),
+                ScanCheck("encryption_enforcement", "Low-Security RFCOMM Acceptance", _check_encryption_enforcement, (address, services)),
+                ScanCheck("authorization_model", "OBEX Authorization Model", _check_authorization_model, (address, services)),
+                ScanCheck("automotive_diagnostics", "Automotive Diagnostic Surface", _check_automotive_diagnostics, (address, services)),
+                ScanCheck("hidden_rfcomm", "Unadvertised RFCOMM Channels", _check_hidden_rfcomm, (address, services)),
+            ),
+        ),
+        ScanSection(
+            "Check 6: Non-CVE BLE and Pairing Checks",
+            (
+                ScanCheck("writable_gatt", "Writable GATT Surface", _check_writable_gatt, (address,)),
+                ScanCheck("eatt_support", "EATT Capability", _check_eatt_support, (address,)),
+                ScanCheck("pairing_method", "Pairing Method Posture", _check_pairing_method, (address, hci)),
+            ),
+        ),
+        ScanSection(
+            "Check 7: Non-CVE Security Posture Checks",
+            (
+                ScanCheck("pin_lockout", "Legacy PIN Lockout", _check_pin_lockout, (address, hci, ssp)),
+                ScanCheck("device_class", "Bluetooth Device Class Posture", _check_device_class, (address, hci, services, info_result)),
+                ScanCheck("lmp_features", "LMP Feature Posture", _check_lmp_features, (address, hci)),
+            ),
+        ),
+    ]
 
-    section("Check 6: Authorization Model (OBEX)", style="bt.cyan")
-    findings.extend(_check_authorization_model(address, services))
-
-    section("Check 7: Automotive Diagnostics", style="bt.cyan")
-    findings.extend(_check_automotive_diagnostics(address, services))
-
-    if active:
-        section("Active Check: PIN Lockout Detection")
-        findings.extend(_check_pin_lockout(address, hci, ssp))
-    else:
-        verbose("Skipping PIN lockout check (use --active to enable)")
+    for non_cve_section in non_cve_sections:
+        section(non_cve_section.title, style="bt.cyan")
+        for non_cve_check in non_cve_section.checks:
+            _run_non_cve_check(non_cve_check, non_cve_section.title)
 
     if active:
         section("Active Check: BIAS Vulnerability Probe")
@@ -1776,26 +1147,204 @@ def scan_vulnerabilities(address: str, hci: str = "hci0", active: bool = False,
         except Exception as exc:
             verbose(f"DarkFirmware KNOB probe failed: {exc}")
 
-    section("Check 9: Hidden RFCOMM Services", style="bt.cyan")
-    findings.extend(_check_hidden_rfcomm(address, services))
-
-    section("Check 10: BLE Writable Surface", style="bt.cyan")
-    findings.extend(_check_writable_gatt(address))
-
-    section("Check 11: EATT Support (BT 5.2+ Indicator)", style="bt.cyan")
-    findings.extend(_check_eatt_support(address))
-
-    section("Check 12: Pairing Method Probe", style="bt.cyan")
-    findings.extend(_check_pairing_method(address, hci))
-
-    section("Check 13: PerfektBlue (OpenSynergy BlueSDK)", style="bt.cyan")
+    section("Check 8: PerfektBlue (OpenSynergy BlueSDK)", style="bt.cyan")
     findings.extend(_check_perfektblue(address, services, device_name, manufacturer, sdp_raw))
 
+    # -----------------------------------------------------------------------
+    # CVE Behavioral Differential Probes
+    # These checks should only emit confirmed / inconclusive /
+    # pairing_required / not_applicable. Surface-only detections are omitted.
+    # -----------------------------------------------------------------------
+    from blue_tap.attack.cve_checks_bnep import (
+        _check_bnep_role_swap,
+        _check_bnep_heap_oracle,
+    )
+    from blue_tap.attack.cve_checks_avrcp import (
+        _check_avrcp_metamsg_oob,
+        _check_avrcp_getcap_leak,
+    )
+    from blue_tap.attack.cve_checks_sdp import (
+        _check_sdp_continuation_info_leak,
+    )
+    from blue_tap.attack.cve_checks_airoha import (
+        _check_airoha_race_gatt,
+        _check_airoha_race_bredr,
+        _check_airoha_race_link_key,
+    )
+    from blue_tap.attack.cve_checks_pairing import (
+        _check_bredr_method_confusion,
+        _check_justworks_silent_pair,
+        _check_reflected_public_key,
+    )
+    from blue_tap.attack.cve_checks_raw_acl import (
+        _check_bluefrag_boundary_probe,
+    )
+    from blue_tap.attack.cve_checks_hid import (
+        _check_hid_unbonded_connection,
+        _check_hogp_unbonded_write,
+    )
+    from blue_tap.attack.cve_checks_gatt import (
+        _check_android_eatt_integer_overflow,
+        _check_bluez_gatt_prep_write_overflow,
+    )
+    from blue_tap.attack.cve_checks_l2cap import (
+        _check_android_l2cap_heap_jitter,
+        _check_a2mp_heap_jitter,
+        _check_ecred_6cid_overflow,
+        _check_ecred_duplicate_id,
+        _check_l2cap_conf_mtu_info_leak,
+        _check_l2cap_efs_info_leak,
+        _check_l2cap_psm_zero_uaf,
+    )
+    from blue_tap.attack.cve_checks_ble_smp import (
+        _check_ble_legacy_pairing_bypass,
+        _check_smp_bredr_oob,
+    )
+
+    def _run_cve_check(spec: CveCheck, section_title: str):
+        """Run a CVE check, emit structured logs, and record a reportable result."""
+        results = []
+        verbose(f"[CVE] {spec.cve} — {spec.title}")
+        try:
+            results = spec.runner(*spec.args)
+        except Exception as exc:
+            warning(f"{spec.cve}: check failed ({exc})")
+            cve_check_log.append({
+                "cve": spec.cve,
+                "title": spec.title,
+                "section": section_title,
+                "error": str(exc),
+                "finding_count": 0,
+                "primary_status": "error",
+                "status_counts": {"error": 1},
+                "evidence_samples": [],
+            })
+            return
+        for r in results:
+            r.setdefault("check_title", spec.title)
+            r.setdefault("category", "cve")
+            r.setdefault("section", section_title)
+            status = r.get("status")
+            if status == "not_applicable":
+                verbose(f"SKIP {r.get('cve','?')}: {r.get('evidence','not applicable for this target')}")
+            elif status == "pairing_required":
+                info(f"{r.get('cve','?')}: pairing required to validate ({r.get('evidence','target not pairable')})")
+            elif status == "inconclusive":
+                warning(f"INCONCLUSIVE {r.get('cve','?')}: {r.get('evidence','probe reached target but response was not definitive')}")
+            elif status == "confirmed":
+                warning(f"FOUND {r.get('cve','?')}: {r.get('name','')}")
+        check_summary = summarize_check(results)
+        cve_check_log.append({
+            "cve": spec.cve,
+            "title": spec.title,
+            "section": section_title,
+            **check_summary,
+        })
+        findings.extend(results)
+
+    cve_sections = [
+        CveSection(
+            "Check 9: SDP CVE Probes (CVE-2017-0785)",
+            (CveCheck("CVE-2017-0785", "SDP Continuation State Replay", _check_sdp_continuation_info_leak, (address,)),),
+        ),
+        CveSection(
+            "Check 10: HID CVE Probes (CVE-2020-0556, CVE-2023-45866)",
+            (
+                CveCheck("CVE-2020-0556/CVE-2023-45866", "HID Unbonded L2CAP Connection", _check_hid_unbonded_connection, (address, services)),
+                CveCheck("CVE-2020-0556/CVE-2023-45866", "HOGP Unbonded Report Write", _check_hogp_unbonded_write, (address,)),
+            ),
+        ),
+        CveSection(
+            "Check 11: BNEP CVE Probes (CVE-2017-0783, CVE-2017-13258 family)",
+            (
+                CveCheck("CVE-2017-0783", "BNEP Role Swap", _check_bnep_role_swap, (address, services)),
+                CveCheck("CVE-2017-13258", "BNEP Heap Oracle", _check_bnep_heap_oracle, (address, services)),
+            ),
+        ),
+        CveSection(
+            "Check 12: AVRCP CVE Probes (CVE-2021-0507, CVE-2022-39176)",
+            (
+                CveCheck("CVE-2021-0507", "AVRCP Metadata OOB", _check_avrcp_metamsg_oob, (address, services)),
+                CveCheck("CVE-2022-39176", "AVRCP GetCapabilities Leak", _check_avrcp_getcap_leak, (address, services)),
+            ),
+        ),
+        CveSection(
+            "Check 13: GATT/ATT CVE Probes (CVE-2022-0204, CVE-2023-35681)",
+            (
+                CveCheck("CVE-2022-0204", "BlueZ Prepare Write Overflow", _check_bluez_gatt_prep_write_overflow, (address,)),
+                CveCheck("CVE-2023-35681", "Android EATT Integer Overflow", _check_android_eatt_integer_overflow, (address,)),
+            ),
+        ),
+        CveSection(
+            "Check 14: Airoha RACE Protocol Probes (CVE-2025-20700/01/02)",
+            (
+                CveCheck("CVE-2025-20700", "Airoha RACE GATT Auth Bypass", _check_airoha_race_gatt, (address,)),
+                CveCheck("CVE-2025-20701", "Airoha RACE BR/EDR Auth Bypass", _check_airoha_race_bredr, (address, services)),
+                CveCheck("CVE-2025-20702", "Airoha RACE Link Key Disclosure", _check_airoha_race_link_key, (address,)),
+            ),
+        ),
+        CveSection(
+            "Check 15: L2CAP CVE Probes (CVE-2019-3459, CVE-2018-9359/60/61, CVE-2020-12352, CVE-2022-42896, CVE-2022-20345, CVE-2022-42895, CVE-2026-23395)",
+            (
+                CveCheck("CVE-2019-3459", "L2CAP CONF MTU Leak", _check_l2cap_conf_mtu_info_leak, (address,)),
+                CveCheck("CVE-2018-9359", "Android L2CAP Heap Jitter", _check_android_l2cap_heap_jitter, (address,)),
+                CveCheck("CVE-2020-12352", "BlueZ A2MP Heap Jitter", _check_a2mp_heap_jitter, (address,)),
+                CveCheck("CVE-2022-42896", "LE Credit-Based PSM Zero", _check_l2cap_psm_zero_uaf, (address,)),
+                CveCheck("CVE-2022-20345", "eCred 6-CID Overflow", _check_ecred_6cid_overflow, (address,)),
+                CveCheck("CVE-2026-23395", "eCred Duplicate Identifier", _check_ecred_duplicate_id, (address,)),
+                CveCheck("CVE-2022-42895", "L2CAP EFS Leak", _check_l2cap_efs_info_leak, (address,)),
+            ),
+        ),
+        CveSection(
+            "Check 16: BLE/SMP CVE Probes (CVE-2024-34722, CVE-2018-9365, CVE-2020-26558)",
+            (
+                CveCheck("CVE-2020-26558", "Reflected Public Key", _check_reflected_public_key, (address,)),
+                CveCheck("CVE-2024-34722", "BLE Legacy Pairing Bypass", _check_ble_legacy_pairing_bypass, (address,)),
+                CveCheck("CVE-2018-9365", "SMP BR/EDR Fixed CID OOB", _check_smp_bredr_oob, (address, ssp)),
+            ),
+        ),
+        CveSection(
+            "Check 17: BR/EDR Pairing CVE Probes (CVE-2022-25837, CVE-2019-2225)",
+            (
+                CveCheck("CVE-2022-25837", "BR/EDR Method Confusion", _check_bredr_method_confusion, (address, hci)),
+                CveCheck("CVE-2019-2225", "JustWorks Silent Pair", _check_justworks_silent_pair, (address, hci)),
+            ),
+        ),
+    ]
+    if active:
+        cve_sections.append(
+            CveSection(
+                "Check 18: Raw ACL CVE Probes (CVE-2020-0022)",
+                (CveCheck("CVE-2020-0022", "BlueFrag Boundary Probe", _check_bluefrag_boundary_probe, (address, hci)),),
+            )
+        )
+    else:
+        verbose("Skipping raw ACL BlueFrag probe (use --active to enable)")
+
+    for cve_section in cve_sections:
+        section(cve_section.title, style="bt.cyan")
+        for cve_check in cve_section.checks:
+            _run_cve_check(cve_check, cve_section.title)
+
     if not active:
-        info("Tip: Use --active to enable invasive checks (BIAS probe, PIN lockout)")
+        info("Tip: Use --active to enable additional invasive checks (BIAS probe, PIN lockout)")
 
     _print_findings(address, findings)
-    return findings
+    return build_vulnscan_result(
+        target=address,
+        adapter=hci,
+        active=active,
+        findings=findings,
+        cve_checks=cve_check_log,
+        non_cve_checks=non_cve_check_log,
+        started_at=started_at,
+    )
+
+
+def scan_vulnerabilities(address: str, hci: str = "hci0", active: bool = False,
+                         phone_address: str | None = None) -> list[dict]:
+    """Compatibility wrapper returning only the vulnerability findings list."""
+    return run_vulnerability_scan(address, hci=hci, active=active, phone_address=phone_address)["findings"]
 
 
 def _print_findings(address: str, findings: list[dict]):
@@ -1805,22 +1354,25 @@ def _print_findings(address: str, findings: list[dict]):
         success(f"No indicators found on {address} from available checks")
         return
 
-    console.print(vuln_table(findings))
+    # Exclude not_applicable (skipped) from the display table — they're counted in the summary
+    displayable = [f for f in findings if f.get("status") != "not_applicable"]
+    if displayable:
+        console.print(vuln_table(displayable))
 
-    confirmed = sum(1 for f in findings if f.get("status") == "confirmed")
-    potential = sum(1 for f in findings if f.get("status") == "potential")
-    unverified = sum(1 for f in findings if f.get("status") == "unverified")
-    high = sum(1 for f in findings if f.get("severity", "").lower() in ("high", "critical"))
+    summary = summarize_findings(findings)
 
     summary_panel(
         "Vulnerability Scan Summary",
         {
             "Target": address,
-            "Total Findings": str(len(findings)),
-            "Confirmed": str(confirmed),
-            "Potential": str(potential),
-            "Unverified": str(unverified),
-            "Critical/High Severity": str(high),
+            "Total Findings": str(summary["displayed"]),
+            "Confirmed": str(summary["confirmed"]),
+            "Potential": str(summary["potential"]),
+            "Unverified": str(summary["unverified"]),
+            "Inconclusive": str(summary["inconclusive"]),
+            "Pairing Required": str(summary["pairing_required"]),
+            "Skipped (Not Applicable)": str(summary["not_applicable"]),
+            "Critical/High Severity": str(summary["high_or_critical"]),
         },
-        style="red" if high > 0 else "yellow" if potential > 0 else "green",
+        style="red" if summary["high_or_critical"] > 0 else "yellow" if summary["potential"] > 0 else "green",
     )

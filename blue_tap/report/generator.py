@@ -12,6 +12,7 @@ import os
 import shutil
 from datetime import datetime
 
+from blue_tap.attack.cve_framework import summarize_findings
 from blue_tap.utils.output import info, success, error
 
 try:
@@ -176,6 +177,11 @@ def _risk_rating(vuln_findings: list[dict], fuzz_crashes: list[dict]) -> str:
     return "INFO"
 
 
+def _display_vuln_findings(vuln_findings: list[dict]) -> list[dict]:
+    """Findings worth rendering as actual report findings."""
+    return [f for f in vuln_findings if f.get("status") != "not_applicable"]
+
+
 # ---------------------------------------------------------------------------
 # HTML Template
 # ---------------------------------------------------------------------------
@@ -258,6 +264,9 @@ tr:hover td { background: #f8fafc; }
 .status-confirmed { color: #dc2626; font-weight: 600; }
 .status-potential { color: #ea580c; font-weight: 600; }
 .status-unverified { color: #2563eb; }
+.status-inconclusive { color: #d97706; font-weight: 600; }
+.status-pairing_required { color: #2563eb; font-weight: 600; }
+.status-not_applicable { color: #64748b; }
 .reproduced-yes { color: #16a34a; font-weight: 600; }
 .reproduced-no { color: #dc2626; }
 .tag { display: inline-block; background: #f1f5f9; border: 1px solid #e2e8f0; padding: 2px 10px;
@@ -311,6 +320,7 @@ class ReportGenerator:
     def __init__(self):
         self.scan_results: list[dict] = []
         self.vuln_findings: list[dict] = []
+        self.vuln_scan_runs: list[dict] = []
         self.pbap_results: dict = {}
         self.map_results: dict = {}
         self.attack_results: dict = {}
@@ -346,7 +356,22 @@ class ReportGenerator:
         self.scan_results.extend(devices)
 
     def add_vuln_findings(self, findings: list[dict]):
+        if isinstance(findings, dict):
+            self.add_vuln_scan_result(findings)
+            return
         self.vuln_findings.extend(findings)
+
+    def add_vuln_scan_result(self, result: dict):
+        """Add a structured vulnscan result envelope."""
+        if result.get("schema") == "blue_tap.vulnscan.result":
+            self.vuln_scan_runs.append(result)
+            self.vuln_findings.extend(result.get("findings", []))
+            return
+        findings = result.get("findings")
+        if isinstance(findings, list):
+            self.vuln_findings.extend(findings)
+        else:
+            self.vuln_findings.append(result)
 
     def add_pbap_results(self, data: dict):
         self.pbap_results.update(data)
@@ -685,10 +710,12 @@ class ReportGenerator:
                         elif "map" in rel_lower:
                             self.map_results[rel] = data
                         elif "vuln" in rel_lower:
-                            if isinstance(data, list):
+                            if isinstance(data, dict) and data.get("schema") == "blue_tap.vulnscan.result":
+                                self.add_vuln_scan_result(data)
+                            elif isinstance(data, list):
                                 self.vuln_findings.extend(data)
                             else:
-                                self.vuln_findings.append(data)
+                                self.add_vuln_findings(data)
                         elif "fuzz" in rel_lower:
                             self.fuzz_results.append({"source": rel, "data": data})
                         elif "dos" in rel_lower or "flood" in rel_lower or "brute" in rel_lower:
@@ -759,12 +786,15 @@ class ReportGenerator:
 
         # Risk rating
         rating = _risk_rating(self.vuln_findings, self._fuzz_crashes)
+        vuln_summary = summarize_findings(self.vuln_findings)
+        display_findings = _display_vuln_findings(self.vuln_findings)
         s.append(f'<div style="text-align:center;margin:16px 0">'
                  f'<span class="risk-badge risk-{rating}">Overall Risk: {rating}</span></div>')
 
         # Narrative summary paragraph
-        confirmed = sum(1 for f in self.vuln_findings if f.get("status") == "confirmed")
-        potential = sum(1 for f in self.vuln_findings if f.get("status") == "potential")
+        confirmed = vuln_summary["confirmed"]
+        inconclusive = vuln_summary["inconclusive"]
+        pairing_required = vuln_summary["pairing_required"]
         crash_count = len(self._fuzz_crashes)
         num_devices = len(self.scan_results) or 1
 
@@ -772,7 +802,8 @@ class ReportGenerator:
             f'<p>This assessment evaluated the Bluetooth security posture of '
             f'{num_devices} device(s). '
             f'{confirmed} confirmed vulnerabilit{"y" if confirmed == 1 else "ies"} '
-            f'and {potential} potential issue(s) were identified, '
+            f'were identified, with {inconclusive} inconclusive probe result(s) '
+            f'and {pairing_required} pairing-gated check(s), '
             f'with an overall risk rating of <strong>{rating}</strong>.'
         )
         if crash_count:
@@ -825,7 +856,7 @@ class ReportGenerator:
         s.append('<div class="metric-grid">')
         for val, label in [
             (len(self.scan_results), "Devices Scanned"),
-            (f"{confirmed}C / {potential}P", "Vulnerabilities"),
+            (f"{confirmed}C / {inconclusive}I", "Vulnerabilities"),
             (f"{crash_count}", "Fuzz Crashes"),
             (f"{packets:,}", "Fuzz Test Cases"),
             (f"{data_exfil}", "Data Sets Exfiltrated"),
@@ -837,9 +868,9 @@ class ReportGenerator:
         s.append('</div>')
 
         # Findings breakdown table
-        if self.vuln_findings:
+        if display_findings:
             sev_counts: dict[str, int] = {}
-            for f in self.vuln_findings:
+            for f in display_findings:
                 sv = f.get("severity", "INFO").upper()
                 sev_counts[sv] = sev_counts.get(sv, 0) + 1
             s.append('<p><strong>Vulnerability Breakdown:</strong> ')
@@ -854,9 +885,9 @@ class ReportGenerator:
         charts = []
 
         # Vuln severity donut
-        if self.vuln_findings:
+        if display_findings:
             vuln_by_sev = {}
-            for f in self.vuln_findings:
+            for f in display_findings:
                 sv = f.get("severity", "INFO").upper()
                 vuln_by_sev[sv] = vuln_by_sev.get(sv, 0) + 1
             chart = _svg_donut_chart(vuln_by_sev, _SEVERITY_COLORS)
@@ -1021,21 +1052,59 @@ class ReportGenerator:
     def _build_vuln_html(self) -> str:
         if not self.vuln_findings:
             return ""
+        display_findings = _display_vuln_findings(self.vuln_findings)
+        vuln_summary = summarize_findings(self.vuln_findings)
         s = []
         s.append('<div class="section" id="sec-vulnerabilities">')
         s.append('<h2>Vulnerability Findings</h2>')
-        s.append('<p>The following vulnerabilities were identified through active probing, '
-                 'protocol analysis, and version fingerprinting. Each finding includes '
-                 'evidence collected during the assessment. Confirmed findings were '
-                 'validated through direct interaction with the target. Potential findings '
-                 'are based on version analysis and configuration indicators.</p>')
+        s.append('<p>The following findings were produced by Blue-Tap vulnerability scanning. '
+                 'Confirmed findings are backed by an observed OTA protocol differential. '
+                 'Inconclusive findings reached the target but did not produce a binary answer. '
+                 'Pairing-required checks could not be validated in the current session.</p>')
+
+        s.append('<p><strong>Status Breakdown:</strong> '
+                 f'confirmed={vuln_summary["confirmed"]}, '
+                 f'inconclusive={vuln_summary["inconclusive"]}, '
+                 f'pairing_required={vuln_summary["pairing_required"]}, '
+                 f'not_applicable={vuln_summary["not_applicable"]}</p>')
+
+        if self.vuln_scan_runs:
+            latest = self.vuln_scan_runs[-1]
+            non_cve_checks = latest.get("non_cve_checks", [])
+            if non_cve_checks:
+                s.append('<h3>Non-CVE Check Execution</h3>')
+                s.append('<table><tr><th>Check ID</th><th>Check</th><th>Section</th><th>Status</th><th>Findings</th></tr>')
+                for check in non_cve_checks:
+                    s.append(
+                        f'<tr><td>{_esc(check.get("check_id", ""))}</td>'
+                        f'<td>{_esc(check.get("title", ""))}</td>'
+                        f'<td>{_esc(check.get("section", ""))}</td>'
+                        f'<td class="status-{_esc(check.get("primary_status", "unknown"))}">'
+                        f'{_esc(check.get("primary_status", "unknown"))}</td>'
+                        f'<td>{_esc(str(check.get("finding_count", 0)))}</td></tr>'
+                    )
+                s.append('</table>')
+            checks = latest.get("cve_checks", [])
+            if checks:
+                s.append('<h3>CVE Check Execution</h3>')
+                s.append('<table><tr><th>CVE</th><th>Check</th><th>Section</th><th>Status</th><th>Findings</th></tr>')
+                for check in checks:
+                    s.append(
+                        f'<tr><td>{_esc(check.get("cve", ""))}</td>'
+                        f'<td>{_esc(check.get("title", ""))}</td>'
+                        f'<td>{_esc(check.get("section", ""))}</td>'
+                        f'<td class="status-{_esc(check.get("primary_status", "unknown"))}">'
+                        f'{_esc(check.get("primary_status", "unknown"))}</td>'
+                        f'<td>{_esc(str(check.get("finding_count", 0)))}</td></tr>'
+                    )
+                s.append('</table>')
 
         # Summary table
         s.append('<table><tr><th>ID</th><th>Severity</th><th>Status</th>'
                  '<th>Finding</th><th>CVE</th></tr>')
-        for i, v in enumerate(self.vuln_findings, 1):
+        for i, v in enumerate(display_findings, 1):
             sev = v.get("severity", "INFO").upper()
-            status = v.get("status", "potential")
+            status = v.get("status", "inconclusive")
             confidence = v.get("confidence", "")
             status_display = f'{status} ({confidence})' if confidence else status
             cve = v.get("cve", "N/A")
@@ -1050,9 +1119,9 @@ class ReportGenerator:
 
         # Individual finding cards
         s.append('<h3>Finding Details</h3>')
-        for i, v in enumerate(self.vuln_findings, 1):
+        for i, v in enumerate(display_findings, 1):
             sev = v.get("severity", "INFO").upper()
-            status = v.get("status", "potential")
+            status = v.get("status", "inconclusive")
             confidence = v.get("confidence", "")
             cve = v.get("cve", "N/A")
             desc = v.get("description", "")
@@ -1060,6 +1129,8 @@ class ReportGenerator:
             evidence = v.get("evidence", "")
             remediation = v.get("remediation", "")
             category = v.get("category", "")
+            check_title = v.get("check_title", "")
+            check_section = v.get("section", "")
 
             s.append(f'<div class="finding-card sev-{sev}">')
             s.append(f'<h4>VULN-{i:03d}: {_esc(v.get("name", "Unknown Finding"))}</h4>')
@@ -1073,8 +1144,15 @@ class ReportGenerator:
 
             if desc:
                 s.append(f'<p><strong>Description:</strong> {_esc(desc)}</p>')
+            if check_title:
+                s.append(f'<p><strong>Check:</strong> {_esc(check_title)}</p>')
+            if check_section:
+                s.append(f'<p><strong>Scanner Section:</strong> {_esc(check_section)}</p>')
             if impact:
                 s.append(f'<p><strong>Impact:</strong> {_esc(impact)}</p>')
+            preconditions = v.get("preconditions") or []
+            if preconditions:
+                s.append(f'<p><strong>Preconditions:</strong> {_esc(", ".join(map(str, preconditions)))}</p>')
 
             if evidence:
                 s.append('<div class="evidence-block">'
@@ -2056,6 +2134,7 @@ class ReportGenerator:
 
     def generate_json(self, output: str = "report.json") -> str:
         """Generate a machine-readable JSON report."""
+        vuln_summary = summarize_findings(self.vuln_findings)
         # Fuzz section
         fuzz_data = {}
         if self._fuzz_campaign_stats or self._fuzz_crashes:
@@ -2115,12 +2194,15 @@ class ReportGenerator:
             "scope": scope,
             "summary": {
                 "devices_scanned": len(self.scan_results),
-                "total_findings": len(self.vuln_findings),
-                "confirmed": sum(1 for f in self.vuln_findings if f.get("status") == "confirmed"),
-                "potential": sum(1 for f in self.vuln_findings if f.get("status") == "potential"),
-                "unverified": sum(1 for f in self.vuln_findings if f.get("status") == "unverified"),
-                "high_severity": sum(1 for f in self.vuln_findings
-                                     if f.get("severity", "").lower() in ("high", "critical")),
+                "total_findings": vuln_summary["displayed"],
+                "status_counts": vuln_summary["status_counts"],
+                "confirmed": vuln_summary["confirmed"],
+                "potential": vuln_summary["potential"],
+                "unverified": vuln_summary["unverified"],
+                "inconclusive": vuln_summary["inconclusive"],
+                "pairing_required": vuln_summary["pairing_required"],
+                "not_applicable": vuln_summary["not_applicable"],
+                "high_severity": vuln_summary["high_or_critical"],
                 "fuzz_test_cases": self._fuzz_campaign_stats.get("packets_sent", 0),
                 "fuzz_crashes": len(self._fuzz_crashes),
                 "data_exfiltration": len(self.pbap_results) + len(self.map_results),
@@ -2129,6 +2211,7 @@ class ReportGenerator:
             "fingerprint": self.fingerprint_results,
             "scan_results": self.scan_results,
             "vulnerabilities": self.vuln_findings,
+            "vulnerability_scans": self.vuln_scan_runs,
             "pbap_data": self.pbap_results,
             "map_data": self.map_results,
             "attack_results": self.attack_results,

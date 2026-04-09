@@ -23,7 +23,7 @@ It discovers and fingerprints devices, exploits 10+ CVEs (BIAS, KNOB, BLUFFS, SS
 
 - **Discovers** Bluetooth Classic and BLE devices in range, classifying IVI systems by device class, name heuristics, and service UUIDs. Fleet-wide scanning assesses all nearby devices in one pass.
 - **Fingerprints** target devices to determine Bluetooth version, LMP features, chipset manufacturer, supported profiles, pairing mode, IO capabilities, and attack surface.
-- **Assesses vulnerabilities** with a non-destructive 5-phase assessment (fingerprint, service discovery, 20+ CVE checks, DarkFirmware LMP probe, summary with next-step commands) or full vulnerability scan with 20+ evidence-based checks. Each finding includes severity, confidence, CVE reference, evidence, and remediation.
+- **Assesses vulnerabilities** with `vulnscan`, which runs heuristic and OTA behavioral checks for known CVEs plus modular non-CVE exposure and posture checks in one command. Findings and per-check execution logs are exported into the HTML/JSON reporting pipeline with evidence and remediation.
 - **Attacks below the HCI boundary** via DarkFirmware on RTL8761B (TP-Link UB500) — live RAM patching for BDADDR spoofing without reset, 17-byte LMP PDU injection/capture, controller memory read/write. Enables BLUFFS session key downgrade (CVE-2023-24023), encryption downgrade, and LMP-level DoS/fuzzing.
 - **Extracts data** via PBAP (phonebook, call logs, favorites), MAP (SMS/MMS/email messages), AT commands (IMEI, IMSI, phonebook, SMS), and OBEX Object Push — all without user awareness on the IVI.
 - **Hijacks connections** by impersonating a paired phone (MAC + name + device class cloning) to access the IVI without re-pairing. Supports BIAS (CVE-2020-10135) role-switch authentication bypass via software or DarkFirmware LMP injection.
@@ -187,7 +187,7 @@ Full command reference and examples: **[docs/features.md](docs/features.md)**
 
 - **Discovery and Scanning** — Classic + BLE scanning, device class decoding, manufacturer ID, RSSI distance estimation, fleet-wide scan
 - **Reconnaissance** — SDP browse, fingerprinting (BT version, chipset, LMP features), RFCOMM/L2CAP channel scan, GATT enumeration, HCI capture, LMP sniffing
-- **Vulnerability Assessment** — 20+ CVE checks (KNOB, BIAS, BLUFFS, BlueBorne, BrakTooth, SweynTooth, PerfektBlue, Invalid Curve, CTKD), non-destructive 5-phase assess mode
+- **Vulnerability Assessment** — 20+ CVE checks (KNOB, BIAS, BLUFFS, BlueBorne, BrakTooth, SweynTooth, PerfektBlue, Invalid Curve, CTKD) plus non-CVE exposure checks, all through `vulnscan`
 - **Connection Hijacking and BIAS** — MAC/name/class cloning, BIAS role-switch bypass (CVE-2020-10135), auto-reconnect with per-phase rollback
 - **KNOB Attack** — Negotiate minimum encryption key entropy (CVE-2019-9506), then brute force the reduced key space
 - **SSP Downgrade** — Force SSP to legacy PIN mode, brute force PIN (0000-9999), lockout detection
@@ -273,6 +273,7 @@ sudo blue-tap vulnscan <MAC>        # Run vulnerability checks
 ## Documentation
 
 - **[Features](docs/features.md)** — Every command, option, and example for all feature categories
+- **[Vulnscan CVE Matrix](docs/vulnscan-cve-matrix.md)** — Exact CVEs checked by `blue-tap vulnscan`
 - **[Usage Guide](docs/usage-guide.md)** — Global options, command reference, and 9 complete pentest workflows
 - **[Troubleshooting](docs/troubleshooting.md)** — Adapter, scanning, connection, SDP, fuzzing, audio, MAC spoofing, and report issues
 - **[IVI Simulator and Demo](docs/ivi-simulator.md)** — Vulnerable IVI simulator setup, exposed services, built-in vulnerabilities, demo mode

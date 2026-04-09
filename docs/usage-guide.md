@@ -56,9 +56,8 @@ Options:
 │ adapter           HCI Bluetooth adapter management.                          │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭─ Assessment ─────────────────────────────────────────────────────────────────╮
-│ assess     Safe non-destructive security assessment (5-phase).              │
 │ vulnscan   Scan target for vulnerabilities and attack-surface indicators.    │
-│ fleet      Fleet-wide Bluetooth assessment — scan, classify, assess          │
+│ fleet      Fleet-wide Bluetooth assessment — scan, classify, vulnscan        │
 │            multiple devices.                                                 │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭─ Exploitation ───────────────────────────────────────────────────────────────╮
@@ -155,7 +154,7 @@ blue-tap -s pentest recon l2cap-scan AA:BB:CC:DD:EE:FF
 blue-tap -s pentest recon gatt AA:BB:CC:DD:EE:FF
 
 # 3. Vulnerability assessment (with active BIAS probe)
-blue-tap -s pentest vulnscan AA:BB:CC:DD:EE:FF --active --phone CC:DD:EE:FF:00:11
+blue-tap -s pentest vulnscan AA:BB:CC:DD:EE:FF --phone CC:DD:EE:FF:00:11
 
 # 4. Pairing attacks
 blue-tap -s pentest ssp-downgrade probe AA:BB:CC:DD:EE:FF

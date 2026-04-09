@@ -58,66 +58,26 @@ Deep service enumeration, device fingerprinting, and radio-level capture. All re
 
 ### 3. Vulnerability Assessment
 
-Vulnerability scanner with 20+ checks covering known CVEs, protocol weaknesses, and configuration issues. Each finding includes severity, CVE reference, impact description, remediation guidance, status (confirmed/potential/unverified), and confidence rating. Version/feature checks run in parallel for speed; active connection checks run sequentially. All checks include automatic retry on transient failures.
+Vulnerability scanner with heuristic and OTA behavioral checks for known CVEs, protocol weaknesses, and configuration issues. Findings now use the scanner status model `confirmed`, `inconclusive`, `pairing_required`, and `not_applicable`, with some older heuristic checks still returning legacy `potential` / `unverified` statuses. Output and JSON export include structured evidence, confidence, remediation, per-check metadata, and execution logs for both CVE and non-CVE scanner sections.
 
 ```
-blue-tap vulnscan <MAC>                                # Standard scan (passive + heuristic checks)
-blue-tap vulnscan <MAC> --active                       # Include invasive checks (BIAS probe, PIN lockout)
-blue-tap vulnscan <MAC> --active --phone <PHONE_MAC>   # BIAS probe with known paired phone
-blue-tap vulnscan <MAC> -o findings.json               # Export findings to JSON
+blue-tap vulnscan <MAC>                                # Full vulnerability scan
+blue-tap vulnscan <MAC> --phone <PHONE_MAC>            # Add paired-phone context for BIAS auto-reconnect probe
+blue-tap vulnscan <MAC> -o findings.json               # Export structured vulnscan JSON
 ```
 
-**`--active` mode:** Enables invasive checks that modify adapter state or send pairing attempts. The BIAS auto-reconnect probe requires the paired phone's MAC — provide via `--phone` or select interactively from a device scan. Without `--active`, BIAS and PIN lockout checks are skipped (noted in output).
+`vulnscan` runs the full scanner in one pass. Some checks are invasive and may send pairing attempts, exercise raw ACL paths, or temporarily alter local adapter state. The BIAS auto-reconnect probe uses `--phone` when you want to test reconnect behavior against the target's normally paired phone identity; without it, the rest of the scan still runs and that specific BIAS path is recorded as unmet.
 
-**Vulnerability checks performed:**
+**Coverage reference:** See [Vulnerability Scanner CVE Matrix](vulnscan-cve-matrix.md) for the full list of CVEs actually checked by `vulnscan` and their module ownership.
 
-| Check | CVE(s) | What It Detects |
-|-------|--------|-----------------|
-| Service Exposure | — | Sensitive RFCOMM services (PBAP/MAP) reachable without auth challenge |
-| KNOB | CVE-2019-9506 | LMP key size negotiation downgrade (BT < 5.1, pause_encryption) |
-| BLURtooth / CTKD | CVE-2020-15802 | Cross-transport key derivation overwrite (BT 4.2-5.0, dual-mode) |
-| PerfektBlue | CVE-2024-45431/32/33/34 | OpenSynergy BlueSDK vulns (VW/Audi/Mercedes IVI, invalid CID probe) |
-| BLUFFS | CVE-2023-24023 | Session key derivation downgrade (BT 4.2-5.4) |
-| PIN Pairing Bypass | CVE-2020-26555 | BR/EDR impersonation via PIN response spoofing |
-| Invalid Curve | CVE-2018-5383 | ECDH public key validation skip in SSP/SC (BT 4.2-5.0) |
-| BIAS | CVE-2020-10135 | Authentication bypass via role-switch — passive version check + active auto-reconnect probe (`--active`) |
-| BlueBorne | CVE-2017-1000251 | BlueZ version check via `bluetoothd --version` (primary) or SDP string (fallback) |
-| BrakTooth | 25 CVEs | Chipset-specific LMP/baseband vulns — word-boundary matching against all known vulnerable chipsets (ESP32, Cypress, CSR, Intel, Qualcomm), reports all applicable CVEs |
-| Pairing Method | — | Legacy PIN vs SSP Just Works vs MITM-protected |
-| Writable GATT | — | BLE characteristics writable without authentication (OTA update, diagnostics) |
-| EATT Support | — | Enhanced ATT channel support and L2CAP CoC configuration |
-| Hidden RFCOMM | — | RFCOMM channels open but not advertised in SDP |
-| Encryption Enforcement | — | Services accessible without mandatory encryption (OBEX response codes: 0xA0 success, 0xC1/0xC3 unauthorized, 0xC0/0xD0 error) |
-| PIN Lockout | — | Absence of rate limiting on pairing attempts (`--active` only — sends 2 test attempts) |
-| Device Class | — | Identifies Car Audio / Hands-Free device class (IVI indicator) |
-| LMP Features | — | Feature flag analysis (encryption, SC, LE, dual-mode) |
-| Authorization Model | — | OBEX authorization probing for PBAP/MAP with full response code handling |
-| Automotive Diagnostics | — | OBD/UDS/diagnostic/CAN bus service exposure via Bluetooth SPP/DUN |
+**High-level checks performed:**
 
-
----
-
-### 3b. Assessment without Exploitation
-
-Non-destructive, 5-phase security assessment that runs fingerprinting, service discovery, and vulnerability scanning without exploitation.
-
-```bash
-blue-tap assess <MAC>                              # Standard 5-phase assessment
-blue-tap assess <MAC> --active -i hci1             # Include active LMP probing
-blue-tap assess <MAC> -o assessment.json           # Export results to JSON
-```
-
-**Assessment phases:**
-
-| Phase | What It Does |
-|:-----:|-------------|
-| 1 | Fingerprint — BT version, chipset, manufacturer, LMP features |
-| 2 | Service discovery — SDP browse, RFCOMM channel scan |
-| 3 | Vulnerability scan — 20+ CVE checks |
-| 4 | DarkFirmware probe — active LMP feature/version check (if `--active`) |
-| 5 | Summary — findings table with recommended next-step commands |
-
-Output includes a summary table of findings and recommended Blue-Tap commands to investigate each finding further.
+| Check Family | Examples |
+|-------------|----------|
+| Heuristic CVE checks | KNOB, BLURtooth, BLUFFS, PerfektBlue, BIAS, BlueBorne, BrakTooth |
+| Behavioral CVE checks | SDP, BNEP, AVRCP, HID/HOGP, L2CAP, SMP, Airoha RACE, EATT |
+| Pairing-gated checks | LE SC reflected-key, BLE legacy pairing bypass, BR/EDR pairing method probes |
+| Non-CVE exposure and posture checks | Service exposure, writable GATT, hidden RFCOMM, encryption enforcement, diagnostics exposure, pairing posture, PIN lockout, LMP/device-class posture |
 
 ---
 
@@ -889,4 +849,3 @@ steps:
 ```
 
 ---
-
