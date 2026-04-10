@@ -305,6 +305,8 @@ def device_table(devices: list[dict], title: str = "Discovered Devices") -> Tabl
     table.add_column("RSSI", style=YELLOW, justify="right")
     table.add_column("Type", style=BLUE)
     table.add_column("Class", style=DIM)
+    table.add_column("Manufacturer", style=CYAN)
+    table.add_column("Services", style=PURPLE)
     table.add_column("Dist", style=DIM, justify="right")
     for i, dev in enumerate(devices, 1):
         rssi = str(dev.get("rssi", "N/A"))
@@ -326,6 +328,18 @@ def device_table(devices: list[dict], title: str = "Discovered Devices") -> Tabl
         class_str = class_info.get("major", "") if class_info else ""
         if class_info.get("minor") and class_info["minor"] != "Unknown":
             class_str = class_info["minor"]
+        manufacturer = dev.get("manufacturer_name") or dev.get("oui_vendor") or ""
+        if not manufacturer:
+            manufacturer_data = dev.get("manufacturer_data") or []
+            if manufacturer_data:
+                manufacturer = manufacturer_data[0].get("company_hex", "")
+        service_uuids = dev.get("service_uuids") or []
+        if len(service_uuids) <= 2:
+            service_preview = ", ".join(service_uuids)
+        elif service_uuids:
+            service_preview = f"{', '.join(service_uuids[:2])} (+{len(service_uuids) - 2})"
+        else:
+            service_preview = ""
         # Distance
         dist = dev.get("distance_m")
         dist_str = f"~{dist}m" if dist else ""
@@ -336,6 +350,8 @@ def device_table(devices: list[dict], title: str = "Discovered Devices") -> Tabl
             rssi,
             dev.get("type", "Classic"),
             class_str,
+            manufacturer,
+            service_preview,
             dist_str,
         )
     return table
