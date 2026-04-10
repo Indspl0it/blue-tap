@@ -320,6 +320,7 @@ _PROTOCOL_GENERATORS: dict[str, tuple[str, str, str | None]] = {
     "bnep":         ("blue_tap.fuzz.protocols.bnep",        "generate_all_bnep_fuzz_cases",   None),
     "rfcomm":       ("blue_tap.fuzz.protocols.rfcomm",      "generate_all_rfcomm_fuzz_cases", None),
     "l2cap":        ("blue_tap.fuzz.protocols.l2cap",       "generate_all_l2cap_fuzz_cases",  None),
+    "l2cap-sig":    ("blue_tap.fuzz.protocols.l2cap_raw",   "generate_all_l2cap_sig_fuzz_cases", None),
 }
 
 # All protocol families (used for "generate all")

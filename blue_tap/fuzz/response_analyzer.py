@@ -1032,6 +1032,7 @@ _STRUCTURAL_VALIDATORS: dict[str, type[list]] = {
     "sdp": _validate_sdp_structure,
     "ble-att": _validate_att_structure,
     "l2cap": _validate_l2cap_structure,
+    "l2cap-sig": _validate_l2cap_structure,
     "rfcomm": _validate_rfcomm_structure,
     "ble-smp": _validate_smp_structure,
     "obex-pbap": _validate_obex_structure,
@@ -1292,6 +1293,7 @@ _EXPECTED_ENTROPY: dict[str, tuple[float, float]] = {
     "sdp": (2.0, 4.5),
     "ble-att": (3.0, 5.5),
     "l2cap": (2.0, 4.5),
+    "l2cap-sig": (2.0, 4.5),
     "rfcomm": (3.0, 6.5),
     "ble-smp": (3.0, 5.0),
     "obex-pbap": (3.0, 6.0),
@@ -1837,6 +1839,7 @@ class ResponseAnalyzer:
             "ble-att": (range(0x01, 0x25), "ATT opcodes"),
             "ble-smp": (range(0x01, 0x0F), "SMP codes"),
             "l2cap": (range(0x01, 0x12), "L2CAP signaling codes"),
+            "l2cap-sig": (range(0x01, 0x12), "L2CAP signaling codes"),
         }
 
         # Text-based protocols: first byte should be printable ASCII
