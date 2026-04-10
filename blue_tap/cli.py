@@ -3324,6 +3324,7 @@ def hfp_connect(address, channel):
         return
     from blue_tap.attack.hfp import HFPClient
     from blue_tap.recon.sdp import find_service_channel
+    capability_limitations = _profile_capability_limitations(family="hfp")
 
     if channel is None:
         channel = find_service_channel(address, "Hands-Free")
@@ -3349,8 +3350,18 @@ def hfp_connect(address, channel):
                     client.send_at(cmd)
             except (EOFError, KeyboardInterrupt):
                 break
-        from blue_tap.utils.session import log_command
-        log_command("hfp_connect", {"channel": channel}, category="attack", target=address)
+        _log_standardized_operation(
+            module="audio",
+            command="hfp_connect",
+            title="HFP Service Level Connection",
+            protocol="HFP",
+            target=address,
+            result={"channel": channel, "interactive": True},
+            category="audio",
+            observations=[f"channel={channel}", "interactive=true"],
+            capability_limitations=capability_limitations,
+            module_outcome="success",
+        )
         client.disconnect()
         info("HFP session closed.")
     else:
@@ -3368,7 +3379,9 @@ def hfp_capture(address, channel, output, duration):
     if not address:
         return
     from blue_tap.attack.hfp import HFPClient
+    from blue_tap.core.audio_framework import artifact_if_file, build_audio_result
     from blue_tap.recon.sdp import find_service_channel
+    capability_limitations = _profile_capability_limitations(family="hfp")
 
     if channel is None:
         channel = find_service_channel(address, "Hands-Free")
@@ -3384,15 +3397,37 @@ def hfp_capture(address, channel, output, duration):
     if client.connect() and client.setup_slc():
         success("HFP SLC established.")
         info(f"Starting call audio capture on {address} (duration {duration}s)...")
-        client.capture_audio(output, duration)
+        capture_path = client.capture_audio(output, duration)
         import os
-        if os.path.exists(output):
-            size = os.path.getsize(output)
+        if capture_path and os.path.exists(capture_path):
+            size = os.path.getsize(capture_path)
             success(f"Audio saved to {output} ({size} bytes)")
+            module_outcome = "success"
         else:
             warning(f"Capture completed but output file {output} not found.")
+            size = 0
+            module_outcome = "failed"
         from blue_tap.utils.session import log_command
-        log_command("hfp_capture", {"output": output, "duration": duration}, category="audio", target=address)
+        artifact = artifact_if_file(
+            capture_path or output,
+            kind="audio",
+            label="HFP Capture",
+            description="Captured HFP call audio.",
+        )
+        envelope = build_audio_result(
+            target=address,
+            adapter="hci0",
+            operation="hfp_capture",
+            title="HFP Audio Capture",
+            protocol="HFP/SCO",
+            summary_data={"duration": duration, "output_file": output},
+            observations=[f"duration={duration}", f"output={output}", f"size={size}"],
+            capability_limitations=capability_limitations,
+            module_data={"output_file": output, "duration": duration, "size": size, "description": "Captured HFP call audio"},
+            artifacts=[artifact] if artifact else [],
+            module_outcome=module_outcome,
+        )
+        log_command("hfp_capture", envelope, category="audio", target=address)
         client.disconnect()
         info("HFP session closed.")
     else:
@@ -3410,6 +3445,7 @@ def hfp_inject(address, audio_file, channel):
         return
     from blue_tap.attack.hfp import HFPClient
     from blue_tap.recon.sdp import find_service_channel
+    capability_limitations = _profile_capability_limitations(family="hfp")
 
     if channel is None:
         channel = find_service_channel(address, "Hands-Free")
@@ -3425,10 +3461,24 @@ def hfp_inject(address, audio_file, channel):
     if client.connect() and client.setup_slc():
         success("HFP SLC established.")
         info(f"Injecting audio from {audio_file} into call on {address}...")
-        client.inject_audio(audio_file)
-        success("Audio injection complete.")
-        from blue_tap.utils.session import log_command
-        log_command("hfp_inject", {"audio_file": audio_file}, category="attack", target=address)
+        injected = client.inject_audio(audio_file)
+        if injected:
+            success("Audio injection complete.")
+        else:
+            error("Audio injection failed.")
+        _log_standardized_operation(
+            module="audio",
+            command="hfp_inject",
+            title="HFP Audio Injection",
+            protocol="HFP/SCO",
+            target=address,
+            result={"audio_file": audio_file, "channel": channel, "injected": injected},
+            category="audio",
+            observations=[f"channel={channel}", f"audio_file={audio_file}"],
+            capability_limitations=capability_limitations,
+            artifact_paths=[{"path": audio_file, "kind": "audio", "label": "Injected Audio File", "description": "Operator-supplied audio injected via HFP SCO."}],
+            module_outcome="success" if injected else "failed",
+        )
         client.disconnect()
         info("HFP session closed.")
     else:
@@ -3446,6 +3496,7 @@ def hfp_at(address, command, channel):
         return
     from blue_tap.attack.hfp import HFPClient
     from blue_tap.recon.sdp import find_service_channel
+    capability_limitations = _profile_capability_limitations(family="hfp")
 
     if channel is None:
         channel = find_service_channel(address, "Hands-Free")
@@ -3461,9 +3512,23 @@ def hfp_at(address, command, channel):
         info(f"Sending AT command: {command}")
         result = client.send_at(command)
         console.print(f"[yellow]{result}[/yellow]")
-        success("AT command sent.")
-        from blue_tap.utils.session import log_command
-        log_command("hfp_at", {"command": command, "response": result}, category="attack", target=address)
+        command_ok = _command_succeeded(result)
+        if command_ok:
+            success("AT command sent.")
+        else:
+            warning("AT command returned an error or empty response.")
+        _log_standardized_operation(
+            module="audio",
+            command="hfp_at",
+            title="HFP AT Command",
+            protocol="HFP",
+            target=address,
+            result={"command": command, "response": result, "channel": channel},
+            category="audio",
+            observations=[f"channel={channel}", f"command={command}"],
+            capability_limitations=capability_limitations,
+            module_outcome="success" if command_ok else "failed",
+        )
         client.disconnect()
         info("HFP session closed.")
     else:
@@ -3482,6 +3547,7 @@ def hfp_dtmf(address, digits, channel, interval):
         return
     from blue_tap.attack.hfp import HFPClient
     from blue_tap.recon.sdp import find_service_channel
+    capability_limitations = _profile_capability_limitations(family="hfp")
 
     if channel is None:
         channel = find_service_channel(address, "Hands-Free")
@@ -3496,8 +3562,24 @@ def hfp_dtmf(address, digits, channel, interval):
     if client.connect() and client.setup_slc():
         success("HFP SLC established.")
         info(f"Sending DTMF digits '{digits}' (interval {interval}s)...")
-        client.dtmf_sequence(digits, interval)
-        success(f"DTMF sequence '{digits}' sent.")
+        results = client.dtmf_sequence(digits, interval)
+        sent = all(_command_succeeded(item) for item in results) if results else False
+        if sent:
+            success(f"DTMF sequence '{digits}' sent.")
+        else:
+            warning(f"DTMF sequence '{digits}' was not fully acknowledged.")
+        _log_standardized_operation(
+            module="audio",
+            command="hfp_dtmf",
+            title="HFP DTMF Sequence",
+            protocol="HFP",
+            target=address,
+            result={"digits": digits, "channel": channel, "responses": results},
+            category="audio",
+            observations=[f"channel={channel}", f"digits={digits}", f"interval={interval}"],
+            capability_limitations=capability_limitations,
+            module_outcome="success" if sent else "failed",
+        )
         client.disconnect()
         info("HFP session closed.")
     else:
@@ -3515,6 +3597,7 @@ def hfp_hold(address, action, channel):
         return
     from blue_tap.attack.hfp import HFPClient
     from blue_tap.recon.sdp import find_service_channel
+    capability_limitations = _profile_capability_limitations(family="hfp")
 
     if channel is None:
         channel = find_service_channel(address, "Hands-Free")
@@ -3533,7 +3616,23 @@ def hfp_hold(address, action, channel):
         info(f"Sending call hold action {action} ({action_desc}) to {address}...")
         result = client.call_hold(action)
         console.print(f"[yellow]{result}[/yellow]")
-        success(f"Hold action '{action_desc}' sent.")
+        action_ok = _command_succeeded(result)
+        if action_ok:
+            success(f"Hold action '{action_desc}' sent.")
+        else:
+            warning(f"Hold action '{action_desc}' failed.")
+        _log_standardized_operation(
+            module="audio",
+            command="hfp_hold",
+            title="HFP Call Hold Control",
+            protocol="HFP",
+            target=address,
+            result={"action": action, "description": action_desc, "response": result, "channel": channel},
+            category="audio",
+            observations=[f"channel={channel}", f"action={action}"],
+            capability_limitations=capability_limitations,
+            module_outcome="success" if action_ok else "failed",
+        )
         client.disconnect()
         info("HFP session closed.")
     else:
