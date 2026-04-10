@@ -6194,7 +6194,16 @@ def auto_cmd(ivi_mac, duration, output, hci, fuzz_duration, skip_fuzz, skip_dos,
         )
         os.makedirs(output, exist_ok=True)
         _save_json(results, os.path.join(output, "auto_results.json"))
-        log_command("auto", results, category="attack", target=ivi_mac)
+        _log_standardized_operation(
+            module="attack",
+            command="auto",
+            title="Automated Attack Workflow",
+            protocol="multi",
+            target=ivi_mac,
+            result=results,
+            category="attack",
+            observations=[f"skip_fuzz={skip_fuzz}", f"skip_dos={skip_dos}", f"skip_exploit={skip_exploit}"],
+        )
     except KeyboardInterrupt:
         warning("\nInterrupted by user")
 
@@ -6516,7 +6525,7 @@ def ssp_probe(address, hci):
     console.print(table)
 
     from blue_tap.utils.session import log_command
-    log_command("ssp_probe", result, category="vuln", target=address)
+    log_command("ssp_probe", attack.build_envelope(), category="attack", target=address)
 
 
 @ssp_downgrade.command("attack")
