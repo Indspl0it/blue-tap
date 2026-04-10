@@ -22,6 +22,22 @@ class FuzzReportAdapter(ReportAdapter):
         if run_type == "campaign":
             report_state.setdefault("campaigns", []).append(module_data)
             report_state.setdefault("crashes", []).extend(module_data.get("crashes", []))
+            # Extract per-protocol execution data
+            for execution in envelope_executions(envelope):
+                if execution.get("kind") == "probe" and execution.get("id", "").startswith("fuzz_"):
+                    report_state.setdefault("fuzz_protocol_runs", []).append(execution)
+                    # Extract state coverage from module_evidence
+                    me = execution.get("evidence", {}).get("module_evidence", {})
+                    if me.get("state_coverage"):
+                        report_state.setdefault("fuzz_state_coverage", []).append({
+                            "protocol": execution.get("protocol", ""),
+                            **me["state_coverage"],
+                        })
+                    if me.get("field_weights"):
+                        report_state.setdefault("fuzz_field_weights", []).append({
+                            "protocol": execution.get("protocol", ""),
+                            "weights": me["field_weights"],
+                        })
         elif run_type == "single_protocol_run":
             report_state.setdefault("protocol_runs", []).append(module_data)
             result = module_data.get("result")
@@ -96,19 +112,47 @@ class FuzzReportAdapter(ReportAdapter):
                 )
             )
 
+        # Per-protocol breakdown
+        proto_runs = report_state.get("fuzz_protocol_runs", [])
+        if proto_runs:
+            proto_rows = []
+            for pr in proto_runs:
+                md = pr.get("module_data", {})
+                proto_rows.append([
+                    pr.get("protocol", ""),
+                    str(md.get("packets_sent", 0)),
+                    str(md.get("crashes", 0)),
+                    str(md.get("anomalies", 0)),
+                    str(md.get("states_discovered", 0)),
+                    pr.get("module_outcome", ""),
+                ])
+            blocks.append(
+                SectionBlock(
+                    "table",
+                    {
+                        "headers": ["Protocol", "Packets", "Crashes", "Anomalies", "States", "Outcome"],
+                        "rows": proto_rows,
+                    },
+                )
+            )
+
         # Crash cards if available
         crashes = report_state.get("crashes", [])
         if crashes:
             cards = []
             for crash in crashes[:20]:
+                payload_hex = crash.get("payload_hex", "")
+                details = {
+                    "Protocol": crash.get("protocol", ""),
+                    "Severity": crash.get("severity", ""),
+                    "Reproduced": "Yes" if crash.get("reproduced") else "No",
+                }
+                if payload_hex:
+                    details["Payload (first 32B)"] = payload_hex[:64]
                 cards.append({
                     "title": crash.get("crash_type", "Unknown Crash"),
                     "status": crash.get("severity", "MEDIUM").lower(),
-                    "details": {
-                        "Protocol": crash.get("protocol", ""),
-                        "Severity": crash.get("severity", ""),
-                        "Reproduced": "Yes" if crash.get("reproduced") else "No",
-                    },
+                    "details": details,
                     "body": crash.get("description", crash.get("error", "")),
                 })
             blocks.append(SectionBlock("card_list", {"cards": cards}))
@@ -134,4 +178,7 @@ class FuzzReportAdapter(ReportAdapter):
             "crashes": report_state.get("crashes", []),
             "results": report_state.get("fuzz_results", []),
             "executions": report_state.get("fuzz_executions", []),
+            "per_protocol_runs": report_state.get("fuzz_protocol_runs", []),
+            "state_coverage": report_state.get("fuzz_state_coverage", []),
+            "field_weights": report_state.get("fuzz_field_weights", []),
         }

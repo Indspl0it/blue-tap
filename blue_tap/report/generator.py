@@ -12,7 +12,6 @@ import os
 import shutil
 from datetime import datetime
 
-from blue_tap.attack.cve_framework import summarize_findings
 from blue_tap.report.adapters import REPORT_ADAPTERS
 from blue_tap.report.renderers import render_sections
 from blue_tap.utils.output import info, success, error
@@ -890,6 +889,7 @@ class ReportGenerator:
         s.append('<h2>Executive Summary</h2>')
 
         # Risk rating
+        from blue_tap.attack.cve_framework import summarize_findings  # CVE-specific; imported here, not at module level
         rating = _risk_rating(self.vuln_findings, self._fuzz_crashes)
         vuln_summary = summarize_findings(self.vuln_findings)
         display_findings = _display_vuln_findings(self.vuln_findings)
@@ -1916,6 +1916,7 @@ class ReportGenerator:
 
     def generate_json(self, output: str = "report.json") -> str:
         """Generate a machine-readable JSON report."""
+        from blue_tap.attack.cve_framework import summarize_findings  # CVE-specific; imported here, not at module level
         vuln_summary = summarize_findings(self.vuln_findings)
         # Fuzz section
         fuzz_data = {}
