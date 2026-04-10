@@ -7033,11 +7033,11 @@ def fleet_report(duration, hci, output, fmt, all_devices):
     else:
         from blue_tap.report.generator import ReportGenerator
         rpt = ReportGenerator()
-        rpt.add_scan_results(devices)
+        scan_run = report_data.get("scan_run", {})
+        rpt.add_run_envelope(scan_run)
         for dev in report_data.get("devices", []):
-            findings = dev.get("findings", [])
-            if findings:
-                rpt.add_vuln_findings(findings)
+            vulnscan = dev.get("vulnscan", {})
+            rpt.add_run_envelope(vulnscan)
         rpt.generate_html(out_path)
 
     from blue_tap.utils.session import log_command
