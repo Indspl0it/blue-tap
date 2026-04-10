@@ -6574,7 +6574,7 @@ def ssp_attack(address, hci, pin_start, pin_end, delay):
             warning("Lockout detected — target is rate-limiting pairing attempts")
 
     from blue_tap.utils.session import log_command
-    log_command("ssp_downgrade", result, category="attack", target=address)
+    log_command("ssp_downgrade", attack.build_envelope(), category="attack", target=address)
 
 
 # ============================================================================
@@ -6625,13 +6625,13 @@ def knob_probe(address, hci):
     console.print(table)
 
     from blue_tap.utils.session import log_command
-    log_command("knob_probe", result, category="vuln", target=address)
+    log_command("knob_probe", attack.build_envelope(), category="attack", target=address)
 
 
 @knob.command("attack")
 @click.argument("address", required=False, default=None)
 @click.option("-i", "--hci", default="hci0")
-@click.option("--key-size", default=1, type=int, help="Target key size in bytes (default: 1)")
+@click.option("--key-size", default=1, type=click.IntRange(1, 16), help="Target key size in bytes (default: 1)")
 def knob_attack(address, hci, key_size):
     """Execute KNOB attack — negotiate minimum key and brute force.
 
@@ -6654,11 +6654,12 @@ def knob_attack(address, hci, key_size):
     info(f"Executing KNOB attack on [bold]{address}[/bold]")
     info(f"Target key size: {key_size} byte(s) ({key_size * 8} bits, {2 ** (key_size * 8):,} candidates)")
 
-    result = attack.execute()
+    result = attack.execute(key_size=key_size)
 
     console.print()
-    negotiate = result.get("negotiate", {})
-    brute = result.get("brute_force", {})
+    phases = result.get("phases", {})
+    negotiate = phases.get("negotiate", {})
+    brute = phases.get("brute_force", {})
 
     if negotiate.get("success"):
         success(f"Key negotiated to {negotiate.get('negotiated_key_size', '?')} byte(s)")
@@ -6672,7 +6673,7 @@ def knob_attack(address, hci, key_size):
         info(f"Brute force demonstration: {brute.get('total_candidates', '?')} candidates in {brute.get('time_elapsed', 0):.2f}s")
 
     from blue_tap.utils.session import log_command
-    log_command("knob_attack", result, category="attack", target=address)
+    log_command("knob_attack", attack.build_envelope(), category="attack", target=address)
 
 
 # ============================================================================
@@ -6750,10 +6751,11 @@ def bluffs_attack(target, variant, hci, phone):
         for detail in result.get("details", []):
             info(f"  {detail}")
 
-        from blue_tap.utils.session import log_command
-        log_command("bluffs_attack", result, category="attack", target=target)
     except Exception as exc:
         error(f"BLUFFS attack failed: {exc}")
+    finally:
+        from blue_tap.utils.session import log_command
+        log_command("bluffs", attack.build_envelope(), category="attack", target=target)
 
 
 # ============================================================================
@@ -6783,7 +6785,7 @@ def ctkd_cmd(target, mode, hci, interval):
     """
     from blue_tap.attack.ctkd import CTKDAttack
 
-    target = target or _resolve_target()
+    target = resolve_address(target)
     if not target:
         return
 
