@@ -5731,31 +5731,11 @@ def fuzz():
               type=click.Choice(["oversized", "malformed", "null"]))
 def fuzz_l2cap(address, psm, count, mode):
     """Fuzz L2CAP protocol."""
-    warning(
-        "[bt.yellow]DEPRECATED:[/bt.yellow] 'fuzz l2cap' is a legacy command. "
-        "Use [bold]blue-tap fuzz run --protocol l2cap[/bold] for the full campaign engine "
+    error(
+        "'fuzz l2cap' has been removed. "
+        "Use [bold]blue-tap fuzz run --protocol l2cap[/bold] for the campaign engine "
         "(coverage-guided, crash management, session persistence)."
     )
-    address = resolve_address(address)
-    if not address:
-        return
-    run_id = make_run_id("fuzz")
-    emit_cli_event(event_type="run_started", module="fuzz", run_id=run_id, target=address,
-                   message=f"Starting L2CAP fuzz (mode={mode}, count={count})")
-    from blue_tap.attack.fuzz import L2CAPFuzzer
-    fuzzer = L2CAPFuzzer(address)
-    if mode == "oversized":
-        result = fuzzer.oversized_mtu(psm)
-    elif mode == "null":
-        result = fuzzer.null_flood(psm, count)
-    else:
-        result = fuzzer.malformed_packets(psm, count)
-    emit_cli_event(event_type="execution_result", module="fuzz", run_id=run_id, target=address,
-                   message=f"L2CAP fuzz complete: {result}",
-                   details={"mode": mode, "psm": psm, "count": count})
-    emit_cli_event(event_type="run_completed", module="fuzz", run_id=run_id, target=address,
-                   message="L2CAP fuzz run completed")
-    console.print(f"[bold]Fuzz results:[/bold] {result}")
 
 
 @fuzz.command("rfcomm")
@@ -5765,31 +5745,11 @@ def fuzz_l2cap(address, psm, count, mode):
               type=click.Choice(["exhaust", "overflow", "at"]))
 def fuzz_rfcomm(address, channel, mode):
     """Fuzz RFCOMM protocol."""
-    warning(
-        "[bt.yellow]DEPRECATED:[/bt.yellow] 'fuzz rfcomm' is a legacy command. "
-        "Use [bold]blue-tap fuzz run --protocol rfcomm[/bold] for the full campaign engine "
+    error(
+        "'fuzz rfcomm' has been removed. "
+        "Use [bold]blue-tap fuzz run --protocol rfcomm[/bold] for the campaign engine "
         "(coverage-guided, crash management, session persistence)."
     )
-    address = resolve_address(address)
-    if not address:
-        return
-    run_id = make_run_id("fuzz")
-    emit_cli_event(event_type="run_started", module="fuzz", run_id=run_id, target=address,
-                   message=f"Starting RFCOMM fuzz (mode={mode}, channel={channel})")
-    from blue_tap.attack.fuzz import RFCOMMFuzzer
-    fuzzer = RFCOMMFuzzer(address)
-    if mode == "exhaust":
-        result = fuzzer.channel_exhaustion()
-    elif mode == "overflow":
-        result = fuzzer.large_payload(channel)
-    else:
-        result = fuzzer.at_fuzz(channel)
-    emit_cli_event(event_type="execution_result", module="fuzz", run_id=run_id, target=address,
-                   message=f"RFCOMM fuzz complete: {result}",
-                   details={"mode": mode, "channel": channel})
-    emit_cli_event(event_type="run_completed", module="fuzz", run_id=run_id, target=address,
-                   message="RFCOMM fuzz run completed")
-    console.print(f"[bold]Fuzz results:[/bold] {result}")
 
 
 @fuzz.command("at")
@@ -5799,93 +5759,33 @@ def fuzz_rfcomm(address, channel, mode):
               help="Comma-separated: long,null,format,unicode,overflow")
 def fuzz_at(address, channel, patterns):
     """AT command fuzzing with malformed inputs."""
-    warning(
-        "[bt.yellow]DEPRECATED:[/bt.yellow] 'fuzz at' is a legacy command. "
+    error(
+        "'fuzz at' has been removed. "
         "Use [bold]blue-tap fuzz run --protocol at-hfp[/bold] (or at-phonebook, at-sms, at-injection) "
-        "for the full campaign engine with protocol-aware mutation."
+        "for the campaign engine with protocol-aware mutation."
     )
-    address = resolve_address(address)
-    if not address:
-        return
-    run_id = make_run_id("fuzz")
-    emit_cli_event(event_type="run_started", module="fuzz", run_id=run_id, target=address,
-                   message=f"Starting AT command fuzz (channel={channel}, patterns={patterns})")
-    from blue_tap.attack.fuzz import RFCOMMFuzzer
-
-    # Map keyword names to actual fuzz patterns
-    pattern_map = {
-        "long": "AT" + "A" * 1024 + "\r\n",
-        "null": "AT\x00\x00\r\n",
-        "format": "AT%n%n%x%x\r\n",
-        "unicode": "AT" + "\u00c4" * 256 + "\r\n",
-        "overflow": "AT+" + "B" * 512 + "\r\n",
-    }
-    pattern_list = []
-    for name in patterns.split(","):
-        name = name.strip()
-        if name in pattern_map:
-            pattern_list.append(pattern_map[name])
-        else:
-            pattern_list.append(name)  # Allow raw patterns too
-
-    fuzzer = RFCOMMFuzzer(address)
-    result = fuzzer.at_fuzz(channel, pattern_list)
-    emit_cli_event(event_type="execution_result", module="fuzz", run_id=run_id, target=address,
-                   message=f"AT fuzz complete: {result}",
-                   details={"channel": channel, "patterns": patterns})
-    emit_cli_event(event_type="run_completed", module="fuzz", run_id=run_id, target=address,
-                   message="AT fuzz run completed")
-    console.print(f"[bold]AT fuzz results:[/bold] {result}")
 
 
 @fuzz.command("sdp")
 @click.argument("address", required=False, default=None)
 def fuzz_sdp(address):
     """SDP continuation state probe (BlueBorne CVE-2017-0785 vector)."""
-    warning(
-        "[bt.yellow]DEPRECATED:[/bt.yellow] 'fuzz sdp' is a legacy command. "
-        "Use [bold]blue-tap fuzz run --protocol sdp[/bold] for the full campaign engine "
+    error(
+        "'fuzz sdp' has been removed. "
+        "Use [bold]blue-tap fuzz run --protocol sdp[/bold] for the campaign engine "
         "with coverage-guided mutation and session persistence."
     )
-    address = resolve_address(address)
-    if not address:
-        return
-    run_id = make_run_id("fuzz")
-    emit_cli_event(event_type="run_started", module="fuzz", run_id=run_id, target=address,
-                   message="Starting SDP continuation state probe")
-    from blue_tap.attack.fuzz import SDPFuzzer
-    fuzzer = SDPFuzzer(address)
-    result = fuzzer.probe_continuation_state()
-    if result.get("leak_suspected"):
-        warning("Possible SDP info leak detected!")
-    emit_cli_event(event_type="execution_result", module="fuzz", run_id=run_id, target=address,
-                   message=f"SDP probe complete: {result}",
-                   details={"leak_suspected": result.get("leak_suspected", False)})
-    emit_cli_event(event_type="run_completed", module="fuzz", run_id=run_id, target=address,
-                   message="SDP fuzz run completed")
-    console.print(f"[bold]SDP probe results:[/bold] {result}")
 
 
 @fuzz.command("bss")
 @click.argument("address", required=False, default=None)
 def fuzz_bss(address):
     """Run Bluetooth Stack Smasher (external tool)."""
-    warning(
-        "[bt.yellow]DEPRECATED:[/bt.yellow] 'fuzz bss' is a legacy wrapper. "
-        "BSS is an external tool — for integrated protocol fuzzing use "
-        "[bold]blue-tap fuzz run[/bold] which provides coverage-guided mutation and crash management."
+    error(
+        "'fuzz bss' has been removed. "
+        "For integrated protocol fuzzing use [bold]blue-tap fuzz run[/bold] "
+        "which provides coverage-guided mutation and crash management."
     )
-    address = resolve_address(address)
-    if not address:
-        return
-    run_id = make_run_id("fuzz")
-    emit_cli_event(event_type="run_started", module="fuzz", run_id=run_id, target=address,
-                   message="Starting BSS (Bluetooth Stack Smasher)")
-    from blue_tap.attack.fuzz import bss_wrapper
-    if not bss_wrapper(address):
-        error("BSS not available or failed")
-    emit_cli_event(event_type="run_completed", module="fuzz", run_id=run_id, target=address,
-                   message="BSS fuzz run completed")
 
 
 @fuzz.command("lmp")
