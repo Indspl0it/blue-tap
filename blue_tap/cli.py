@@ -1432,14 +1432,6 @@ def recon_capture_stop():
     if result:
         from blue_tap.core.result_schema import make_artifact
         artifacts.append(make_artifact(kind="pcap", label="HCI capture output", path=result))
-    artifacts = []
-    if result.get("success"):
-        from blue_tap.core.result_schema import make_artifact
-        artifacts.append(make_artifact(kind=output_format, label="LMP capture", path=output))
-    artifacts = []
-    if result.get("success"):
-        from blue_tap.core.result_schema import make_artifact
-        artifacts.append(make_artifact(kind="pcap", label="BLE pairing capture", path=output))
     envelope = build_recon_result(
         target="",
         adapter="all",
@@ -1595,6 +1587,11 @@ def recon_lmp_sniff(address, duration, output, hci, output_format, lmp_filter):
         output_format=output_format,
     )
 
+    artifacts = []
+    if result.get("success"):
+        from blue_tap.core.result_schema import make_artifact
+        artifacts.append(make_artifact(kind=output_format, label="LMP capture", path=output))
+
     envelope = build_recon_result(
         target=address or "",
         adapter=hci,
@@ -1741,6 +1738,11 @@ def recon_nrf_sniff(target, output, duration):
     _recon_start(ctx, execution_id="nrf_pairing_sniff", message="nRF BLE pairing sniff started")
     sniffer = NRFBLESniffer()
     result = sniffer.sniff_pairing(output, duration, target=target)
+
+    artifacts = []
+    if result.get("success"):
+        from blue_tap.core.result_schema import make_artifact
+        artifacts.append(make_artifact(kind="pcap", label="BLE pairing capture", path=output))
 
     envelope = build_recon_result(
         target=target or "",
