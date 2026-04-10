@@ -13,8 +13,24 @@ from blue_tap.core.result_schema import (
     make_artifact,
     make_evidence,
     make_execution,
+    make_run_id,
     now_iso,
 )
+
+# Canonical module outcomes for fuzz operations.
+FUZZ_MODULE_OUTCOMES = (
+    "completed",          # Fuzz run finished normally, no crashes
+    "crash_detected",     # One or more crashes found
+    "degraded",           # Target showed degradation (rising latency, partial failures)
+    "aborted",            # Run stopped early (operator interrupt, target permanently down)
+    "pairing_required",   # Protocol requires pairing that wasn't established
+    "not_applicable",     # Protocol not supported on target
+)
+
+
+def make_fuzz_run_id() -> str:
+    """Generate a stable run ID for a fuzz operation."""
+    return make_run_id("fuzz")
 
 
 def _iso_from_epoch(ts: float | None) -> str:
@@ -62,6 +78,7 @@ def build_fuzz_result(
     operator_context: dict[str, Any] | None = None,
     started_at: str | None = None,
     completed_at: str | None = None,
+    run_id: str | None = None,
 ) -> dict[str, Any]:
     started = started_at or result.get("started_at") or now_iso()
     finished = completed_at or result.get("completed_at") or now_iso()
@@ -175,11 +192,100 @@ def build_fuzz_result(
         },
         started_at=started,
         completed_at=finished,
+        run_id=run_id,
     )
 
 
 def campaign_started_at_from_stats(start_time: float | None) -> str:
     return _iso_from_epoch(start_time)
+
+
+def build_fuzz_protocol_execution(
+    *,
+    protocol: str,
+    packets_sent: int,
+    crashes: int,
+    errors: int,
+    crash_types: dict[str, int] | None = None,
+    anomalies: int = 0,
+    states_discovered: int = 0,
+    health_events: int = 0,
+    started_at: str | None = None,
+    completed_at: str | None = None,
+    state_coverage: dict[str, Any] | None = None,
+    field_weights: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build an ExecutionRecord for a single protocol within a campaign."""
+    started = started_at or now_iso()
+    finished = completed_at or now_iso()
+
+    if crashes > 0:
+        module_outcome = "crash_detected"
+    elif errors > 0 and packets_sent == 0:
+        module_outcome = "not_applicable"
+    else:
+        module_outcome = "completed"
+
+    execution_status = EXECUTION_COMPLETED if packets_sent > 0 else EXECUTION_FAILED
+
+    observations = [
+        f"Sent {packets_sent:,} packets to {protocol}",
+        f"Detected {crashes} crash(es)" if crashes else "No crashes detected",
+    ]
+    if anomalies:
+        observations.append(f"Recorded {anomalies} anomalies")
+    if states_discovered:
+        observations.append(f"Discovered {states_discovered} unique protocol states")
+    if crash_types:
+        for ct, count in sorted(crash_types.items(), key=lambda x: -x[1]):
+            observations.append(f"Crash type {ct}: {count}")
+
+    module_evidence: dict[str, Any] = {
+        "packets_sent": packets_sent,
+        "crashes": crashes,
+        "errors": errors,
+        "anomalies": anomalies,
+        "states_discovered": states_discovered,
+        "crash_types": dict(crash_types or {}),
+    }
+    if state_coverage:
+        module_evidence["state_coverage"] = state_coverage
+    if field_weights:
+        module_evidence["field_weights"] = field_weights
+
+    evidence = make_evidence(
+        summary=(
+            f"Fuzzed {protocol}: {packets_sent:,} packets, "
+            f"{crashes} crash(es), {anomalies} anomalies"
+        ),
+        confidence="high" if packets_sent > 100 else "medium",
+        observations=observations,
+        module_evidence=module_evidence,
+    )
+
+    return make_execution(
+        kind="probe",
+        id=f"fuzz_{protocol}",
+        title=f"Fuzz protocol: {protocol}",
+        module="fuzz",
+        protocol=protocol,
+        execution_status=execution_status,
+        module_outcome=module_outcome,
+        severity="high" if crashes > 0 else None,
+        evidence=evidence,
+        started_at=started,
+        completed_at=finished,
+        tags=["fuzz", protocol, "campaign"],
+        module_data={
+            "protocol": protocol,
+            "packets_sent": packets_sent,
+            "crashes": crashes,
+            "errors": errors,
+            "anomalies": anomalies,
+            "states_discovered": states_discovered,
+            "crash_types": dict(crash_types or {}),
+        },
+    )
 
 
 def build_fuzz_campaign_result(
@@ -192,6 +298,7 @@ def build_fuzz_campaign_result(
     started_at: str | None = None,
     completed_at: str | None = None,
     run_id: str | None = None,
+    protocol_executions: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     started = started_at or now_iso()
     finished = completed_at or now_iso()
@@ -300,7 +407,7 @@ def build_fuzz_campaign_result(
             "errors": campaign_summary.get("errors", 0),
             "runtime_seconds": campaign_summary.get("runtime_seconds", 0),
         },
-        executions=[execution],
+        executions=[execution] + list(protocol_executions or []),
         artifacts=artifacts,
         module_data={
             "run_type": "campaign",

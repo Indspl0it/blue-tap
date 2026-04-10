@@ -20,12 +20,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import signal
 import socket
 import time
 import traceback
+
+logger = logging.getLogger(__name__)
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any
@@ -50,42 +53,32 @@ from blue_tap.utils.output import (
 )
 from blue_tap.utils.bt_helpers import run_cmd
 from blue_tap.utils.session import log_command
-from blue_tap.core.fuzz_framework import build_fuzz_campaign_result, campaign_started_at_from_stats
+from blue_tap.core.fuzz_framework import (
+    build_fuzz_campaign_result,
+    build_fuzz_protocol_execution,
+    campaign_started_at_from_stats,
+)
+from blue_tap.core.result_schema import now_iso, validate_run_envelope
+from blue_tap.core.cli_events import emit_cli_event
 
 # ---------------------------------------------------------------------------
-# Conditional imports for modules being built in parallel by other agents.
-# These will be available once their respective tasks are complete.
+# Core module imports — always available
 # ---------------------------------------------------------------------------
 
-try:
-    from blue_tap.fuzz.transport import (
-        L2CAPTransport,
-        RFCOMMTransport,
-        BLETransport,
-        LMPTransport,
-        RawACLTransport,
-    )
-    _HAS_TRANSPORT = True
-except ImportError:
-    _HAS_TRANSPORT = False
+from blue_tap.fuzz.transport import (
+    L2CAPTransport,
+    RFCOMMTransport,
+    BLETransport,
+    LMPTransport,
+    RawACLTransport,
+)
+from blue_tap.fuzz.crash_db import CrashDB
+from blue_tap.fuzz.corpus import Corpus
+from blue_tap.fuzz.mutators import CorpusMutator
 
-try:
-    from blue_tap.fuzz.crash_db import CrashDB
-    _HAS_CRASH_DB = True
-except ImportError:
-    _HAS_CRASH_DB = False
-
-try:
-    from blue_tap.fuzz.corpus import Corpus
-    _HAS_CORPUS = True
-except ImportError:
-    _HAS_CORPUS = False
-
-try:
-    from blue_tap.fuzz.mutators import CorpusMutator
-    _HAS_MUTATORS = True
-except ImportError:
-    _HAS_MUTATORS = False
+# ---------------------------------------------------------------------------
+# Optional advanced features — degrade gracefully when unavailable
+# ---------------------------------------------------------------------------
 
 try:
     from blue_tap.fuzz.strategies.random_walk import RandomWalkStrategy
@@ -94,36 +87,42 @@ try:
     _HAS_STRATEGIES = True
 except ImportError:
     _HAS_STRATEGIES = False
+    logger.info("Fuzzing strategies not available — falling back to byte-level mutation")
 
 try:
     from blue_tap.fuzz.strategies.targeted import TargetedStrategy
     _HAS_TARGETED = True
 except ImportError:
     _HAS_TARGETED = False
+    logger.info("TargetedStrategy not available — CVE pattern reproduction disabled")
 
 try:
     from blue_tap.fuzz.response_analyzer import ResponseAnalyzer
     _HAS_ANALYZER = True
 except ImportError:
     _HAS_ANALYZER = False
+    logger.info("ResponseAnalyzer not available — anomaly detection disabled")
 
 try:
     from blue_tap.fuzz.state_inference import StateTracker
     _HAS_STATE_TRACKER = True
 except ImportError:
     _HAS_STATE_TRACKER = False
+    logger.info("StateTracker not available — state inference disabled")
 
 try:
     from blue_tap.fuzz.field_weight_tracker import FieldWeightTracker, FieldAwareMutator
     _HAS_FIELD_WEIGHTS = True
 except ImportError:
     _HAS_FIELD_WEIGHTS = False
+    logger.info("FieldWeightTracker not available — field-aware mutation disabled")
 
 try:
     from blue_tap.fuzz.health_monitor import TargetHealthMonitor
     _HAS_HEALTH_MONITOR = True
 except ImportError:
     _HAS_HEALTH_MONITOR = False
+    logger.info("TargetHealthMonitor not available — health monitoring disabled")
 
 
 # ---------------------------------------------------------------------------
@@ -255,6 +254,22 @@ class CampaignStats:
         return (self.crashes / self.packets_sent) * 1000.0
 
 
+@dataclass
+class ProtocolRunStats:
+    """Per-protocol statistics tracked during a campaign."""
+
+    protocol: str = ""
+    packets_sent: int = 0
+    crashes: int = 0
+    errors: int = 0
+    start_time: float = field(default_factory=time.time)
+    end_time: float = 0.0
+    crash_types: dict[str, int] = field(default_factory=dict)
+    anomalies: int = 0
+    states_discovered: int = 0
+    health_events: int = 0
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -271,117 +286,6 @@ def _check_target_alive(address: str) -> bool:
     """Quick reachability check via l2ping."""
     result = run_cmd(["l2ping", "-c", "1", "-t", "3", address], timeout=8)
     return result.returncode == 0
-
-
-# ---------------------------------------------------------------------------
-# Stub implementations for missing modules
-# ---------------------------------------------------------------------------
-
-class _StubCrashDB:
-    """Minimal crash DB that writes JSON files when the real CrashDB is unavailable."""
-
-    def __init__(self, db_path: str) -> None:
-        self._dir = os.path.dirname(db_path) or "."
-        os.makedirs(self._dir, exist_ok=True)
-        self._count = 0
-
-    def log_crash(
-        self,
-        target: str,
-        protocol: str,
-        payload: bytes,
-        crash_type: str,
-        *,
-        severity: str = "MEDIUM",
-        mutation_log: str = "",
-    ) -> int:
-        self._count += 1
-        crash_file = os.path.join(self._dir, f"crash_{self._count:04d}.json")
-        data = {
-            "target": target,
-            "protocol": protocol,
-            "payload_hex": payload.hex(),
-            "payload_len": len(payload),
-            "crash_type": crash_type,
-            "severity": severity,
-            "mutation_log": mutation_log,
-            "timestamp": datetime.now().isoformat(),
-        }
-        with open(crash_file, "w") as f:
-            json.dump(data, f, indent=2)
-        return self._count
-
-    def crash_count(self) -> int:
-        return self._count
-
-    def get_crashes(self) -> list[dict]:
-        crashes: list[dict] = []
-        for fname in sorted(os.listdir(self._dir)):
-            if fname.startswith("crash_") and fname.endswith(".json"):
-                fpath = os.path.join(self._dir, fname)
-                try:
-                    with open(fpath) as f:
-                        crashes.append(json.load(f))
-                except (json.JSONDecodeError, OSError):
-                    pass
-        return crashes
-
-
-class _StubCorpus:
-    """Minimal corpus that generates random seeds when the real Corpus is unavailable."""
-
-    def __init__(self, corpus_dir: str) -> None:
-        self._dir = corpus_dir
-        os.makedirs(self._dir, exist_ok=True)
-
-    def get_random_seed(self, protocol: str = "") -> bytes:
-        """Return a random seed from the corpus or a fresh random payload."""
-        protocol_dir = os.path.join(self._dir, protocol) if protocol else self._dir
-        if os.path.isdir(protocol_dir):
-            seeds = [
-                f for f in os.listdir(protocol_dir)
-                if os.path.isfile(os.path.join(protocol_dir, f))
-            ]
-            if seeds:
-                import random
-                chosen = random.choice(seeds)
-                with open(os.path.join(protocol_dir, chosen), "rb") as f:
-                    return f.read()
-        # Fallback: generate random bytes
-        import random
-        return os.urandom(random.randint(8, 256))
-
-    def get_all_seeds(self, protocol: str = "") -> list[bytes]:
-        """Return all seeds for a protocol."""
-        protocol_dir = os.path.join(self._dir, protocol) if protocol else self._dir
-        if not os.path.isdir(protocol_dir):
-            return []
-        seeds = []
-        for fname in os.listdir(protocol_dir):
-            fpath = os.path.join(protocol_dir, fname)
-            if os.path.isfile(fpath):
-                with open(fpath, "rb") as f:
-                    seeds.append(f.read())
-        return seeds
-
-    def add_seed(self, protocol: str, data: bytes, name: str = "") -> None:
-        """Save a seed to the corpus directory."""
-        protocol_dir = os.path.join(self._dir, protocol) if protocol else self._dir
-        os.makedirs(protocol_dir, exist_ok=True)
-        name = name or hashlib.sha256(data).hexdigest()[:16]
-        path = os.path.join(protocol_dir, name)
-        if not os.path.exists(path):
-            with open(path, "wb") as f:
-                f.write(data)
-
-    def seed_count(self, protocol: str = "") -> int:
-        protocol_dir = os.path.join(self._dir, protocol) if protocol else self._dir
-        if not os.path.isdir(protocol_dir):
-            return 0
-        return sum(
-            1 for f in os.listdir(protocol_dir)
-            if os.path.isfile(os.path.join(protocol_dir, f))
-        )
 
 
 class _TargetedStrategyAdapter:
@@ -405,159 +309,6 @@ class _TargetedStrategyAdapter:
                  response: bytes | None, crash: bool = False) -> None:
         pass  # Targeted strategy replays known patterns — no learning
 
-
-class _StubMutator:
-    """Minimal byte-level mutator when the real CorpusMutator is unavailable."""
-
-    def __init__(self) -> None:
-        self.last_mutations: list[str] = []
-
-    def mutate(self, data: bytes) -> bytes:
-        """Apply a random byte-level mutation. Returns mutated bytes.
-
-        Mutation descriptions are stored in ``self.last_mutations``.
-        """
-        import random
-
-        if not data:
-            data = os.urandom(random.randint(8, 64))
-
-        mutated = bytearray(data)
-        self.last_mutations = []
-
-        strategy = random.choice(["bitflip", "byte_replace", "insert", "delete", "truncate"])
-
-        if strategy == "bitflip" and mutated:
-            pos = random.randint(0, len(mutated) - 1)
-            bit = 1 << random.randint(0, 7)
-            mutated[pos] ^= bit
-            self.last_mutations.append(f"bitflip@{pos} bit={bit:#04x}")
-
-        elif strategy == "byte_replace" and mutated:
-            pos = random.randint(0, len(mutated) - 1)
-            old_val = mutated[pos]
-            mutated[pos] = random.randint(0, 255)
-            self.last_mutations.append(f"byte_replace@{pos} {old_val:#04x}->{mutated[pos]:#04x}")
-
-        elif strategy == "insert":
-            pos = random.randint(0, len(mutated))
-            count = random.randint(1, 16)
-            insert_bytes = os.urandom(count)
-            mutated[pos:pos] = insert_bytes
-            self.last_mutations.append(f"insert@{pos} count={count}")
-
-        elif strategy == "delete" and len(mutated) > 1:
-            pos = random.randint(0, len(mutated) - 1)
-            count = min(random.randint(1, 8), len(mutated) - pos)
-            del mutated[pos:pos + count]
-            self.last_mutations.append(f"delete@{pos} count={count}")
-
-        elif strategy == "truncate" and len(mutated) > 1:
-            new_len = random.randint(1, len(mutated) - 1)
-            mutated = mutated[:new_len]
-            self.last_mutations.append(f"truncate len={new_len}")
-
-        return bytes(mutated)
-
-
-# ---------------------------------------------------------------------------
-# Stub transport (used when transport module not yet available)
-# ---------------------------------------------------------------------------
-
-_AF_BLUETOOTH = getattr(socket, "AF_BLUETOOTH", 31)
-_BTPROTO_L2CAP = 0
-_BTPROTO_RFCOMM = 3
-
-
-class _StubTransport:
-    """Minimal transport that uses raw sockets when the transport module is unavailable."""
-
-    def __init__(
-        self,
-        address: str,
-        transport_type: str = "l2cap",
-        psm: int = 1,
-        channel: int = 1,
-        cid: int = 4,
-        timeout: float = 5.0,
-    ) -> None:
-        self.address = address
-        self.transport_type = transport_type
-        self.psm = psm
-        self.channel = channel
-        self.cid = cid
-        self.timeout = timeout
-        self._sock: socket.socket | None = None
-        self._connected = False
-
-    def connect(self) -> bool:
-        """Open a Bluetooth socket to the target."""
-        try:
-            if self.transport_type == "l2cap":
-                self._sock = socket.socket(_AF_BLUETOOTH, socket.SOCK_SEQPACKET, _BTPROTO_L2CAP)
-                self._sock.settimeout(self.timeout)
-                self._sock.connect((self.address, self.psm))
-            elif self.transport_type == "rfcomm":
-                self._sock = socket.socket(_AF_BLUETOOTH, socket.SOCK_STREAM, _BTPROTO_RFCOMM)
-                self._sock.settimeout(self.timeout)
-                self._sock.connect((self.address, self.channel))
-            elif self.transport_type == "ble":
-                # BLE L2CAP fixed-channel -- requires kernel support
-                self._sock = socket.socket(_AF_BLUETOOTH, socket.SOCK_SEQPACKET, _BTPROTO_L2CAP)
-                self._sock.settimeout(self.timeout)
-                self._sock.connect((self.address, self.cid))
-            else:
-                error(f"Unknown transport type: {self.transport_type}")
-                return False
-            self._connected = True
-            return True
-        except OSError as exc:
-            error(f"Transport connect failed ({self.transport_type}): {exc}")
-            self._connected = False
-            return False
-
-    def send(self, data: bytes) -> int:
-        """Send data over the transport. Raises on failure."""
-        if self._sock is None:
-            raise BrokenPipeError("Not connected")
-        return self._sock.send(data)
-
-    def recv(self, bufsize: int = 4096) -> bytes | None:
-        """Receive data with timeout. Returns None on timeout."""
-        if self._sock is None:
-            return None
-        try:
-            data = self._sock.recv(bufsize)
-            return data if data else None
-        except TimeoutError:
-            return None
-
-    def close(self) -> None:
-        """Close the socket."""
-        if self._sock is not None:
-            try:
-                self._sock.close()
-            except OSError:
-                pass
-            self._sock = None
-        self._connected = False
-
-    @property
-    def connected(self) -> bool:
-        return self._connected
-
-    def reconnect(self) -> bool:
-        """Close and reconnect with backoff."""
-        self.close()
-        for attempt in range(3):
-            delay = min(2 ** attempt, 30)
-            time.sleep(delay)
-            try:
-                if self.connect():
-                    return True
-            except OSError:
-                continue
-        return False
 
 
 # ---------------------------------------------------------------------------
@@ -596,6 +347,7 @@ class FuzzCampaign:
         max_iterations: int | None = None,
         session_dir: str = "",
         cooldown: float = DEFAULT_COOLDOWN_SECONDS,
+        run_id: str = "",
     ) -> None:
         self.target = target
         self.protocols = protocols
@@ -604,6 +356,9 @@ class FuzzCampaign:
         self.max_iterations = max_iterations
         self.session_dir = session_dir or "."
         self.cooldown = cooldown
+        # Run identity
+        from blue_tap.core.fuzz_framework import make_fuzz_run_id
+        self.run_id = run_id or make_fuzz_run_id()
 
         # Fuzz artifact directory
         self._fuzz_dir = os.path.join(self.session_dir, "fuzz")
@@ -611,23 +366,14 @@ class FuzzCampaign:
 
         # Crash database
         crash_db_path = os.path.join(self._fuzz_dir, "crashes.db")
-        if _HAS_CRASH_DB:
-            self.crash_db: Any = CrashDB(crash_db_path)
-        else:
-            self.crash_db = _StubCrashDB(crash_db_path)
+        self.crash_db: Any = CrashDB(crash_db_path)
 
         # Seed corpus
         corpus_dir = os.path.join(self._fuzz_dir, "corpus")
-        if _HAS_CORPUS:
-            self.corpus: Any = Corpus(corpus_dir)
-        else:
-            self.corpus = _StubCorpus(corpus_dir)
+        self.corpus: Any = Corpus(corpus_dir)
 
         # Mutator
-        if _HAS_MUTATORS:
-            self._mutator: Any = CorpusMutator()
-        else:
-            self._mutator = _StubMutator()
+        self._mutator: Any = CorpusMutator()
 
         # Campaign state
         self.stats = CampaignStats()
@@ -640,7 +386,7 @@ class FuzzCampaign:
         if strategy == "targeted" and _HAS_TARGETED:
             self._strategy_obj = _TargetedStrategyAdapter()
             info("Strategy: targeted (known CVE pattern reproduction)")
-        elif _HAS_STRATEGIES and _HAS_CORPUS and isinstance(self.corpus, Corpus):
+        elif _HAS_STRATEGIES:
             if strategy == "coverage_guided":
                 self._strategy_obj = CoverageGuidedStrategy(corpus=self.corpus)
                 info("Strategy: coverage-guided (response-diversity feedback)")
@@ -673,6 +419,8 @@ class FuzzCampaign:
         # Per-protocol crash counts for adaptive scheduling
         self._proto_crash_counts: dict[str, int] = {p: 0 for p in protocols}
 
+        self._protocol_stats: dict[str, ProtocolRunStats] = {}
+
         # Validate protocols
         unknown = [p for p in protocols if p not in PROTOCOL_TRANSPORT_MAP]
         if unknown:
@@ -689,6 +437,9 @@ class FuzzCampaign:
                 f"Known: {', '.join(sorted(PROTOCOL_TRANSPORT_MAP))}"
             )
         self.protocols = valid
+
+        for p in self.protocols:
+            self._protocol_stats[p] = ProtocolRunStats(protocol=p)
 
     # ------------------------------------------------------------------
     # Transport setup
@@ -710,39 +461,32 @@ class FuzzCampaign:
 
             ttype = spec["type"]
 
-            if _HAS_TRANSPORT:
-                if ttype == "l2cap":
-                    transports[protocol] = L2CAPTransport(
-                        self.target, psm=spec["psm"],
-                    )
-                elif ttype == "rfcomm":
-                    transports[protocol] = RFCOMMTransport(
-                        self.target, channel=spec["channel"],
-                    )
-                elif ttype == "ble":
-                    transports[protocol] = BLETransport(
-                        self.target, cid=spec["cid"],
-                        address_type=BLETransport._detect_address_type(self.target),
-                    )
-                elif ttype == "lmp":
-                    transports[protocol] = LMPTransport(
-                        self.target,
-                        hci_dev=spec.get("hci_dev", 1),
-                        timeout=spec.get("timeout", 5.0),
-                    )
-                elif ttype == "raw-acl":
-                    transports[protocol] = RawACLTransport(
-                        self.target,
-                        hci_dev=spec.get("hci_dev", 1),
-                    )
-            else:
-                transports[protocol] = _StubTransport(
-                    self.target,
-                    transport_type=ttype,
-                    psm=spec.get("psm", 1),
-                    channel=spec.get("channel", 1),
-                    cid=spec.get("cid", 4),
+            if ttype == "l2cap":
+                transports[protocol] = L2CAPTransport(
+                    self.target, psm=spec["psm"],
                 )
+            elif ttype == "rfcomm":
+                transports[protocol] = RFCOMMTransport(
+                    self.target, channel=spec["channel"],
+                )
+            elif ttype == "ble":
+                transports[protocol] = BLETransport(
+                    self.target, cid=spec["cid"],
+                    address_type=BLETransport._detect_address_type(self.target),
+                )
+            elif ttype == "lmp":
+                transports[protocol] = LMPTransport(
+                    self.target,
+                    hci_dev=spec.get("hci_dev", 1),
+                    timeout=spec.get("timeout", 5.0),
+                )
+            elif ttype == "raw-acl":
+                transports[protocol] = RawACLTransport(
+                    self.target,
+                    hci_dev=spec.get("hci_dev", 1),
+                )
+            else:
+                warning(f"Unknown transport type '{ttype}' for protocol '{protocol}' — skipping")
 
         self._transports = transports
         return transports
@@ -771,10 +515,9 @@ class FuzzCampaign:
                 # Protocol not supported by this strategy — fall through
                 pass
 
-        # 50% chance: use field-aware mutation if tracker has learned weights
+        # Use field-aware mutation whenever tracker has learned weights
         if self._field_mutator is not None and self._field_tracker is not None:
-            import random as _rng
-            if _rng.random() < 0.5 and self._field_tracker.get_weights(protocol):
+            if self._field_tracker.get_weights(protocol):
                 try:
                     seed = self.corpus.get_random_seed(protocol)
                     if seed is not None:
@@ -818,8 +561,8 @@ class FuzzCampaign:
         if self._strategy_obj is not None:
             try:
                 self._strategy_obj.feedback(protocol, payload, response, crash=False)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Strategy feedback error for %s: %s", protocol, exc)
 
         # Run anomaly analyzer (structural + baseline deviation + leak detection)
         if self._analyzer is not None:
@@ -860,6 +603,9 @@ class FuzzCampaign:
                         self.corpus.record_anomaly(protocol, payload)
                     except (OSError, AttributeError):
                         pass
+
+            if anomalies and protocol in self._protocol_stats:
+                self._protocol_stats[protocol].anomalies += len([a for a in anomalies if a.score >= 5.0])
 
             # Feed anomaly info to field weight tracker
             if self._field_tracker is not None and anomalies:
@@ -918,6 +664,11 @@ class FuzzCampaign:
         severity = CRASH_SEVERITY.get(crash_type, "MEDIUM")
         self.stats.crashes += 1
 
+        if protocol in self._protocol_stats:
+            ps = self._protocol_stats[protocol]
+            ps.crashes += 1
+            ps.crash_types[crash_type] = ps.crash_types.get(crash_type, 0) + 1
+
         # Track per-protocol crash count for adaptive scheduling
         self._proto_crash_counts[protocol] = (
             self._proto_crash_counts.get(protocol, 0) + 1
@@ -961,18 +712,32 @@ class FuzzCampaign:
                     field_name = log_entry.split(":")[0].strip()
                     try:
                         self._field_tracker.record_crash(protocol, field_name)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.debug("Field weight crash tracking error: %s", exc)
 
         # Notify strategy of the crash (for coverage-guided energy boost).
         # FuzzStrategy ABC guarantees feedback() exists — no hasattr needed.
         if self._strategy_obj is not None:
             try:
                 self._strategy_obj.feedback(protocol, payload, None, crash=True)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Strategy crash feedback error: %s", exc)
 
         crash_num = self.stats.crashes
+        emit_cli_event(
+            event_type="execution_result",
+            module="fuzz",
+            run_id=self.run_id,
+            target=self.target,
+            message=f"Crash detected: {crash_type} ({severity}) on {protocol}",
+            details={
+                "crash_type": crash_type,
+                "severity": severity,
+                "protocol": protocol,
+                "payload_size": len(payload),
+            },
+            echo=False,
+        )
         info(
             f"[bt.red]CRASH #{crash_num}[/bt.red] "
             f"type=[bt.yellow]{crash_type}[/bt.yellow] "
@@ -981,6 +746,15 @@ class FuzzCampaign:
             f"payload_size={len(payload)}"
         )
 
+        emit_cli_event(
+            event_type="recovery_wait_started",
+            module="fuzz",
+            run_id=self.run_id,
+            target=self.target,
+            message=f"Recovery wait: {self.cooldown:.0f}s cooldown after {crash_type}",
+            details={"timeout_seconds": self.cooldown, "crash_type": crash_type},
+            echo=False,
+        )
         # Cooldown: wait for target recovery
         info(f"Cooling down {self.cooldown:.0f}s for target recovery...")
         time.sleep(self.cooldown)
@@ -994,6 +768,15 @@ class FuzzCampaign:
                 self._running = False
                 return
 
+        emit_cli_event(
+            event_type="recovery_wait_finished",
+            module="fuzz",
+            run_id=self.run_id,
+            target=self.target,
+            message=f"Target recovered after {crash_type} crash",
+            details={"recovered": True},
+            echo=False,
+        )
         # Reconnect the transport for this protocol
         transport = self._transports.get(protocol)
         if transport is not None:
@@ -1095,6 +878,19 @@ class FuzzCampaign:
             return {"result": "error", "reason": "target_unreachable"}
 
         success("Target is alive.")
+        emit_cli_event(
+            event_type="run_started",
+            module="fuzz",
+            run_id=self.run_id,
+            target=self.target,
+            message=f"Fuzz campaign started: {len(self.protocols)} protocol(s), strategy={self.strategy}",
+            details={
+                "protocols": self.protocols,
+                "strategy": self.strategy,
+                "duration": self.duration,
+                "max_iterations": self.max_iterations,
+            },
+        )
 
         # Setup transports
         info("Setting up transports...")
@@ -1128,6 +924,15 @@ class FuzzCampaign:
         # Baseline learning: send a few valid seeds per protocol and record
         # normal response behavior (size, latency, opcodes) before fuzzing.
         if self._analyzer is not None:
+            emit_cli_event(
+                event_type="phase_started",
+                module="fuzz",
+                run_id=self.run_id,
+                target=self.target,
+                message="Learning baseline response behavior",
+                details={"phase": "baseline_learning"},
+                echo=False,
+            )
             info("Learning baseline response behavior...")
             for proto in self.protocols:
                 transport = self._transports.get(proto)
@@ -1154,9 +959,30 @@ class FuzzCampaign:
         console.print()
 
         # Main fuzzing loop
+        emit_cli_event(
+            event_type="phase_started",
+            module="fuzz",
+            run_id=self.run_id,
+            target=self.target,
+            message="Main fuzzing loop started",
+            details={"phase": "fuzzing"},
+            echo=False,
+        )
+        _last_event_protocol = ""
         try:
             while self._should_continue():
                 protocol = self._next_protocol()
+                if protocol != _last_event_protocol:
+                    emit_cli_event(
+                        event_type="execution_started",
+                        module="fuzz",
+                        run_id=self.run_id,
+                        target=self.target,
+                        message=f"Fuzzing protocol: {protocol}",
+                        details={"protocol": protocol, "iteration": self.stats.iterations},
+                        echo=False,
+                    )
+                    _last_event_protocol = protocol
                 self.stats.current_protocol = protocol
                 transport = self._transports.get(protocol)
 
@@ -1194,6 +1020,8 @@ class FuzzCampaign:
                         self.stats.protocol_breakdown[protocol] = (
                             self.stats.protocol_breakdown.get(protocol, 0) + 1
                         )
+                        if protocol in self._protocol_stats:
+                            self._protocol_stats[protocol].packets_sent += 1
                         response = transport.recv()
                     latency_ms = (time.time() - t0) * 1000
 
@@ -1210,8 +1038,10 @@ class FuzzCampaign:
                                     self.corpus.add_seed(protocol, fuzz_case, name=f"state_novel_{self.stats.iterations}")
                                 except (OSError, AttributeError):
                                     pass
-                        except Exception:
-                            pass
+                                if protocol in self._protocol_stats:
+                                    self._protocol_stats[protocol].states_discovered += 1
+                        except Exception as exc:
+                            logger.debug("State tracker error for %s: %s", protocol, exc)
 
                     # Health monitoring
                     if self._health_monitor is not None:
@@ -1219,14 +1049,26 @@ class FuzzCampaign:
                         if self._health_monitor.should_check(self.stats.iterations):
                             try:
                                 health = self._health_monitor.update(self.stats.iterations, latency_ms, response)
+                                if health.value in ("rebooted", "zombie", "degraded", "unreachable"):
+                                    emit_cli_event(
+                                        event_type="recovery_wait_started",
+                                        module="fuzz",
+                                        run_id=self.run_id,
+                                        target=self.target,
+                                        message=f"Target health: {health.value}",
+                                        details={"health_status": health.value, "protocol": protocol},
+                                        echo=False,
+                                    )
+                                    if protocol in self._protocol_stats:
+                                        self._protocol_stats[protocol].health_events += 1
                                 if health.value in ("rebooted", "zombie"):
                                     for payload, confidence in self._health_monitor.get_crash_candidates():
                                         self._handle_crash(
                                             "device_disappeared", protocol, payload,
                                             [f"reboot_candidate(conf={confidence:.1f})"],
                                         )
-                            except Exception:
-                                pass
+                            except Exception as exc:
+                                logger.debug("Health monitor error: %s", exc)
 
                 except ConnectionResetError:
                     self._handle_crash("connection_drop", protocol, fuzz_case, mutation_log)
@@ -1253,6 +1095,15 @@ class FuzzCampaign:
 
         except Exception as exc:
             error(f"Campaign terminated with unexpected error: {exc}\n{traceback.format_exc()}")
+            emit_cli_event(
+                event_type="run_error",
+                module="fuzz",
+                run_id=self.run_id,
+                target=self.target,
+                message=f"Campaign error: {exc}",
+                details={"error": str(exc)},
+                echo=False,
+            )
         finally:
             # Restore original signal handler
             try:
@@ -1263,6 +1114,168 @@ class FuzzCampaign:
         # Finalize
         self._finalize()
         return self._build_summary()
+
+    # ------------------------------------------------------------------
+    # Single-protocol run (per-protocol CLI commands)
+    # ------------------------------------------------------------------
+
+    def run_single_protocol(
+        self,
+        protocol: str,
+        cases: list[bytes],
+        delay: float = 0.5,
+        recv_timeout: float = 5.0,
+    ) -> dict[str, Any]:
+        """Run a fixed set of fuzz cases for a single protocol.
+
+        Returns a RunEnvelope dict.
+        """
+        from blue_tap.core.fuzz_framework import build_fuzz_result
+        from blue_tap.core.result_schema import now_iso
+
+        started_at = now_iso()
+        sent = 0
+        crashes = 0
+        errors = 0
+
+        emit_cli_event(
+            event_type="run_started",
+            module="fuzz",
+            run_id=self.run_id,
+            target=self.target,
+            message=f"Single-protocol fuzz: {protocol}, {len(cases)} cases",
+            details={"protocol": protocol, "total_cases": len(cases)},
+        )
+
+        # Ensure we have a transport for this protocol
+        if protocol not in self._transports:
+            self._setup_transports()
+        transport = self._transports.get(protocol)
+        if transport is None:
+            emit_cli_event(
+                event_type="run_error",
+                module="fuzz",
+                run_id=self.run_id,
+                target=self.target,
+                message=f"No transport available for {protocol}",
+                echo=False,
+            )
+            return build_fuzz_result(
+                target=self.target,
+                adapter="session",
+                command=f"fuzz_{protocol}",
+                protocol=protocol,
+                result={"sent": 0, "crashes": 0, "errors": 1, "elapsed": 0.0,
+                        "total_cases": len(cases), "started_at": started_at, "completed_at": now_iso()},
+                run_id=self.run_id,
+            )
+
+        try:
+            if not transport.connected:
+                transport.connect()
+        except OSError as exc:
+            error(f"Connection failed: {exc}")
+            return build_fuzz_result(
+                target=self.target,
+                adapter="session",
+                command=f"fuzz_{protocol}",
+                protocol=protocol,
+                result={"sent": 0, "crashes": 0, "errors": 1, "elapsed": 0.0,
+                        "total_cases": len(cases), "started_at": started_at, "completed_at": now_iso()},
+                run_id=self.run_id,
+            )
+
+        t0 = time.time()
+
+        for i, payload in enumerate(cases):
+            try:
+                if not transport.connected:
+                    if not transport.connect():
+                        errors += 1
+                        continue
+
+                transport.send(payload)
+                sent += 1
+
+                if protocol in self._protocol_stats:
+                    self._protocol_stats[protocol].packets_sent += 1
+
+                response = transport.recv(recv_timeout=recv_timeout) if hasattr(transport, 'recv') else None
+
+                # Response analysis if available
+                if self._analyzer is not None and response is not None:
+                    latency_ms = (time.time() - t0) * 1000 / max(sent, 1)
+                    try:
+                        self._analyzer.analyze(protocol, payload, response, latency_ms)
+                    except Exception:
+                        pass
+
+            except (ConnectionResetError, BrokenPipeError):
+                crashes += 1
+                self._handle_crash("connection_drop", protocol, payload, [f"case_{i+1}"])
+                transport.close()
+                time.sleep(2.0)
+                try:
+                    transport = self._transports.get(protocol)
+                    if transport and not transport.connect():
+                        errors += 1
+                        break
+                except Exception:
+                    errors += 1
+                    break
+            except TimeoutError:
+                crashes += 1
+                self._handle_crash("timeout", protocol, payload, [f"case_{i+1}"])
+            except OSError as exc:
+                if "Host is down" in str(exc) or "No route" in str(exc):
+                    crashes += 1
+                    self._handle_crash("device_disappeared", protocol, payload, [f"case_{i+1}"])
+                else:
+                    errors += 1
+
+            if delay > 0:
+                time.sleep(delay)
+
+        elapsed = time.time() - t0
+        transport.close()
+
+        crash_db_path = os.path.join(self._fuzz_dir, "crashes.db")
+        completed_at = now_iso()
+
+        emit_cli_event(
+            event_type="run_completed",
+            module="fuzz",
+            run_id=self.run_id,
+            target=self.target,
+            message=f"Fuzz {protocol} complete: {sent}/{len(cases)} sent, {crashes} crashes",
+            details={"sent": sent, "crashes": crashes, "errors": errors},
+            echo=False,
+        )
+
+        result = {
+            "sent": sent,
+            "crashes": crashes,
+            "errors": errors,
+            "elapsed": elapsed,
+            "total_cases": len(cases),
+            "crash_db_path": crash_db_path,
+            "started_at": started_at,
+            "completed_at": completed_at,
+        }
+
+        envelope = build_fuzz_result(
+            target=self.target,
+            adapter="session",
+            command=f"fuzz_{protocol}",
+            protocol=protocol,
+            result=result,
+            run_id=self.run_id,
+        )
+        validation_errors = validate_run_envelope(envelope)
+        if validation_errors:
+            logger.warning("Single-protocol envelope validation errors: %s", validation_errors)
+        log_command(f"fuzz_{protocol}", envelope, category="fuzz", target=self.target)
+        return envelope
 
     # ------------------------------------------------------------------
     # Seed generation
@@ -1480,6 +1493,20 @@ class FuzzCampaign:
 
     def _finalize(self) -> None:
         """Clean up transports, save state, print summary, log to session."""
+        emit_cli_event(
+            event_type="run_completed",
+            module="fuzz",
+            run_id=self.run_id,
+            target=self.target,
+            message=f"Fuzz campaign completed: {self.stats.iterations:,} iterations, {self.stats.crashes} crashes",
+            details={
+                "iterations": self.stats.iterations,
+                "packets_sent": self.stats.packets_sent,
+                "crashes": self.stats.crashes,
+                "runtime_seconds": round(self.stats.runtime_seconds, 1),
+            },
+            echo=False,
+        )
         # Close all transports
         for proto, transport in self._transports.items():
             try:
@@ -1495,6 +1522,15 @@ class FuzzCampaign:
         try:
             with open(stats_path, "w") as f:
                 json.dump(self._build_summary(), f, indent=2, default=str)
+            emit_cli_event(
+                event_type="artifact_saved",
+                module="fuzz",
+                run_id=self.run_id,
+                target=self.target,
+                message=f"Campaign stats saved: {stats_path}",
+                details={"artifact_type": "json", "path": stats_path},
+                echo=False,
+            )
         except OSError as exc:
             warning(f"Could not save campaign stats: {exc}")
 
@@ -1507,6 +1543,44 @@ class FuzzCampaign:
             crashes = self.crash_db.get_crashes()
         except Exception:
             crashes = []
+        protocol_executions = []
+        for proto, ps in self._protocol_stats.items():
+            state_coverage = None
+            if self._state_tracker is not None:
+                try:
+                    tracker_data = self._state_tracker.to_dict()
+                    proto_graph = tracker_data.get("graphs", {}).get(proto, {})
+                    if proto_graph:
+                        state_coverage = {
+                            "states": len(proto_graph.get("nodes", [])),
+                            "transitions": len(proto_graph.get("edges", [])),
+                        }
+                except Exception:
+                    pass
+            field_weights = None
+            if self._field_tracker is not None:
+                try:
+                    w = self._field_tracker.get_weights(proto)
+                    if w:
+                        field_weights = w
+                except Exception:
+                    pass
+            protocol_executions.append(
+                build_fuzz_protocol_execution(
+                    protocol=proto,
+                    packets_sent=ps.packets_sent,
+                    crashes=ps.crashes,
+                    errors=ps.errors,
+                    crash_types=ps.crash_types,
+                    anomalies=ps.anomalies,
+                    states_discovered=ps.states_discovered,
+                    health_events=ps.health_events,
+                    started_at=campaign_started_at_from_stats(ps.start_time),
+                    completed_at=now_iso() if ps.end_time == 0.0 else campaign_started_at_from_stats(ps.end_time),
+                    state_coverage=state_coverage,
+                    field_weights=field_weights,
+                )
+            )
         envelope = build_fuzz_campaign_result(
             target=self.target,
             adapter="session",
@@ -1514,7 +1588,12 @@ class FuzzCampaign:
             crashes=crashes,
             session_fuzz_dir=self._fuzz_dir,
             started_at=campaign_started_at_from_stats(self.stats.start_time),
+            run_id=self.run_id,
+            protocol_executions=protocol_executions,
         )
+        validation_errors = validate_run_envelope(envelope)
+        if validation_errors:
+            logger.warning("Campaign envelope validation errors: %s", validation_errors)
         log_command("fuzz_campaign", envelope, category="fuzz", target=self.target)
 
     def _build_summary(self) -> dict:
@@ -1601,6 +1680,7 @@ class FuzzCampaign:
             "max_iterations": self.max_iterations,
             "cooldown": self.cooldown,
             "session_dir": self.session_dir,
+            "run_id": self.run_id,
             "stats": stats_dict,
             "timestamp": datetime.now().isoformat(),
         }
@@ -1609,18 +1689,18 @@ class FuzzCampaign:
         if self._state_tracker is not None:
             try:
                 state["state_tracker"] = self._state_tracker.to_dict()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("State tracker serialization failed: %s", exc)
         if self._field_tracker is not None:
             try:
                 state["field_tracker"] = self._field_tracker.to_dict()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Field tracker serialization failed: %s", exc)
         if self._health_monitor is not None:
             try:
                 state["health_monitor"] = self._health_monitor.to_dict()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Health monitor serialization failed: %s", exc)
         # Persist strategy fingerprint / energy state so resume picks up where we left off
         if self._strategy_obj is not None and hasattr(self._strategy_obj, "to_dict"):
             try:
@@ -1661,6 +1741,7 @@ class FuzzCampaign:
             session_dir=session_dir,
             cooldown=state.get("cooldown", DEFAULT_COOLDOWN_SECONDS),
         )
+        campaign.run_id = state.get("run_id", campaign.run_id)
 
         # Restore stats
         saved_stats = state.get("stats", {})
@@ -1680,23 +1761,23 @@ class FuzzCampaign:
         if _HAS_STATE_TRACKER and "state_tracker" in state:
             try:
                 campaign._state_tracker = StateTracker.from_dict(state["state_tracker"])
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("State tracker restore failed: %s", exc)
         if _HAS_FIELD_WEIGHTS and "field_tracker" in state:
             try:
                 campaign._field_tracker = FieldWeightTracker.from_dict(state["field_tracker"])
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Field tracker restore failed: %s", exc)
         if _HAS_HEALTH_MONITOR and "health_monitor" in state:
             try:
                 campaign._health_monitor = TargetHealthMonitor.from_dict(state["health_monitor"])
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Health monitor restore failed: %s", exc)
         # Restore CoverageGuidedStrategy from serialised snapshot, then reload interesting inputs
         if _HAS_STRATEGIES and "strategy_state" in state:
             try:
                 if isinstance(campaign._strategy_obj, CoverageGuidedStrategy):
-                    corpus_arg = campaign.corpus if _HAS_CORPUS else None
+                    corpus_arg = campaign.corpus
                     campaign._strategy_obj = CoverageGuidedStrategy.from_dict(
                         state["strategy_state"],
                         corpus=corpus_arg,
@@ -1707,7 +1788,7 @@ class FuzzCampaign:
         # Reload interesting inputs from disk regardless of snapshot presence
         # (handles the case where interesting/ files exist but snapshot was lost)
         if _HAS_STRATEGIES and isinstance(campaign._strategy_obj, CoverageGuidedStrategy):
-            if _HAS_CORPUS and isinstance(campaign.corpus, Corpus):
+            if isinstance(campaign.corpus, Corpus):
                 try:
                     # Load seeds from disk first so list_protocols() is populated.
                     # Without this the corpus is empty in memory and load_from_corpus
@@ -1743,3 +1824,11 @@ class FuzzCampaign:
         """
         info("[bt.yellow]Interrupt received. Stopping campaign gracefully...[/bt.yellow]")
         self._running = False
+        emit_cli_event(
+            event_type="run_aborted",
+            module="fuzz",
+            run_id=self.run_id,
+            target=self.target,
+            message="Fuzz campaign aborted by operator (SIGINT)",
+            echo=False,
+        )
