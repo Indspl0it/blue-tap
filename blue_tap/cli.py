@@ -6880,6 +6880,155 @@ def fleet_report(duration, hci, output, fmt, all_devices):
 # ============================================================================
 # UTILITIES
 # ============================================================================
+def _current_adapter() -> str:
+    from blue_tap.utils.session import get_session
+
+    session = get_session()
+    if session is None:
+        return ""
+    return str(session.metadata.get("adapter", "") or "")
+
+
+def _profile_capability_limitations(*, family: str) -> list[str]:
+    """Return relevant host-side capability limitations for a profile family."""
+    try:
+        from blue_tap.utils.env_doctor import detect_profile_environment
+
+        env = detect_profile_environment()
+    except Exception:
+        return []
+
+    limitations = list(env.get("summary", {}).get("capability_limitations", []))
+    if family == "audio":
+        keywords = ("audio", "pipewire", "pulseaudio", "pactl", "parecord", "paplay", "aplay")
+        return [item for item in limitations if any(keyword in item.lower() for keyword in keywords)]
+    if family == "hfp":
+        keywords = ("audio", "pipewire", "pulseaudio", "pactl", "parecord", "paplay", "aplay", "bluetooth")
+        return [item for item in limitations if any(keyword in item.lower() for keyword in keywords)]
+    return limitations
+
+
+def _log_standardized_operation(
+    *,
+    module: str,
+    command: str,
+    title: str,
+    protocol: str,
+    target: str = "",
+    result: dict | None = None,
+    category: str | None = None,
+    observations: list[str] | None = None,
+    artifact_paths: list[dict[str, str]] | None = None,
+    operator_context: dict | None = None,
+    module_outcome: str = "completed",
+    capability_limitations: list[str] | None = None,
+):
+    from blue_tap.utils.session import log_command
+    if module == "attack":
+        from blue_tap.core.attack_framework import build_attack_result, artifact_if_file
+
+        artifacts = [
+            item
+            for item in (
+                artifact_if_file(
+                    item.get("path", ""),
+                    kind=item.get("kind", "file"),
+                    label=item.get("label", item.get("path", "")),
+                    description=item.get("description", ""),
+                )
+                for item in (artifact_paths or [])
+            )
+            if item is not None
+        ]
+        envelope = build_attack_result(
+            target=target,
+            adapter=_current_adapter(),
+            operation=command,
+            title=title,
+            protocol=protocol,
+            module_data=dict(result or {}),
+            summary_data=dict(operator_context or {}),
+            observations=observations,
+            capability_limitations=capability_limitations,
+            artifacts=artifacts,
+            module_outcome=module_outcome,
+        )
+    elif module == "data":
+        from blue_tap.core.data_framework import build_data_result, artifact_if_path
+
+        artifacts = [
+            item
+            for item in (
+                artifact_if_path(
+                    item.get("path", ""),
+                    kind=item.get("kind", "file"),
+                    label=item.get("label", item.get("path", "")),
+                    description=item.get("description", ""),
+                )
+                for item in (artifact_paths or [])
+            )
+            if item is not None
+        ]
+        envelope = build_data_result(
+            target=target,
+            adapter=_current_adapter(),
+            family=str((result or {}).get("family", protocol.lower() or "data")),
+            operation=command,
+            title=title,
+            module_data=dict(result or {}),
+            summary_data=dict(operator_context or {}),
+            observations=observations,
+            capability_limitations=capability_limitations,
+            artifacts=artifacts,
+            module_outcome=module_outcome,
+        )
+    elif module == "audio":
+        from blue_tap.core.audio_framework import build_audio_result, artifact_if_file
+
+        artifacts = [
+            item
+            for item in (
+                artifact_if_file(
+                    item.get("path", ""),
+                    kind=item.get("kind", "file"),
+                    label=item.get("label", item.get("path", "")),
+                    description=item.get("description", ""),
+                )
+                for item in (artifact_paths or [])
+            )
+            if item is not None
+        ]
+        envelope = build_audio_result(
+            target=target,
+            adapter=_current_adapter(),
+            operation=command,
+            title=title,
+            protocol=protocol,
+            module_data=dict(result or {}),
+            summary_data=dict(operator_context or {}),
+            observations=observations,
+            capability_limitations=capability_limitations,
+            artifacts=artifacts,
+            module_outcome=module_outcome,
+        )
+    else:
+        raise ValueError(f"Unsupported standardized operation module: {module}")
+    log_command(command, envelope, category=category or module, target=target)
+
+
+def _command_succeeded(result) -> bool:
+    """Best-effort success classifier for bool/string responses from profile clients."""
+    if isinstance(result, bool):
+        return result
+    if isinstance(result, str):
+        normalized = result.upper()
+        if not normalized.strip():
+            return False
+        failure_markers = ("ERROR", "+CME ERROR", "NO CARRIER", "BUSY", "NO ANSWER", "NO DIALTONE")
+        return not any(marker in normalized for marker in failure_markers)
+    return bool(result)
+
+
 def _save_json(data, filepath):
     """Save data to JSON file."""
     os.makedirs(os.path.dirname(filepath) if os.path.dirname(filepath) else ".", exist_ok=True)
