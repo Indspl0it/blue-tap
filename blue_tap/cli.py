@@ -6793,11 +6793,12 @@ def ctkd_cmd(target, mode, hci, interval):
 
     if mode == "probe":
         result = attack.probe()
-        _log_attack_result("ctkd", result)
         if result.get("vulnerable"):
             success(f"CTKD: Target {target} may be VULNERABLE")
         else:
             info(f"CTKD: No vulnerability detected on {target}")
+        from blue_tap.utils.session import log_command
+        log_command("ctkd", attack.build_envelope(), category="attack", target=target)
     elif mode == "monitor":
         attack.monitor(interval=interval)
 
@@ -6872,10 +6873,11 @@ def encryption_downgrade(target, method, hci):
 
         console.print(table)
 
-        from blue_tap.utils.session import log_command
-        log_command("encryption_downgrade", result, category="attack", target=target)
     except Exception as exc:
         error(f"Encryption downgrade failed: {exc}")
+    finally:
+        from blue_tap.utils.session import log_command
+        log_command("encryption_downgrade", attack.build_envelope(), category="attack", target=target)
 
 
 # ============================================================================
