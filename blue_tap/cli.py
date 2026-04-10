@@ -5675,8 +5675,19 @@ def _show_dos_result(result: dict) -> None:
         if val:
             info(f"  {key}: {val}")
 
+    from blue_tap.attack.dos_framework import build_dos_operation_result
+    from blue_tap.core.result_schema import now_iso
     from blue_tap.utils.session import log_command
-    log_command(f"dos_{name}", result, category="dos", target=result.get("target", ""))
+    envelope = build_dos_operation_result(
+        target=result.get("target", ""),
+        adapter="hci0",
+        operation=f"dos_{name}",
+        title=name.replace("_", " ").title(),
+        protocol=result.get("protocol", "Bluetooth"),
+        raw_result=result,
+        started_at=now_iso(),
+    )
+    log_command(f"dos_{name}", envelope, category="dos", target=result.get("target", ""))
 
 
 # ============================================================================
