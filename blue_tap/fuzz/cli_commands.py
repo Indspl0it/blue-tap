@@ -58,8 +58,9 @@ from blue_tap.fuzz.engine import (
     PROTOCOL_TRANSPORT_MAP,
     CRASH_SEVERITY,
 )
-from blue_tap.core.fuzz_framework import build_fuzz_operation_result
+from blue_tap.core.fuzz_framework import build_fuzz_operation_result, make_fuzz_run_id
 from blue_tap.core.result_schema import make_artifact
+from blue_tap.core.cli_events import emit_cli_event
 from blue_tap.fuzz.corpus import Corpus, generate_full_corpus
 
 
@@ -1278,6 +1279,7 @@ def _crash_commands(fuzz_group):
           blue-tap fuzz crashes replay 1
           blue-tap fuzz crashes replay 3 --no-capture
         """
+        run_id = make_fuzz_run_id()
         session_dir = _resolve_session_dir(session_name)
         if not session_dir:
             error("No session found.")
@@ -1295,6 +1297,14 @@ def _crash_commands(fuzz_group):
             error(f"Crash ID {crash_id} not found.")
             db.close()
             return
+
+        emit_cli_event(
+            event_type="run_started",
+            module="fuzz",
+            run_id=run_id,
+            message=f"Replaying crash #{crash_id}",
+            details={"crash_id": crash_id},
+        )
 
         # Show crash details
         section(f"Replay Crash #{crash_id}", style="bt.red")
@@ -1427,6 +1437,24 @@ def _crash_commands(fuzz_group):
         if replay_capture_path and os.path.exists(replay_capture_path):
             info(f"Replay capture saved to: {replay_capture_path}")
 
+        emit_cli_event(
+            event_type="execution_result",
+            module="fuzz",
+            run_id=run_id,
+            execution_id=f"crash_replay_{crash_id}",
+            target=target_addr,
+            message=f"Crash #{crash_id} {'reproduced' if reproduced else 'not reproduced'}",
+            details={"crash_id": crash_id, "reproduced": reproduced},
+        )
+        emit_cli_event(
+            event_type="run_completed",
+            module="fuzz",
+            run_id=run_id,
+            target=target_addr,
+            message=f"Crash replay #{crash_id} complete",
+            details={"reproduced": reproduced},
+        )
+
         replay_artifacts = []
         if replay_capture_path and os.path.exists(replay_capture_path):
             replay_artifacts.append(
@@ -1485,6 +1513,7 @@ def _crash_commands(fuzz_group):
           blue-tap fuzz crashes export -o /tmp/crashes.json
           blue-tap fuzz crashes export -s my_session
         """
+        run_id = make_fuzz_run_id()
         session_dir = _resolve_session_dir(session_name)
         if not session_dir:
             error("No session found.")
@@ -1496,6 +1525,14 @@ def _crash_commands(fuzz_group):
 
         if output is None:
             output = os.path.join(session_dir, "fuzz", "crashes_export.json")
+
+        emit_cli_event(
+            event_type="run_started",
+            module="fuzz",
+            run_id=run_id,
+            message="Exporting crash database",
+            details={"output": output, "format": fmt},
+        )
 
         try:
             db.export_json(output)
@@ -1512,6 +1549,20 @@ def _crash_commands(fuzz_group):
                         description="Exported fuzz crash dataset.",
                     )
                 )
+                emit_cli_event(
+                    event_type="artifact_saved",
+                    module="fuzz",
+                    run_id=run_id,
+                    message=f"Crash export written to {output}",
+                    details={"path": output, "crash_count": crash_count},
+                )
+            emit_cli_event(
+                event_type="run_completed",
+                module="fuzz",
+                run_id=run_id,
+                message=f"Crash export complete ({crash_count} crashes)",
+                details={"output": output, "crash_count": crash_count},
+            )
             envelope = build_fuzz_operation_result(
                 target="",
                 adapter="session",
