@@ -1,5 +1,11 @@
 """Automated full-spectrum Bluetooth penetration test workflow.
 
+TODO(standardization): The auto pentest orchestrator collects per-phase
+results but does not itself produce a unified RunEnvelope v2.  Each
+sub-phase (recon, vulnscan, dos, etc.) emits its own envelope; this
+module should wrap them in a top-level "auto" envelope so the full run
+is a single session entry with cross-phase execution records.
+
 Executes a complete pentest methodology against a target IVI system:
 
   Phase 1: Discovery      — scan for nearby devices, identify phones
@@ -207,16 +213,17 @@ class AutoPentest:
         section("Phase 4: Vulnerability Assessment", style="bt.yellow")
 
         def _vulnscan():
-            from blue_tap.attack.vuln_scanner import scan_vulnerabilities
-            findings = scan_vulnerabilities(self.ivi_address, self.hci)
+            from blue_tap.attack.vuln_scanner import run_vulnerability_scan
+            vulnscan = run_vulnerability_scan(self.ivi_address, hci=self.hci, active=True, phone_address=phone_addr or None)
+            findings = vulnscan.get("module_data", {}).get("findings", [])
             confirmed = sum(1 for f in findings if f.get("status") == "confirmed")
             critical = sum(1 for f in findings if f.get("severity", "").upper() == "CRITICAL")
             high = sum(1 for f in findings if f.get("severity", "").upper() == "HIGH")
             info(f"  {len(findings)} finding(s): {confirmed} confirmed, {critical} CRITICAL, {high} HIGH")
-            return {"status": "success", "findings": findings, "count": len(findings)}
+            return {"status": "success", "vulnscan": vulnscan, "findings": findings, "count": len(findings)}
 
         vuln_result = _phase("vuln_assessment", results, _vulnscan)
-        findings = vuln_result.get("findings", []) if vuln_result else []
+        findings = vuln_result.get("vulnscan", {}).get("module_data", {}).get("findings", []) if vuln_result else []
 
         # ── Phase 5: Pairing & Encryption Attacks ───────────────────
         section("Phase 5: Pairing & Encryption Attacks", style="bt.yellow")
@@ -325,51 +332,35 @@ class AutoPentest:
             section("Phase 8: Denial of Service Testing", style="bt.yellow")
 
             def _dos():
-                dos_results = []
+                from blue_tap.attack.dos_framework import summarize_dos_checks
+                from blue_tap.attack.dos_runner import run_dos_checks
 
-                from blue_tap.attack.protocol_dos import L2CAPDoS, SDPDoS, RFCOMMDoS, HFPDoS
-
-                l2cap = L2CAPDoS(self.ivi_address)
-                sdp = SDPDoS(self.ivi_address)
-                rfcomm = RFCOMMDoS(self.ivi_address)
-                hfp = HFPDoS(self.ivi_address)
-
-                tests = [
-                    ("L2CAP connection storm", "l2cap_connection_storm",
-                     lambda: l2cap.config_option_bomb(rounds=50)),
-                    ("L2CAP CID exhaustion", "cid_exhaustion",
-                     lambda: l2cap.cid_exhaustion(count=100)),
-                    ("SDP continuation exhaustion", "sdp_continuation",
-                     lambda: sdp.continuation_exhaustion(connections=5)),
-                    ("RFCOMM SABM flood", "rfcomm_sabm",
-                     lambda: rfcomm.sabm_flood(count=30)),
-                    ("HFP AT command flood", "hfp_at_flood",
-                     lambda: hfp.at_command_flood(count=1000)),
+                check_ids = [
+                    "l2cap_storm",
+                    "l2cap_cid_exhaust",
+                    "sdp_continuation",
+                    "rfcomm_sabm_flood",
+                    "hfp_at_flood",
                 ]
-
-                unresponsive = 0
-                for name, _key, func in tests:
-                    info(f"  Running: {name}...")
-                    try:
-                        result = func()
-                        status = result.get("result", "unknown")
-                        if status == "target_unresponsive":
-                            warning(f"    Target became UNRESPONSIVE")
-                            unresponsive += 1
-                        else:
-                            info(f"    Result: {status}")
-                        dos_results.append(result)
-                    except Exception as exc:
-                        info(f"    Skipped: {exc}")
-                    # Brief recovery between tests
-                    time.sleep(3)
-
-                info(f"  {len(dos_results)} test(s) run, {unresponsive} caused unresponsiveness")
+                dos_result = run_dos_checks(
+                    self.ivi_address,
+                    hci=self.hci,
+                    check_ids=check_ids,
+                    recovery_timeout=180,
+                )
+                checks = dos_result.get("module_data", {}).get("checks", [])
+                summary = summarize_dos_checks(checks)
+                info(
+                    f"  {summary.get('total', 0)} test(s) run, "
+                    f"{summary.get('unresponsive', 0)} left target unresponsive, "
+                    f"{summary.get('recovered', 0)} recovered"
+                )
                 return {
                     "status": "success",
-                    "tests_run": len(dos_results),
-                    "unresponsive_count": unresponsive,
-                    "results": dos_results,
+                    "dos_run": dos_result,
+                    "tests_run": summary.get("total", 0),
+                    "unresponsive_count": summary.get("unresponsive", 0),
+                    "results": checks,
                 }
 
             _phase("dos_testing", results, _dos)
@@ -382,14 +373,32 @@ class AutoPentest:
 
         def _report():
             from blue_tap.report.generator import ReportGenerator
+            from blue_tap.core.scan_framework import build_scan_result
+            from blue_tap.core.result_schema import now_iso
             report = ReportGenerator()
 
             # Feed all collected data
             report.load_from_directory(output_dir)
-            if findings:
-                report.add_vuln_findings(findings)
+            if vuln_result and vuln_result.get("vulnscan"):
+                report.add_run_envelope(vuln_result["vulnscan"])
             if phone:
-                report.add_scan_results([phone])
+                scan_started = now_iso()
+                report.add_run_envelope(
+                    build_scan_result(
+                        scan_mode="classic",
+                        adapter=self.hci,
+                        duration_requested=max(scan_duration, 1),
+                        passive=False,
+                        devices=[phone],
+                        collectors=[{
+                            "collector_id": "auto_discovery_phone",
+                            "title": "Auto Workflow Discovery Snapshot",
+                            "device_count": 1,
+                            "metadata": {"adapter": self.hci, "passive": False, "source": "auto"},
+                        }],
+                        started_at=scan_started,
+                    )
+                )
 
             # Feed phase results into attack_results
             attack_data = {}
@@ -398,13 +407,32 @@ class AutoPentest:
                 if isinstance(phase_data, dict):
                     attack_data[phase_name] = phase_data
             if attack_data:
-                report.add_attack_results(attack_data)
+                from blue_tap.core.attack_framework import build_attack_result
+
+                report.add_run_envelope(
+                    build_attack_result(
+                        target=self.ivi_address,
+                        adapter=self.hci,
+                        operation="auto_attack_phases",
+                        title="Auto Workflow Attack Phases",
+                        protocol="multi",
+                        module_data={"results": attack_data, "output_dir": output_dir},
+                        summary_data={"phase_count": len(attack_data)},
+                        observations=[f"phase_count={len(attack_data)}"],
+                    )
+                )
 
             # Feed DoS results
             dos_phase = results["phases"].get("dos_testing", {})
             if isinstance(dos_phase, dict):
-                for dos_result in dos_phase.get("results", []):
-                    report.add_dos_results({"data": dos_result})
+                dos_run = dos_phase.get("dos_run", {})
+                if dos_run:
+                    report.add_run_envelope(dos_run)
+                else:
+                    # TODO(standardization): auto DoS reporting expects a dos_runner
+                    # envelope. If this path is hit, the phase producer regressed and
+                    # needs to be re-migrated instead of reintroducing legacy report intake.
+                    warning("Auto DoS phase produced no standardized run envelope; skipping report ingestion")
 
             # Session metadata
             report.add_session_metadata({
