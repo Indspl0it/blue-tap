@@ -6,6 +6,7 @@ from typing import Any
 
 from blue_tap.core.report_contract import ReportAdapter, SectionBlock, SectionModel
 from blue_tap.core.result_schema import envelope_executions, envelope_module_data
+from blue_tap.utils.output import warning
 
 
 class DosReportAdapter(ReportAdapter):
@@ -17,7 +18,14 @@ class DosReportAdapter(ReportAdapter):
     def ingest(self, envelope: dict[str, Any], report_state: dict[str, Any]) -> None:
         report_state.setdefault("dos_runs", []).append(envelope)
         module_data = envelope_module_data(envelope)
-        report_state.setdefault("dos_results", []).extend(module_data.get("checks", []))
+        checks = module_data.get("checks")
+        if checks is None:
+            warning(
+                f"DoS envelope missing 'checks' key in module_data "
+                f"(run_id={envelope.get('run_id', '?')}); dos_results will be empty for this run"
+            )
+            checks = []
+        report_state.setdefault("dos_results", []).extend(checks)
         report_state.setdefault("dos_executions", []).extend(envelope_executions(envelope))
 
     def build_sections(self, report_state: dict[str, Any]) -> list[SectionModel]:

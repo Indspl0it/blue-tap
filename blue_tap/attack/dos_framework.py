@@ -28,6 +28,10 @@ DOS_STATUS_ERROR = "error"
 DOS_STATUS_NOT_APPLICABLE = "not_applicable"
 DOS_STATUS_SKIPPED = "skipped"
 
+# Probe timeouts (seconds) — kept as named constants so they're tunable in one place
+_L2PING_PROBE_TIMEOUT = 10   # hcitool/l2ping round-trip probe timeout
+_NAME_PROBE_TIMEOUT = 8      # hcitool name lookup timeout
+
 RECOVERY_PROBE_CLASSIC_L2PING = "classic_l2ping"
 RECOVERY_PROBE_CLASSIC_NAME = "classic_name"
 RECOVERY_PROBE_BLE_ATT = "ble_att"
@@ -113,7 +117,7 @@ def default_recovery_probes(protocol: str) -> tuple[str, ...]:
 def _probe_classic_l2ping(address: str, hci: str) -> tuple[bool, str]:
     if not check_tool("l2ping"):
         return False, "classic_l2ping unavailable"
-    result = run_cmd(["l2ping", "-i", hci, "-c", "1", "-t", "3", address], timeout=10)
+    result = run_cmd(["l2ping", "-i", hci, "-c", "1", "-t", "3", address], timeout=_L2PING_PROBE_TIMEOUT)
     if result.returncode == 0:
         line = result.stdout.strip().splitlines()
         return True, line[-1] if line else "classic_l2ping success"
@@ -124,7 +128,7 @@ def _probe_classic_l2ping(address: str, hci: str) -> tuple[bool, str]:
 def _probe_classic_name(address: str, hci: str) -> tuple[bool, str]:
     if not check_tool("hcitool"):
         return False, "classic_name unavailable"
-    result = run_cmd(["hcitool", "-i", hci, "name", address], timeout=8)
+    result = run_cmd(["hcitool", "-i", hci, "name", address], timeout=_NAME_PROBE_TIMEOUT)
     if result.returncode == 0 and result.stdout.strip():
         return True, f"classic_name responded: {result.stdout.strip()}"
     stderr = (result.stderr or "").strip()
