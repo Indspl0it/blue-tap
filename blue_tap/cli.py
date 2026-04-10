@@ -2162,15 +2162,35 @@ def pbap():
               help="RFCOMM channel (auto-discovered if not specified)")
 @click.option("-p", "--path", default="telecom/pb.vcf",
               help="PBAP path to pull")
+@click.option("--location", type=click.Choice(["int", "internal", "sim", "sim1", "sim2"]), default=None,
+              help="PBAP repository location override")
+@click.option("--phonebook", type=click.Choice(["pb", "ich", "och", "mch", "cch", "spd", "fav"]), default=None,
+              help="PBAP phonebook object override")
+@click.option("--max-count", type=click.IntRange(0, 65535), default=0,
+              help="Maximum entries to request (0=all)")
+@click.option("--offset", type=click.IntRange(0, 65535), default=0,
+              help="Start offset for partial pulls")
+@click.option("--format", "vcard_format", type=click.Choice(["2.1", "3.0"]), default="3.0",
+              help="Requested vCard version")
+@click.option("--fields", default="",
+              help="Comma-separated PBAP fields to include (fn,tel,email,adr,org,note,photo,...)")
+@click.option("--refresh-version", is_flag=True,
+              help="Ask PBAP server to refresh version counters before reading metadata")
 @click.option("-o", "--output-dir", default="pbap_dump")
-def pbap_pull(address, channel, path, output_dir):
+def pbap_pull(address, channel, path, location, phonebook, max_count, offset, vcard_format, fields, refresh_version, output_dir):
     """Pull a specific phonebook object."""
     address = resolve_address(address)
     if not address:
         return
     from blue_tap.attack.pbap import PBAPClient
+    from blue_tap.core.data_framework import artifact_if_path, build_data_result
+    from blue_tap.core.result_schema import now_iso
     from blue_tap.recon.sdp import find_service_channel
 
+    started_at = now_iso()
+    run_id = make_run_id("data")
+    emit_cli_event(event_type="run_started", module="data", run_id=run_id, target=address,
+                   message=f"Starting PBAP pull: {path}")
     info(f"Pulling PBAP object [bold]{path}[/bold] from [bold]{address}[/bold]...")
     if channel is None:
         info("  Auto-discovering PBAP channel via SDP...")
@@ -2179,6 +2199,8 @@ def pbap_pull(address, channel, path, output_dir):
             channel = find_service_channel(address, "PBAP")
         if channel is None:
             error("Could not find PBAP channel via SDP. Specify with -c.")
+            emit_cli_event(event_type="run_error", module="data", run_id=run_id, target=address,
+                           message="Could not find PBAP channel via SDP")
             return
         info(f"  Found PBAP on RFCOMM channel {channel}")
 
@@ -2186,37 +2208,445 @@ def pbap_pull(address, channel, path, output_dir):
     client = PBAPClient(address, channel=channel)
     if not client.connect():
         error("PBAP connection failed")
+        emit_cli_event(event_type="run_error", module="data", run_id=run_id, target=address,
+                       message="PBAP connection failed")
         return
 
     try:
-        info(f"  Requesting {path}...")
-        data = client.pull_phonebook(path)
+        resolved_path = client.resolve_path_selection(path=path, location=location, phonebook=phonebook)
+        info(f"  Requesting {resolved_path}...")
+        requested_fields = [item.strip() for item in fields.split(",") if item.strip()]
+        filter_bits = client.build_filter_bits(requested_fields)
+        data = client.pull_phonebook(
+            resolved_path,
+            max_count=max_count,
+            offset=offset,
+            vcard_version=1 if vcard_format == "3.0" else 0,
+            filter_bits=filter_bits,
+        )
         if data:
             os.makedirs(output_dir, exist_ok=True)
-            filename = os.path.join(output_dir, path.replace("/", "_"))
+            normalized_path = client.normalize_path(resolved_path)
+            filename = os.path.join(output_dir, normalized_path.replace("/", "_"))
             with open(filename, "w") as f:
                 f.write(data)
-            entries = data.count("BEGIN:VCARD")
+            summary = client.summarize_phonebook(data)
+            metadata = client.get_selected_metadata(normalized_path, refresh_version=refresh_version)
+            summary_path = f"{filename}.json"
+            _save_json(
+                {
+                    "path": normalized_path,
+                    "summary": summary,
+                    "selected_metadata": metadata,
+                    "request": {
+                        "max_count": max_count,
+                        "offset": offset,
+                        "vcard_format": vcard_format,
+                        "fields": requested_fields,
+                        "filter_bits": filter_bits,
+                        "location": client.normalize_location(location) if location else "",
+                        "phonebook": client.normalize_phonebook_name(phonebook) if phonebook else "",
+                        "refresh_version": refresh_version,
+                    },
+                },
+                summary_path,
+            )
+            entries = summary["entries"]
             success(f"Extracted {entries} vCard(s) -> {filename} ({len(data):,} bytes)")
+            from blue_tap.utils.session import log_command
+            artifact = artifact_if_path(
+                filename,
+                kind="vcf",
+                label="PBAP Pull Output",
+                description=f"PBAP object pulled from {path}.",
+            )
+            summary_artifact = artifact_if_path(
+                summary_path,
+                kind="json",
+                label="PBAP Pull Summary",
+                description="Parsed PBAP summary and selected metadata.",
+            )
+            envelope = build_data_result(
+                target=address,
+                adapter="hci0",
+                family="pbap",
+                operation="pbap_pull",
+                title="PBAP Object Pull",
+                summary_data={"path": normalized_path, "entries": entries, "bytes": len(data)},
+                observations=[
+                    f"path={normalized_path}",
+                    f"entries={entries}",
+                    f"bytes={len(data)}",
+                    f"offset={offset}",
+                    f"max_count={max_count}",
+                    f"vcard_format={vcard_format}",
+                ],
+                module_data={
+                    "path": normalized_path,
+                    "output_dir": output_dir,
+                    "output_file": filename,
+                    "entries": entries,
+                    "bytes": len(data),
+                    "summary": summary,
+                    "request": {
+                        "max_count": max_count,
+                        "offset": offset,
+                        "vcard_format": vcard_format,
+                        "fields": requested_fields,
+                        "filter_bits": filter_bits,
+                        "location": client.normalize_location(location) if location else "",
+                        "phonebook": client.normalize_phonebook_name(phonebook) if phonebook else "",
+                        "refresh_version": refresh_version,
+                    },
+                    "summary_file": summary_path,
+                    "selected_metadata": metadata,
+                },
+                artifacts=[item for item in [artifact, summary_artifact] if item],
+                started_at=started_at,
+            )
+            log_command("pbap_pull", envelope, category="data", target=address)
+            emit_cli_event(event_type="execution_result", module="data", run_id=run_id, target=address,
+                           message=f"PBAP pull complete: {entries} vCard(s)",
+                           details={"path": normalized_path, "entries": entries, "bytes": len(data)})
         else:
-            warning(f"No data returned for {path}")
+            warning(f"No data returned for {resolved_path}")
+            emit_cli_event(event_type="run_error", module="data", run_id=run_id, target=address,
+                           message=f"No data returned for {resolved_path}")
     finally:
         client.disconnect()
         info("  PBAP session closed")
+    emit_cli_event(event_type="run_completed", module="data", run_id=run_id, target=address,
+                   message="PBAP pull completed")
+
+
+@pbap.command("list")
+@click.argument("address", required=False, default=None)
+@click.option("-c", "--channel", type=int, default=None,
+              help="RFCOMM channel (auto-discovered if not specified)")
+@click.option("-p", "--path", default="telecom/pb",
+              help="PBAP listing path or alias")
+@click.option("--location", type=click.Choice(["int", "internal", "sim", "sim1", "sim2"]), default=None,
+              help="PBAP repository location override")
+@click.option("--phonebook", type=click.Choice(["pb", "ich", "och", "mch", "cch", "spd", "fav"]), default=None,
+              help="PBAP phonebook object override")
+@click.option("--max-count", type=click.IntRange(0, 65535), default=1024,
+              help="Maximum entries to list")
+@click.option("--offset", type=click.IntRange(0, 65535), default=0,
+              help="Start offset for paged listings")
+@click.option("--order", type=click.Choice(["indexed", "alpha", "phonetic"]), default="indexed",
+              help="Listing order")
+@click.option("--refresh-version", is_flag=True,
+              help="Ask PBAP server to refresh version counters before reading metadata")
+def pbap_list(address, channel, path, location, phonebook, max_count, offset, order, refresh_version):
+    """List PBAP vCard handles without downloading full objects."""
+    address = resolve_address(address)
+    if not address:
+        return
+    from blue_tap.attack.pbap import PBAPClient
+    from blue_tap.core.data_framework import build_data_result
+    from blue_tap.core.result_schema import now_iso
+    from blue_tap.recon.sdp import find_service_channel
+
+    started_at = now_iso()
+    run_id = make_run_id("data")
+    emit_cli_event(event_type="run_started", module="data", run_id=run_id, target=address,
+                   message=f"Starting PBAP list: {path}")
+    info(f"Listing PBAP entries in [bold]{path}[/bold] from [bold]{address}[/bold]...")
+    if channel is None:
+        info("  Auto-discovering PBAP channel via SDP...")
+        channel = find_service_channel(address, "Phonebook")
+        if channel is None:
+            channel = find_service_channel(address, "PBAP")
+        if channel is None:
+            error("Could not find PBAP channel via SDP. Specify with -c.")
+            emit_cli_event(event_type="run_error", module="data", run_id=run_id, target=address,
+                           message="Could not find PBAP channel via SDP")
+            return
+        info(f"  Found PBAP on RFCOMM channel {channel}")
+
+    client = PBAPClient(address, channel=channel)
+    if not client.connect():
+        error("PBAP connection failed")
+        emit_cli_event(event_type="run_error", module="data", run_id=run_id, target=address,
+                       message="PBAP connection failed")
+        return
+
+    try:
+        resolved_path = client.resolve_path_selection(
+            path=path,
+            location=location,
+            phonebook=phonebook,
+            listing=True,
+        )
+        listing = client.pull_vcard_listing(resolved_path, max_count=max_count, offset=offset, order=order)
+        entries = client.parse_vcard_listing(listing)
+        if entries:
+            table = Table(title="PBAP vCard Listing")
+            table.add_column("Handle")
+            table.add_column("Name")
+            table.add_column("Attributes")
+            for item in entries:
+                attrs = ", ".join(
+                    f"{key}={value}" for key, value in item.items() if key not in {"handle", "name"}
+                )
+                table.add_row(item.get("handle", ""), item.get("name", ""), attrs)
+            console.print(table)
+        else:
+            warning("PBAP listing returned no entries")
+
+        from blue_tap.utils.session import log_command
+        normalized_path = client.normalize_path(resolved_path, prefer_listing=True)
+        metadata = client.get_selected_metadata(normalized_path, refresh_version=refresh_version)
+        envelope = build_data_result(
+            target=address,
+            adapter="hci0",
+            family="pbap",
+            operation="pbap_list",
+            title="PBAP vCard Listing",
+            summary_data={"path": normalized_path, "entries": len(entries)},
+            observations=[
+                f"path={normalized_path}",
+                f"entries={len(entries)}",
+                f"offset={offset}",
+                f"max_count={max_count}",
+                f"order={order}",
+            ],
+            module_data={
+                "path": normalized_path,
+                "listing_xml": listing,
+                "entries": entries,
+                "request": {"offset": offset, "max_count": max_count, "order": order, "refresh_version": refresh_version},
+                "selected_metadata": metadata,
+            },
+            started_at=started_at,
+        )
+        log_command("pbap_list", envelope, category="data", target=address)
+        emit_cli_event(event_type="execution_result", module="data", run_id=run_id, target=address,
+                       message=f"PBAP listing complete: {len(entries)} entrie(s)",
+                       details={"path": normalized_path, "entries": len(entries)})
+    finally:
+        client.disconnect()
+        info("  PBAP session closed")
+
+    emit_cli_event(event_type="run_completed", module="data", run_id=run_id, target=address,
+                   message="PBAP list completed")
+
+
+@pbap.command("search")
+@click.argument("address", required=False, default=None)
+@click.argument("query")
+@click.option("-c", "--channel", type=int, default=None,
+              help="RFCOMM channel (auto-discovered if not specified)")
+@click.option("-p", "--path", default="telecom/pb",
+              help="PBAP listing path or alias")
+@click.option("--location", type=click.Choice(["int", "internal", "sim", "sim1", "sim2"]), default=None,
+              help="PBAP repository location override")
+@click.option("--phonebook", type=click.Choice(["pb", "ich", "och", "mch", "cch", "spd", "fav"]), default=None,
+              help="PBAP phonebook object override")
+@click.option("--search-by", type=click.Choice(["name", "number", "sound"]), default="name",
+              help="PBAP search attribute")
+@click.option("--refresh-version", is_flag=True,
+              help="Ask PBAP server to refresh version counters before reading metadata")
+def pbap_search(address, query, channel, path, location, phonebook, search_by, refresh_version):
+    """Search a PBAP phonebook listing by name or number."""
+    address = resolve_address(address)
+    if not address:
+        return
+    from blue_tap.attack.pbap import PBAPClient
+    from blue_tap.core.data_framework import build_data_result
+    from blue_tap.core.result_schema import now_iso
+    from blue_tap.recon.sdp import find_service_channel
+
+    started_at = now_iso()
+    run_id = make_run_id("data")
+    emit_cli_event(event_type="run_started", module="data", run_id=run_id, target=address,
+                   message=f"Starting PBAP search: {query}")
+    info(f"Searching PBAP for [bold]{query}[/bold] by [bold]{search_by}[/bold] on [bold]{address}[/bold]...")
+    if channel is None:
+        channel = find_service_channel(address, "Phonebook")
+        if channel is None:
+            channel = find_service_channel(address, "PBAP")
+        if channel is None:
+            error("Could not find PBAP channel via SDP. Specify with -c.")
+            emit_cli_event(event_type="run_error", module="data", run_id=run_id, target=address,
+                           message="Could not find PBAP channel via SDP")
+            return
+
+    client = PBAPClient(address, channel=channel)
+    if not client.connect():
+        error("PBAP connection failed")
+        emit_cli_event(event_type="run_error", module="data", run_id=run_id, target=address,
+                       message="PBAP connection failed")
+        return
+
+    try:
+        resolved_path = client.resolve_path_selection(
+            path=path,
+            location=location,
+            phonebook=phonebook,
+            listing=True,
+        )
+        listing = client.search_phonebook(query, search_by=search_by, path=resolved_path)
+        entries = client.parse_vcard_listing(listing)
+        if entries:
+            table = Table(title="PBAP Search Results")
+            table.add_column("Handle")
+            table.add_column("Name")
+            table.add_column("Attributes")
+            for item in entries:
+                attrs = ", ".join(
+                    f"{key}={value}" for key, value in item.items() if key not in {"handle", "name"}
+                )
+                table.add_row(item.get("handle", ""), item.get("name", ""), attrs)
+            console.print(table)
+        else:
+            warning("PBAP search returned no matches")
+
+        from blue_tap.utils.session import log_command
+        normalized_path = client.normalize_path(resolved_path, prefer_listing=True)
+        metadata = client.get_selected_metadata(normalized_path, refresh_version=refresh_version)
+        envelope = build_data_result(
+            target=address,
+            adapter="hci0",
+            family="pbap",
+            operation="pbap_search",
+            title="PBAP Phonebook Search",
+            summary_data={"path": normalized_path, "query": query, "matches": len(entries)},
+            observations=[
+                f"path={normalized_path}",
+                f"query={query}",
+                f"search_by={search_by}",
+                f"matches={len(entries)}",
+            ],
+            module_data={
+                "path": normalized_path,
+                "query": query,
+                "search_by": search_by,
+                "listing_xml": listing,
+                "entries": entries,
+                "request": {"refresh_version": refresh_version},
+                "selected_metadata": metadata,
+            },
+            started_at=started_at,
+        )
+        log_command("pbap_search", envelope, category="data", target=address)
+        emit_cli_event(event_type="execution_result", module="data", run_id=run_id, target=address,
+                       message=f"PBAP search complete: {len(entries)} match(es)",
+                       details={"path": normalized_path, "query": query, "matches": len(entries)})
+    finally:
+        client.disconnect()
+        info("  PBAP session closed")
+
+    emit_cli_event(event_type="run_completed", module="data", run_id=run_id, target=address,
+                   message="PBAP search completed")
+
+
+@pbap.command("size")
+@click.argument("address", required=False, default=None)
+@click.option("-c", "--channel", type=int, default=None,
+              help="RFCOMM channel (auto-discovered if not specified)")
+@click.option("-p", "--path", default="telecom/pb.vcf",
+              help="PBAP path or alias")
+@click.option("--location", type=click.Choice(["int", "internal", "sim", "sim1", "sim2"]), default=None,
+              help="PBAP repository location override")
+@click.option("--phonebook", type=click.Choice(["pb", "ich", "och", "mch", "cch", "spd", "fav"]), default=None,
+              help="PBAP phonebook object override")
+@click.option("--refresh-version", is_flag=True,
+              help="Ask PBAP server to refresh version counters before reading metadata")
+def pbap_size(address, channel, path, location, phonebook, refresh_version):
+    """Query the number of entries in a PBAP phonebook object."""
+    address = resolve_address(address)
+    if not address:
+        return
+    from blue_tap.attack.pbap import PBAPClient
+    from blue_tap.core.data_framework import build_data_result
+    from blue_tap.core.result_schema import now_iso
+    from blue_tap.recon.sdp import find_service_channel
+
+    started_at = now_iso()
+    run_id = make_run_id("data")
+    emit_cli_event(event_type="run_started", module="data", run_id=run_id, target=address,
+                   message="Starting PBAP size query")
+    if channel is None:
+        channel = find_service_channel(address, "Phonebook")
+        if channel is None:
+            channel = find_service_channel(address, "PBAP")
+        if channel is None:
+            error("Could not find PBAP channel via SDP. Specify with -c.")
+            emit_cli_event(event_type="run_error", module="data", run_id=run_id, target=address,
+                           message="Could not find PBAP channel via SDP")
+            return
+
+    client = PBAPClient(address, channel=channel)
+    if not client.connect():
+        error("PBAP connection failed")
+        emit_cli_event(event_type="run_error", module="data", run_id=run_id, target=address,
+                       message="PBAP connection failed")
+        return
+
+    try:
+        resolved_path = client.resolve_path_selection(path=path, location=location, phonebook=phonebook)
+        size = client.get_phonebook_size(resolved_path)
+        metadata = client.get_selected_metadata(resolved_path, refresh_version=refresh_version)
+        if size >= 0:
+            success(f"PBAP size for {resolved_path}: {size} entrie(s)")
+        else:
+            warning(f"PBAP size query failed for {resolved_path}")
+
+        from blue_tap.utils.session import log_command
+        envelope = build_data_result(
+            target=address,
+            adapter="hci0",
+            family="pbap",
+            operation="pbap_size",
+            title="PBAP Phonebook Size Query",
+            summary_data={"path": resolved_path, "entries": size},
+            observations=[f"path={resolved_path}", f"entries={size}"],
+            module_data={
+                "path": resolved_path,
+                "entries": size,
+                "selected_metadata": metadata,
+                "request": {
+                    "location": client.normalize_location(location) if location else "",
+                    "phonebook": client.normalize_phonebook_name(phonebook) if phonebook else "",
+                    "refresh_version": refresh_version,
+                },
+            },
+            started_at=started_at,
+            module_outcome="success" if size >= 0 else "failed",
+        )
+        log_command("pbap_size", envelope, category="data", target=address)
+        emit_cli_event(event_type="execution_result", module="data", run_id=run_id, target=address,
+                       message=f"PBAP size query complete: {size}",
+                       details={"path": resolved_path, "entries": size})
+    finally:
+        client.disconnect()
+        info("  PBAP session closed")
+
+    emit_cli_event(event_type="run_completed", module="data", run_id=run_id, target=address,
+                   message="PBAP size completed")
 
 
 @pbap.command("dump")
 @click.argument("address", required=False, default=None)
 @click.option("-c", "--channel", type=int, default=None)
+@click.option("--refresh-version", is_flag=True,
+              help="Ask PBAP server to refresh version counters before reading metadata")
 @click.option("-o", "--output-dir", default="pbap_dump")
-def pbap_dump(address, channel, output_dir):
+def pbap_dump(address, channel, refresh_version, output_dir):
     """Dump ALL phonebook data: contacts, call logs, favorites, SIM."""
     address = resolve_address(address)
     if not address:
         return
     from blue_tap.attack.pbap import PBAPClient
+    from blue_tap.core.data_framework import artifact_if_path, build_data_result
+    from blue_tap.core.result_schema import now_iso
     from blue_tap.recon.sdp import find_service_channel
 
+    started_at = now_iso()
+    run_id = make_run_id("data")
+    emit_cli_event(event_type="run_started", module="data", run_id=run_id, target=address,
+                   message="Starting full PBAP dump")
     info(f"Starting full PBAP dump from [bold]{address}[/bold]...")
     info("  Targets: contacts, call history (in/out/missed), favorites, SIM phonebook")
     if channel is None:
@@ -2226,6 +2656,8 @@ def pbap_dump(address, channel, output_dir):
             channel = find_service_channel(address, "PBAP")
         if channel is None:
             error("Could not find PBAP channel via SDP. Specify with -c.")
+            emit_cli_event(event_type="run_error", module="data", run_id=run_id, target=address,
+                           message="Could not find PBAP channel via SDP")
             return
         info(f"  Found PBAP on RFCOMM channel {channel}")
 
@@ -2233,11 +2665,13 @@ def pbap_dump(address, channel, output_dir):
     client = PBAPClient(address, channel=channel)
     if not client.connect():
         error("PBAP connection failed")
+        emit_cli_event(event_type="run_error", module="data", run_id=run_id, target=address,
+                       message="PBAP connection failed")
         return
 
     try:
         info("  Pulling all phonebook objects...")
-        results = client.pull_all_data(output_dir)
+        results = client.pull_all_data(output_dir, refresh_version=refresh_version)
         if results:
             table = Table(title="PBAP Dump Results")
             table.add_column("Path")
@@ -2249,15 +2683,48 @@ def pbap_dump(address, channel, output_dir):
                               info_dict["file"], str(info_dict["size"]))
             console.print(table)
             total_size = sum(d["size"] for d in results.values())
+            manifest_path = os.path.join(output_dir, "pbap_dump_manifest.json")
+            _save_json({"results": results, "refresh_version": refresh_version}, manifest_path)
             success(f"PBAP dump complete: {len(results)} object(s), {total_size:,} bytes -> {output_dir}/")
 
             from blue_tap.utils.session import log_command
-            log_command("pbap_dump", results, category="data", target=address)
+            artifact = artifact_if_path(
+                output_dir,
+                kind="directory",
+                label="PBAP Dump Directory",
+                description="Directory containing PBAP dump artifacts.",
+            )
+            manifest_artifact = artifact_if_path(
+                manifest_path,
+                kind="json",
+                label="PBAP Dump Manifest",
+                description="Manifest summarizing PBAP dump results and metadata sidecars.",
+            )
+            envelope = build_data_result(
+                target=address,
+                adapter="hci0",
+                family="pbap",
+                operation="pbap_dump",
+                title="PBAP Data Dump",
+                summary_data={"objects": len(results), "bytes": total_size},
+                observations=[f"objects={len(results)}", f"bytes={total_size}", f"refresh_version={refresh_version}"],
+                module_data={"results": results, "output_dir": output_dir, "manifest_file": manifest_path, "refresh_version": refresh_version},
+                artifacts=[item for item in [artifact, manifest_artifact] if item],
+                started_at=started_at,
+            )
+            log_command("pbap_dump", envelope, category="data", target=address)
+            emit_cli_event(event_type="execution_result", module="data", run_id=run_id, target=address,
+                           message=f"PBAP dump complete: {len(results)} object(s), {total_size:,} bytes",
+                           details={"objects": len(results), "bytes": total_size})
         else:
             warning("No PBAP data returned — device may require authorization")
+            emit_cli_event(event_type="run_error", module="data", run_id=run_id, target=address,
+                           message="No PBAP data returned")
     finally:
         client.disconnect()
         info("  PBAP session closed")
+    emit_cli_event(event_type="run_completed", module="data", run_id=run_id, target=address,
+                   message="PBAP dump completed")
 
 
 # ============================================================================
@@ -2272,14 +2739,31 @@ def map_cmd():
 @click.argument("address", required=False, default=None)
 @click.option("-c", "--channel", type=int, default=None)
 @click.option("-f", "--folder", default="telecom/msg/inbox")
-def map_list(address, channel, folder):
+@click.option("--max-count", type=click.IntRange(1, 1024), default=100)
+@click.option("--offset", type=click.IntRange(0, 65535), default=0)
+@click.option("--subject-length", type=click.IntRange(1, 256), default=256)
+@click.option("--fields", default="", help="Comma-separated MAP fields to request")
+@click.option("--type", "msg_types", multiple=True, type=click.Choice(["sms", "email", "mms"]))
+@click.option("--sender", default="", help="Filter by sender address")
+@click.option("--recipient", default="", help="Filter by recipient address")
+@click.option("--read/--unread", "read", default=None, help="Filter by read flag")
+@click.option("--priority/--no-priority", "priority", default=None, help="Filter by priority flag")
+@click.option("--period-begin", default="", help="Filter messages after YYYYMMDDTHHMMSS")
+@click.option("--period-end", default="", help="Filter messages before YYYYMMDDTHHMMSS")
+def map_list(address, channel, folder, max_count, offset, subject_length, fields, msg_types, sender, recipient, read, priority, period_begin, period_end):
     """List messages in a folder."""
     address = resolve_address(address)
     if not address:
         return
     from blue_tap.attack.map_client import MAPClient
+    from blue_tap.core.data_framework import build_data_result
+    from blue_tap.core.result_schema import now_iso
     from blue_tap.recon.sdp import find_service_channel
 
+    started_at = now_iso()
+    run_id = make_run_id("data")
+    emit_cli_event(event_type="run_started", module="data", run_id=run_id, target=address,
+                   message=f"Starting MAP list: {folder}")
     info(f"Listing messages in [bold]{folder}[/bold] on [bold]{address}[/bold]...")
     if channel is None:
         info("  Auto-discovering MAP channel via SDP...")
@@ -2288,6 +2772,8 @@ def map_list(address, channel, folder):
             channel = find_service_channel(address, "MAP")
         if channel is None:
             error("Could not find MAP channel via SDP. Specify with -c.")
+            emit_cli_event(event_type="run_error", module="data", run_id=run_id, target=address,
+                           message="Could not find MAP channel via SDP")
             return
         info(f"  Found MAP on RFCOMM channel {channel}")
 
@@ -2295,19 +2781,436 @@ def map_list(address, channel, folder):
     client = MAPClient(address, channel=channel)
     if not client.connect():
         error("MAP connection failed")
+        emit_cli_event(event_type="run_error", module="data", run_id=run_id, target=address,
+                       message="MAP connection failed")
         return
 
     try:
         info(f"  Fetching message listing from {folder}...")
-        listing = client.get_messages_listing(folder)
+        requested_fields = [item.strip() for item in fields.split(",") if item.strip()]
+        listing = client.get_messages_listing(
+            folder,
+            max_count=max_count,
+            offset=offset,
+            subject_length=subject_length,
+            fields=requested_fields or None,
+            msg_types=list(msg_types) or None,
+            period_begin=period_begin or None,
+            period_end=period_end or None,
+            read=read,
+            recipient=recipient or None,
+            sender=sender or None,
+            priority=priority,
+        )
         if listing:
+            parsed_listing = client.parse_message_listing(listing)
+            os.makedirs("map_dump", exist_ok=True)
+            listing_sidecar = os.path.join("map_dump", "map_listing_preview.json")
+            _save_json(
+                {
+                    "folder": folder,
+                    "parsed_listing": parsed_listing,
+                    "request": {
+                        "max_count": max_count,
+                        "offset": offset,
+                        "subject_length": subject_length,
+                        "fields": requested_fields,
+                        "types": list(msg_types),
+                        "sender": sender,
+                        "recipient": recipient,
+                        "read": read,
+                        "priority": priority,
+                        "period_begin": period_begin,
+                        "period_end": period_end,
+                    },
+                },
+                listing_sidecar,
+            )
             console.print(listing)
             success(f"Message listing retrieved from {folder}")
+            from blue_tap.utils.session import log_command
+            from blue_tap.core.data_framework import artifact_if_path
+            sidecar_artifact = artifact_if_path(
+                listing_sidecar,
+                kind="json",
+                label="MAP Listing Sidecar",
+                description="Parsed MAP listing plus request filters.",
+            )
+            envelope = build_data_result(
+                target=address,
+                adapter="hci0",
+                family="map",
+                operation="map_list",
+                title="MAP Message Listing",
+                summary_data={"folder": folder, "messages": len(parsed_listing)},
+                observations=[
+                    f"folder={folder}",
+                    f"messages={len(parsed_listing)}",
+                    "listing_retrieved=true",
+                    f"offset={offset}",
+                    f"max_count={max_count}",
+                ],
+                module_data={
+                    "folder": folder,
+                    "listing": str(listing),
+                    "parsed_listing": parsed_listing,
+                    "output_dir": "",
+                    "request": {
+                        "max_count": max_count,
+                        "offset": offset,
+                        "subject_length": subject_length,
+                        "fields": requested_fields,
+                        "types": list(msg_types),
+                        "sender": sender,
+                        "recipient": recipient,
+                        "read": read,
+                        "priority": priority,
+                        "period_begin": period_begin,
+                        "period_end": period_end,
+                    },
+                    "listing_sidecar": listing_sidecar,
+                },
+                artifacts=[item for item in [sidecar_artifact] if item],
+                started_at=started_at,
+            )
+            log_command("map_list", envelope, category="data", target=address)
+            emit_cli_event(event_type="execution_result", module="data", run_id=run_id, target=address,
+                           message=f"Message listing retrieved from {folder}",
+                           details={"folder": folder, "messages": len(parsed_listing)})
         else:
             warning(f"No messages found in {folder}")
+            emit_cli_event(event_type="run_error", module="data", run_id=run_id, target=address,
+                           message=f"No messages found in {folder}")
     finally:
         client.disconnect()
         info("  MAP session closed")
+    emit_cli_event(event_type="run_completed", module="data", run_id=run_id, target=address,
+                   message="MAP list completed")
+
+
+@map_cmd.command("folders")
+@click.argument("address", required=False, default=None)
+@click.option("-c", "--channel", type=int, default=None)
+@click.option("-f", "--folder", default="telecom/msg")
+@click.option("--max-count", type=click.IntRange(1, 1024), default=100)
+@click.option("--offset", type=click.IntRange(0, 65535), default=0)
+def map_folders(address, channel, folder, max_count, offset):
+    """List MAP folders beneath the selected root."""
+    address = resolve_address(address)
+    if not address:
+        return
+    from blue_tap.attack.map_client import MAPClient
+    from blue_tap.core.data_framework import build_data_result
+    from blue_tap.core.result_schema import now_iso
+    from blue_tap.recon.sdp import find_service_channel
+
+    started_at = now_iso()
+    run_id = make_run_id("data")
+    emit_cli_event(event_type="run_started", module="data", run_id=run_id, target=address,
+                   message=f"Starting MAP folder listing: {folder}")
+    if channel is None:
+        channel = find_service_channel(address, "Message")
+        if channel is None:
+            channel = find_service_channel(address, "MAP")
+        if channel is None:
+            error("Could not find MAP channel via SDP. Specify with -c.")
+            emit_cli_event(event_type="run_error", module="data", run_id=run_id, target=address,
+                           message="Could not find MAP channel via SDP")
+            return
+
+    client = MAPClient(address, channel=channel)
+    if not client.connect():
+        error("MAP connection failed")
+        emit_cli_event(event_type="run_error", module="data", run_id=run_id, target=address,
+                       message="MAP connection failed")
+        return
+
+    try:
+        folders = client.list_folders(folder, max_count=max_count, offset=offset)
+        if folders:
+            table = Table(title="MAP Folders")
+            table.add_column("Name")
+            for item in folders:
+                table.add_row(str(item.get("Name", "")))
+            console.print(table)
+        else:
+            warning("No MAP folders returned")
+
+        from blue_tap.utils.session import log_command
+        envelope = build_data_result(
+            target=address,
+            adapter="hci0",
+            family="map",
+            operation="map_folders",
+            title="MAP Folder Listing",
+            summary_data={"folder": folder, "folders": len(folders)},
+            observations=[f"folder={folder}", f"folders={len(folders)}", f"offset={offset}", f"max_count={max_count}"],
+            module_data={"folder": folder, "folders": folders, "request": {"offset": offset, "max_count": max_count}},
+            started_at=started_at,
+        )
+        log_command("map_folders", envelope, category="data", target=address)
+    finally:
+        client.disconnect()
+        info("  MAP session closed")
+
+    emit_cli_event(event_type="run_completed", module="data", run_id=run_id, target=address,
+                   message="MAP folders completed")
+
+
+@map_cmd.command("update-inbox")
+@click.argument("address", required=False, default=None)
+@click.option("-c", "--channel", type=int, default=None)
+def map_update_inbox(address, channel):
+    """Request inbox refresh from the remote MAP server."""
+    address = resolve_address(address)
+    if not address:
+        return
+    from blue_tap.attack.map_client import MAPClient
+    from blue_tap.core.data_framework import build_data_result
+    from blue_tap.core.result_schema import now_iso
+    from blue_tap.recon.sdp import find_service_channel
+
+    started_at = now_iso()
+    run_id = make_run_id("data")
+    emit_cli_event(event_type="run_started", module="data", run_id=run_id, target=address,
+                   message="Starting MAP inbox update")
+    if channel is None:
+        channel = find_service_channel(address, "Message")
+        if channel is None:
+            channel = find_service_channel(address, "MAP")
+        if channel is None:
+            error("Could not find MAP channel via SDP. Specify with -c.")
+            emit_cli_event(event_type="run_error", module="data", run_id=run_id, target=address,
+                           message="Could not find MAP channel via SDP")
+            return
+
+    client = MAPClient(address, channel=channel)
+    if not client.connect():
+        error("MAP connection failed")
+        emit_cli_event(event_type="run_error", module="data", run_id=run_id, target=address,
+                       message="MAP connection failed")
+        return
+
+    try:
+        updated = client.update_inbox()
+        from blue_tap.utils.session import log_command
+        envelope = build_data_result(
+            target=address,
+            adapter="hci0",
+            family="map",
+            operation="map_update_inbox",
+            title="MAP Inbox Update",
+            summary_data={"updated": updated},
+            observations=[f"updated={updated}"],
+            module_data={"updated": updated},
+            started_at=started_at,
+            module_outcome="success" if updated else "failed",
+        )
+        log_command("map_update_inbox", envelope, category="data", target=address)
+    finally:
+        client.disconnect()
+        info("  MAP session closed")
+
+    emit_cli_event(event_type="run_completed", module="data", run_id=run_id, target=address,
+                   message="MAP inbox update completed")
+
+
+@map_cmd.command("push")
+@click.argument("address", required=False, default=None)
+@click.option("-c", "--channel", type=int, default=None)
+@click.option("-f", "--folder", default="telecom/msg/outbox", help="Target folder")
+@click.option("-r", "--recipient", required=True, help="Recipient address/number")
+@click.option("-b", "--body", required=True, help="Message body")
+@click.option("-t", "--type", "msg_type", default="SMS_GSM", help="Message type, e.g. SMS_GSM or MMS")
+@click.option("--transparent/--no-transparent", default=False, help="Request transparent send behavior when supported")
+@click.option("--retry/--no-retry", default=True, help="Allow remote retry when supported")
+@click.option("--charset", default="UTF-8", help="Message charset")
+def map_push(address, channel, folder, recipient, body, msg_type, transparent, retry, charset):
+    """Push a message to the remote MAP server."""
+    address = resolve_address(address)
+    if not address:
+        return
+    from blue_tap.attack.map_client import MAPClient
+    from blue_tap.core.data_framework import build_data_result
+    from blue_tap.core.result_schema import now_iso
+    from blue_tap.recon.sdp import find_service_channel
+
+    started_at = now_iso()
+    run_id = make_run_id("data")
+    emit_cli_event(event_type="run_started", module="data", run_id=run_id, target=address, message="Starting MAP push")
+
+    if channel is None:
+        channel = find_service_channel(address, "Message")
+        if channel is None:
+            channel = find_service_channel(address, "MAP")
+        if channel is None:
+            error("Could not find MAP channel via SDP. Specify with -c.")
+            emit_cli_event(event_type="run_error", module="data", run_id=run_id, target=address, message="Could not find MAP channel via SDP")
+            return
+
+    client = MAPClient(address, channel=channel)
+    if not client.connect():
+        error("MAP connection failed")
+        emit_cli_event(event_type="run_error", module="data", run_id=run_id, target=address, message="MAP connection failed")
+        return
+
+    try:
+        pushed = client.push_message(folder, recipient, body, msg_type, transparent=transparent, retry=retry, charset=charset)
+        from blue_tap.utils.session import log_command
+        envelope = build_data_result(
+            target=address,
+            adapter="hci0",
+            family="map",
+            operation="map_push",
+            title="MAP Push Message",
+            summary_data={"folder": folder, "recipient": recipient, "pushed": pushed},
+            observations=[f"folder={folder}", f"recipient={recipient}", f"type={msg_type}", f"pushed={pushed}"],
+            capability_limitations=list(client.last_capability_limitations),
+            module_data={
+                "folder": folder,
+                "recipient": recipient,
+                "body_length": len(body),
+                "msg_type": msg_type,
+                "transparent": transparent,
+                "retry": retry,
+                "charset": charset,
+                "pushed": pushed,
+            },
+            started_at=started_at,
+            module_outcome="success" if pushed else "failed",
+        )
+        log_command("map_push", envelope, category="data", target=address)
+    finally:
+        client.disconnect()
+        info("  MAP session closed")
+
+    emit_cli_event(event_type="run_completed", module="data", run_id=run_id, target=address, message="MAP push completed")
+
+
+@map_cmd.command("status")
+@click.argument("address", required=False, default=None)
+@click.argument("handle")
+@click.option("-c", "--channel", type=int, default=None)
+@click.option("-i", "--indicator", type=click.Choice(["read", "deleted"]), required=True)
+@click.option("--value/--no-value", default=True, help="Desired indicator value")
+def map_status(address, handle, channel, indicator, value):
+    """Set MAP read/deleted status for a message handle or D-Bus message path."""
+    address = resolve_address(address)
+    if not address:
+        return
+    from blue_tap.attack.map_client import MAPClient
+    from blue_tap.core.data_framework import build_data_result
+    from blue_tap.core.result_schema import now_iso
+    from blue_tap.recon.sdp import find_service_channel
+
+    started_at = now_iso()
+    run_id = make_run_id("data")
+    emit_cli_event(event_type="run_started", module="data", run_id=run_id, target=address, message="Starting MAP status update")
+
+    if channel is None:
+        channel = find_service_channel(address, "Message")
+        if channel is None:
+            channel = find_service_channel(address, "MAP")
+        if channel is None:
+            error("Could not find MAP channel via SDP. Specify with -c.")
+            emit_cli_event(event_type="run_error", module="data", run_id=run_id, target=address, message="Could not find MAP channel via SDP")
+            return
+
+    client = MAPClient(address, channel=channel)
+    if not client.connect():
+        error("MAP connection failed")
+        emit_cli_event(event_type="run_error", module="data", run_id=run_id, target=address, message="MAP connection failed")
+        return
+
+    try:
+        updated = client.set_message_status(handle, indicator, value)
+        from blue_tap.utils.session import log_command
+        envelope = build_data_result(
+            target=address,
+            adapter="hci0",
+            family="map",
+            operation="map_status",
+            title="MAP Message Status Update",
+            summary_data={"handle": handle, "indicator": indicator, "value": value, "updated": updated},
+            observations=[f"indicator={indicator}", f"value={value}", f"updated={updated}"],
+            capability_limitations=list(client.last_capability_limitations),
+            module_data={"handle": handle, "indicator": indicator, "value": value, "updated": updated},
+            started_at=started_at,
+            module_outcome="success" if updated else "failed",
+        )
+        log_command("map_status", envelope, category="data", target=address)
+    finally:
+        client.disconnect()
+        info("  MAP session closed")
+
+    emit_cli_event(event_type="run_completed", module="data", run_id=run_id, target=address, message="MAP status completed")
+
+
+# ============================================================================
+# DOCTOR - Environment Diagnostics
+# ============================================================================
+@main.group()
+def doctor():
+    """Host environment diagnostics for Bluetooth features."""
+
+
+@doctor.command("profiles")
+def doctor_profiles():
+    """Check host prerequisites for PBAP/MAP/OPP and related profile features."""
+    from blue_tap.utils.env_doctor import detect_profile_environment
+
+    result = detect_profile_environment()
+
+    table = Table(title="Profile Environment")
+    table.add_column("Check")
+    table.add_column("Status")
+    table.add_column("Details")
+
+    for tool, available in result["tools"].items():
+        table.add_row(f"tool:{tool}", "OK" if available else "Missing", "")
+
+    for service, active in result["services"].items():
+        if active is True:
+            status = "Active"
+        elif active is False:
+            status = "Inactive"
+        else:
+            status = "Unknown"
+        table.add_row(f"service:{service}", status, "")
+
+    obex = result["obex"]
+    obex_status = "Ready" if obex["client_interface_available"] else "Unavailable"
+    table.add_row(
+        "obexd",
+        obex_status,
+        "; ".join(obex.get("errors", [])),
+    )
+    table.add_row(
+        "adapters",
+        "Present" if result["adapters"] else "Missing",
+        ", ".join(adapter["name"] for adapter in result["adapters"]),
+    )
+    console.print(table)
+
+    from blue_tap.utils.session import log_command
+    from blue_tap.core.data_framework import build_data_result
+
+    envelope = build_data_result(
+        target="localhost",
+        adapter="hci0",
+        family="environment",
+        operation="doctor_profiles",
+        title="Profile Environment Diagnostics",
+        summary_data=result["summary"],
+        observations=[
+            f"bluetooth_ready={result['summary']['bluetooth_ready']}",
+            f"obex_ready={result['summary']['obex_ready']}",
+            f"audio_ready={result['summary']['audio_ready']}",
+        ],
+        capability_limitations=list(result["summary"].get("capability_limitations", [])),
+        module_data=result,
+    )
+    log_command("doctor_profiles", envelope, category="general", target="localhost")
 
 
 @map_cmd.command("dump")
@@ -2320,8 +3223,14 @@ def map_dump(address, channel, output_dir):
     if not address:
         return
     from blue_tap.attack.map_client import MAPClient
+    from blue_tap.core.data_framework import artifact_if_path, build_data_result
+    from blue_tap.core.result_schema import now_iso
     from blue_tap.recon.sdp import find_service_channel
 
+    started_at = now_iso()
+    run_id = make_run_id("data")
+    emit_cli_event(event_type="run_started", module="data", run_id=run_id, target=address,
+                   message="Starting full MAP dump")
     info(f"Starting full MAP dump from [bold]{address}[/bold]...")
     info("  Targets: inbox, sent, draft, deleted, outbox")
     if channel is None:
@@ -2331,6 +3240,8 @@ def map_dump(address, channel, output_dir):
             channel = find_service_channel(address, "MAP")
         if channel is None:
             error("Could not find MAP channel via SDP. Specify with -c.")
+            emit_cli_event(event_type="run_error", module="data", run_id=run_id, target=address,
+                           message="Could not find MAP channel via SDP")
             return
         info(f"  Found MAP on RFCOMM channel {channel}")
 
@@ -2338,6 +3249,8 @@ def map_dump(address, channel, output_dir):
     client = MAPClient(address, channel=channel)
     if not client.connect():
         error("MAP connection failed")
+        emit_cli_event(event_type="run_error", module="data", run_id=run_id, target=address,
+                       message="MAP connection failed")
         return
 
     try:
@@ -2353,11 +3266,44 @@ def map_dump(address, channel, output_dir):
             success(f"MAP dump complete -> {output_dir}/")
             dump_results = {"output_dir": output_dir}
 
+        manifest_path = os.path.join(output_dir, "map_dump_manifest.json")
+        _save_json({"results": dump_results}, manifest_path)
+
         from blue_tap.utils.session import log_command
-        log_command("map_dump", dump_results, category="data", target=address)
+        artifact = artifact_if_path(
+            output_dir,
+            kind="directory",
+            label="MAP Dump Directory",
+            description="Directory containing MAP dump artifacts.",
+        )
+        manifest_artifact = artifact_if_path(
+            manifest_path,
+            kind="json",
+            label="MAP Dump Manifest",
+            description="Manifest summarizing MAP dump folders and extracted messages.",
+        )
+        envelope = build_data_result(
+            target=address,
+            adapter="hci0",
+            family="map",
+            operation="map_dump",
+            title="MAP Message Dump",
+            summary_data={"folders": len(dump_results) if isinstance(dump_results, dict) else 0, "messages": total_msgs if 'total_msgs' in locals() else 0},
+            observations=[f"folders={len(dump_results) if isinstance(dump_results, dict) else 0}", f"messages={total_msgs if 'total_msgs' in locals() else 0}"],
+            module_data={"results": dump_results, "output_dir": output_dir, "manifest_file": manifest_path},
+            artifacts=[item for item in [artifact, manifest_artifact] if item],
+            started_at=started_at,
+        )
+        log_command("map_dump", envelope, category="data", target=address)
+        emit_cli_event(event_type="execution_result", module="data", run_id=run_id, target=address,
+                       message=f"MAP dump complete: {len(dump_results)} folder(s)",
+                       details={"folders": len(dump_results) if isinstance(dump_results, dict) else 0,
+                                "messages": total_msgs if 'total_msgs' in locals() else 0})
     finally:
         client.disconnect()
         info("  MAP session closed")
+    emit_cli_event(event_type="run_completed", module="data", run_id=run_id, target=address,
+                   message="MAP dump completed")
 
 
 # ============================================================================
