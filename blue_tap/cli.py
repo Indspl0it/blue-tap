@@ -31,6 +31,8 @@ click.rich_click.COMMAND_GROUPS = {
 }
 
 from blue_tap import __version__
+from blue_tap.core.cli_events import emit_cli_event
+from blue_tap.core.result_schema import make_run_id
 from blue_tap.utils.output import (
     banner, info, success, error, warning, verbose, device_table, service_table, channel_table,
     console, summary_panel,
@@ -98,6 +100,87 @@ def _infer_category(command_path: str) -> str:
     if root == "fleet":
         return "vuln"
     return "general"
+
+
+def _recon_cli_context(operation: str, target: str = "", adapter: str = "", details: dict | None = None) -> dict:
+    return {
+        "run_id": make_run_id("recon"),
+        "events": [],
+        "operation": operation,
+        "target": target,
+        "adapter": adapter,
+        "details": dict(details or {}),
+    }
+
+
+def _recon_emit(
+    ctx: dict,
+    *,
+    event_type: str,
+    message: str,
+    execution_id: str = "",
+    details: dict | None = None,
+) -> dict:
+    event = emit_cli_event(
+        event_type=event_type,
+        module="recon",
+        run_id=ctx["run_id"],
+        target=ctx.get("target", ""),
+        adapter=ctx.get("adapter", ""),
+        execution_id=execution_id,
+        message=message,
+        details=details or {},
+        echo=False,
+    )
+    ctx["events"].append(event)
+    return event
+
+
+def _recon_module_data(extra: dict | None, ctx: dict) -> dict:
+    data = dict(extra or {})
+    data["cli_events"] = ctx["events"]
+    data["run_id"] = ctx["run_id"]
+    return data
+
+
+def _recon_start(ctx: dict, *, execution_id: str, message: str, details: dict | None = None) -> None:
+    _recon_emit(ctx, event_type="run_started", execution_id=execution_id, message=message, details=details)
+    _recon_emit(ctx, event_type="execution_started", execution_id=execution_id, message=message, details=details)
+
+
+def _recon_result(ctx: dict, *, execution_id: str, message: str, details: dict | None = None) -> None:
+    _recon_emit(ctx, event_type="execution_result", execution_id=execution_id, message=message, details=details)
+    _recon_emit(ctx, event_type="run_completed", execution_id=execution_id, message=message, details=details)
+
+
+def _recon_skip(ctx: dict, *, execution_id: str, message: str, details: dict | None = None) -> None:
+    _recon_emit(ctx, event_type="execution_skipped", execution_id=execution_id, message=message, details=details)
+    _recon_emit(ctx, event_type="run_aborted", execution_id=execution_id, message=message, details=details)
+
+
+def _recon_error(ctx: dict, *, execution_id: str, message: str, details: dict | None = None) -> None:
+    _recon_emit(ctx, event_type="execution_error", execution_id=execution_id, message=message, details=details)
+    _recon_emit(ctx, event_type="run_error", execution_id=execution_id, message=message, details=details)
+
+
+def _recon_artifact(ctx: dict, *, execution_id: str, message: str, details: dict | None = None) -> None:
+    _recon_emit(ctx, event_type="artifact_saved", execution_id=execution_id, message=message, details=details)
+
+
+def _recon_finalize_payload(payload: dict, ctx: dict) -> dict:
+    module_data = payload.setdefault("module_data", {})
+    module_data["cli_events"] = list(ctx["events"])
+    module_data["run_id"] = ctx["run_id"]
+    return payload
+
+
+def _recon_persist(command: str, payload: dict, ctx: dict, *, target: str = "", output: str | None = None) -> None:
+    from blue_tap.utils.session import log_command
+
+    _recon_finalize_payload(payload, ctx)
+    log_command(command, payload, category="recon", target=target)
+    if output:
+        _save_json(payload, output)
 
 
 class LoggedCommand(click.RichCommand):
@@ -799,41 +882,44 @@ def scan():
 @click.option("-o", "--output", default=None, help="Output file (JSON)")
 def scan_classic(duration, hci, output):
     """Scan for Bluetooth Classic devices."""
-    from blue_tap.core.scanner import scan_classic as _scan
+    from blue_tap.core.scanner import scan_classic_result
     from blue_tap.utils.session import log_command
 
     info(f"Scanning for Classic BT devices on {hci} ({duration}s)...")
-    devices = _scan(duration, hci)
+    result = scan_classic_result(duration, hci)
+    devices = result.get("module_data", {}).get("devices", [])
+    log_command("scan_classic", result, category="scan")
     if devices:
         success(f"Scan complete: {len(devices)} device(s) discovered")
         console.print(device_table(devices, "Classic BT Devices"))
-        log_command("scan_classic", devices, category="scan")
     else:
         warning("Scan complete: no devices found")
     if output:
-        _save_json(devices, output)
+        _save_json(result, output)
 
 
 @scan.command("ble")
 @click.option("-d", "--duration", default=10, help="Scan duration in seconds")
+@click.option("-i", "--hci", default="hci0", help="HCI adapter")
 @click.option("-p", "--passive", is_flag=True, help="Passive scan (no SCAN_REQ, stealthier)")
 @click.option("-o", "--output", default=None, help="Output file (JSON)")
-def scan_ble(duration, passive, output):
+def scan_ble(duration, hci, passive, output):
     """Scan for BLE devices. Use --passive for stealth mode."""
-    from blue_tap.core.scanner import scan_ble_sync
+    from blue_tap.core.scanner import scan_ble_result_sync
     from blue_tap.utils.session import log_command
 
     mode = "passive" if passive else "active"
-    info(f"Scanning for BLE devices ({duration}s, {mode} mode)...")
-    devices = scan_ble_sync(duration, passive=passive)
+    info(f"Scanning for BLE devices on {hci} ({duration}s, {mode} mode)...")
+    result = scan_ble_result_sync(duration, passive=passive, adapter=hci)
+    devices = result.get("module_data", {}).get("devices", [])
+    log_command("scan_ble", result, category="scan")
     if devices:
         success(f"BLE scan complete: {len(devices)} device(s) discovered")
         console.print(device_table(devices, "BLE Devices"))
-        log_command("scan_ble", devices, category="scan")
     else:
         warning("BLE scan complete: no devices found")
     if output:
-        _save_json(devices, output)
+        _save_json(result, output)
 
 
 @scan.command("all")
@@ -842,19 +928,20 @@ def scan_ble(duration, passive, output):
 @click.option("-o", "--output", default=None, help="Output file (JSON)")
 def scan_all(duration, hci, output):
     """Scan both Classic BT and BLE simultaneously."""
-    from blue_tap.core.scanner import scan_all as _scan_all
+    from blue_tap.core.scanner import scan_all_result
     from blue_tap.utils.session import log_command
 
     info(f"Scanning for Classic BT + BLE devices on {hci} ({duration}s)...")
-    devices = _scan_all(duration, hci)
+    result = scan_all_result(duration, hci)
+    devices = result.get("module_data", {}).get("devices", [])
+    log_command("scan_all", result, category="scan")
     if devices:
         success(f"Scan complete: {len(devices)} device(s) discovered")
         console.print(device_table(devices, "All Bluetooth Devices"))
-        log_command("scan_all", devices, category="scan")
     else:
         warning("Scan complete: no devices found")
     if output:
-        _save_json(devices, output)
+        _save_json(result, output)
 
 
 # ============================================================================
@@ -865,18 +952,76 @@ def recon():
     """Service enumeration and device fingerprinting."""
 
 
+@recon.command("auto")
+@click.argument("address", required=False, default=None)
+@click.option("--hci", default="hci0", help="HCI adapter for classic probes")
+@click.option("--below-hci-hci", default="hci1", help="HCI adapter for DarkFirmware below-HCI collectors")
+@click.option("--with-captures", is_flag=True, help="Include prerequisite-aware capture collectors")
+@click.option("--with-below-hci", is_flag=True, help="Include prerequisite-aware below-HCI collectors")
+@click.option("-d", "--duration", default=20, type=int, help="Capture duration for optional recon collectors")
+@click.option("-o", "--output", default=None, help="Output file (JSON)")
+def recon_auto(address, hci, below_hci_hci, with_captures, with_below_hci, duration, output):
+    """Run capability-driven classic/BLE reconnaissance automatically."""
+    address = resolve_address(address)
+    if not address:
+        return
+
+    from blue_tap.recon.campaign import run_auto_recon
+    from blue_tap.utils.session import log_command
+
+    info(f"Running automatic reconnaissance on [bold]{address}[/bold]...")
+    result = run_auto_recon(
+        address=address,
+        hci=hci,
+        below_hci_hci=below_hci_hci,
+        with_captures=with_captures,
+        with_below_hci=with_below_hci,
+        duration=duration,
+    )
+
+    classification = result.get("summary", {}).get("classification", "undetermined")
+    success(f"Recon capability classification: {classification}")
+    for execution in result.get("executions", []):
+        title = execution.get("title", execution.get("id", ""))
+        state = execution.get("execution_status", "")
+        outcome = execution.get("module_outcome", "")
+        summary = execution.get("evidence", {}).get("summary", "")
+        if state == "skipped":
+            warning(f"{title}: skipped ({outcome})")
+            if summary:
+                info(f"  {summary}")
+        else:
+            info(f"{title}: {state}/{outcome}")
+            if summary:
+                info(f"  {summary}")
+
+    log_command("recon_auto", result, category="recon", target=address)
+    if output:
+        _save_json(result, output)
+
+
 @recon.command("sdp")
 @click.argument("address", required=False, default=None)
+@click.option("--hci", default="hci0", help="HCI adapter")
 @click.option("-o", "--output", default=None, help="Output file (JSON)")
-def recon_sdp(address, output):
+def recon_sdp(address, hci, output):
     """Browse SDP services on a target device."""
     address = resolve_address(address)
     if not address:
         return
-    from blue_tap.recon.sdp import browse_services
+    from blue_tap.core.recon_framework import build_recon_result
+    from blue_tap.core.result_schema import now_iso
+    from blue_tap.recon.sdp import browse_services_detailed
 
     info(f"Browsing SDP services on [bold]{address}[/bold]...")
-    services = browse_services(address)
+    started_at = now_iso()
+    ctx = _recon_cli_context("sdp_browse", target=address, adapter=hci)
+    _recon_start(ctx, execution_id="sdp_browse", message=f"SDP browse started on {address}")
+    try:
+        sdp_result = browse_services_detailed(address, hci=hci)
+    except TypeError:
+        sdp_result = browse_services_detailed(address)
+    services = sdp_result.get("services", [])
     if services:
         success(f"Found {len(services)} SDP service(s)")
         console.print(service_table(services, f"SDP Services: {address}"))
@@ -890,59 +1035,115 @@ def recon_sdp(address, output):
     else:
         warning(f"No SDP services found on {address}")
 
-    from blue_tap.utils.session import log_command
-    log_command("sdp_browse", services, category="recon", target=address)
-
-    if output:
-        _save_json(services, output)
+    result = build_recon_result(
+        target=address,
+        adapter=hci,
+        run_id=ctx["run_id"],
+        operation="sdp_browse",
+        title="SDP Service Browse",
+        protocol="SDP",
+        entries=services,
+        module_data_extra=_recon_module_data(sdp_result, ctx),
+        observations=[
+            f"service_count={len(services)}",
+            f"rfcomm_channels={len(sdp_result.get('rfcomm_channels', []))}",
+            f"l2cap_psms={len(sdp_result.get('l2cap_psms', []))}",
+        ],
+        started_at=started_at,
+    )
+    _recon_result(ctx, execution_id="sdp_browse", message=f"SDP browse completed with {len(services)} service(s)")
+    _recon_persist("sdp_browse", result, ctx, target=address, output=output)
 
 
 @recon.command("gatt")
 @click.argument("address", required=False, default=None)
+@click.option("--hci", default="hci0", help="HCI adapter")
 @click.option("-o", "--output", default=None, help="Output file (JSON)")
-def recon_gatt(address, output):
+def recon_gatt(address, hci, output):
     """Enumerate BLE GATT services and characteristics."""
     address = resolve_address(address)
     if not address:
         return
-    from blue_tap.recon.gatt import enumerate_services_sync
+    from blue_tap.core.recon_framework import build_recon_result
+    from blue_tap.core.result_schema import now_iso
+    from blue_tap.recon.gatt import enumerate_services_detailed_sync, flatten_gatt_entries
 
     info(f"Enumerating GATT services on [bold]{address}[/bold]...")
-    services = enumerate_services_sync(address)
-    if not services:
-        warning("No GATT services found")
-        return
+    started_at = now_iso()
+    ctx = _recon_cli_context("gatt_enum", target=address, adapter=hci)
+    _recon_start(ctx, execution_id="gatt_enum", message=f"GATT enumeration started on {address}")
+    try:
+        gatt_result = enumerate_services_detailed_sync(address, adapter=hci)
+    except TypeError:
+        gatt_result = enumerate_services_detailed_sync(address)
+    services = gatt_result.get("services", [])
     total_chars = sum(len(s.get("characteristics", [])) for s in services)
-    success(f"Found {len(services)} service(s) with {total_chars} characteristic(s)")
-    for svc in services:
-        console.print(f"\n[bold cyan]Service: {svc['description']}[/bold cyan]")
-        console.print(f"  UUID: {svc['uuid']}  Handle: {svc['handle']}")
-        for char in svc["characteristics"]:
-            props = ", ".join(char["properties"])
-            console.print(f"  [green]{char['description']}[/green] [{props}]")
-            console.print(f"    UUID: {char['uuid']}")
-            if char.get("value_hex"):
-                console.print(f"    Value: {char['value_hex']} | {char.get('value_str', '')}")
+    if services:
+        success(f"Found {len(services)} service(s) with {total_chars} characteristic(s)")
+        for svc in services:
+            console.print(f"\n[bold cyan]Service: {svc['description']}[/bold cyan]")
+            console.print(f"  UUID: {svc['uuid']}  Handle: {svc['handle']}")
+            for char in svc["characteristics"]:
+                props = ", ".join(char["properties"])
+                console.print(f"  [green]{char['description']}[/green] [{props}]")
+                console.print(f"    UUID: {char['uuid']}")
+                if char.get("value_hex"):
+                    console.print(f"    Value: {char['value_hex']} | {char.get('value_str', '')}")
+    else:
+        warning(f"No GATT services found (status={gatt_result.get('status', 'unknown')})")
+        if gatt_result.get("error"):
+            info(f"  {gatt_result.get('error')}")
 
-    from blue_tap.utils.session import log_command
-    log_command("gatt_enum", services, category="recon", target=address)
-
-    if output:
-        _save_json(services, output)
+    flat_entries = flatten_gatt_entries(services)
+    result = build_recon_result(
+        target=address,
+        adapter=hci,
+        run_id=ctx["run_id"],
+        operation="gatt_enum",
+        title="GATT Enumeration",
+        protocol="GATT",
+        entries=flat_entries,
+        operator_context={"service_count": len(services)},
+        module_outcome=(
+            "observed"
+            if services
+            else ("auth_required" if gatt_result.get("status") == "auth_required" else "no_results")
+        ),
+        evidence_summary=(
+            f"Enumerated {len(services)} GATT service(s) and {total_chars} characteristic(s)"
+            if services
+            else f"GATT enumeration completed with status={gatt_result.get('status', 'unknown')}"
+        ),
+        observations=gatt_result.get("observations", []),
+        module_data_extra=_recon_module_data({
+            "gatt_result": gatt_result,
+            "service_count": len(services),
+            "characteristic_count": total_chars,
+        }, ctx),
+        started_at=started_at,
+    )
+    _recon_result(ctx, execution_id="gatt_enum", message=f"GATT enumeration completed with {len(services)} service(s)")
+    _recon_persist("gatt_enum", result, ctx, target=address, output=output)
 
 
 @recon.command("fingerprint")
 @click.argument("address", required=False, default=None)
+@click.option("--hci", default="hci0", help="HCI adapter")
 @click.option("-o", "--output", default=None, help="Output file (JSON)")
-def recon_fingerprint(address, output):
+def recon_fingerprint(address, hci, output):
     """Fingerprint a device and identify IVI characteristics."""
     address = resolve_address(address)
     if not address:
         return
+    from blue_tap.core.recon_framework import build_recon_result
+    from blue_tap.core.result_schema import now_iso
     from blue_tap.recon.fingerprint import fingerprint_device
 
+    started_at = now_iso()
+    ctx = _recon_cli_context("fingerprint", target=address, adapter=hci)
+    _recon_start(ctx, execution_id="fingerprint", message=f"Fingerprinting started on {address}")
     info(f"Fingerprinting device [bold]{address}[/bold]...")
-    fp = fingerprint_device(address)
+    fp = fingerprint_device(address, hci=hci)
     success(f"Fingerprint complete: {fp.get('manufacturer', '?')}, BT {fp.get('bt_version', '?')}, "
             f"{len(fp.get('profiles', []))} profile(s)")
 
@@ -979,30 +1180,66 @@ def recon_fingerprint(address, output):
         for hint in fp["vuln_hints"]:
             console.print(f"  [yellow]![/yellow] {hint}")
 
-    from blue_tap.utils.session import log_command
-    log_command("fingerprint", fp, category="recon", target=address)
-
-    if output:
-        _save_json(fp, output)
+    result = build_recon_result(
+        target=address,
+        adapter=hci,
+        run_id=ctx["run_id"],
+        operation="fingerprint",
+        title="Device Fingerprint",
+        protocol="Fingerprint",
+        entries=[],
+        fingerprint=fp,
+        module_data_extra=_recon_module_data({
+            "device_class": fp.get("device_class"),
+            "profiles": fp.get("profiles", []),
+            "attack_surface": fp.get("attack_surface", []),
+            "vuln_hints": fp.get("vuln_hints", []),
+            "evidence_classes": fp.get("evidence_classes", {}),
+            "manufacturer_sources": fp.get("manufacturer_sources", []),
+        }, ctx),
+        started_at=started_at,
+    )
+    _recon_result(ctx, execution_id="fingerprint", message=f"Fingerprinting completed for {address}")
+    _recon_persist("fingerprint", result, ctx, target=address, output=output)
 
 
 @recon.command("ssp")
 @click.argument("address", required=False, default=None)
-def recon_ssp(address):
+@click.option("-o", "--output", default=None, help="Output file (JSON)")
+def recon_ssp(address, output):
     """Check if device supports Secure Simple Pairing."""
     address = resolve_address(address)
     if not address:
         return
+    from blue_tap.core.recon_framework import build_recon_result
+    from blue_tap.core.result_schema import now_iso
     from blue_tap.recon.sdp import check_ssp
 
     info(f"Checking SSP support on [bold]{address}[/bold]...")
-    result = check_ssp(address)
-    if result is True:
+    started_at = now_iso()
+    ctx = _recon_cli_context("ssp_check", target=address, adapter="hci0")
+    _recon_start(ctx, execution_id="ssp_check", message=f"SSP probe started on {address}")
+    ssp_supported = check_ssp(address)
+    if ssp_supported is True:
         success(f"{address} supports SSP (more secure pairing)")
-    elif result is False:
+    elif ssp_supported is False:
         warning(f"{address} may NOT support SSP (legacy pairing - easier to attack)")
     else:
         error(f"Could not determine SSP support for {address}")
+
+    result = build_recon_result(
+        target=address,
+        adapter="hci0",
+        run_id=ctx["run_id"],
+        operation="ssp_check",
+        title="Secure Simple Pairing Capability Check",
+        protocol="SSP",
+        entries=[],
+        module_data_extra=_recon_module_data({"ssp_supported": ssp_supported}, ctx),
+        started_at=started_at,
+    )
+    _recon_result(ctx, execution_id="ssp_check", message=f"SSP probe completed for {address}")
+    _recon_persist("ssp_check", result, ctx, target=address, output=output)
 
 
 @recon.command("rfcomm-scan")
@@ -1015,9 +1252,14 @@ def recon_rfcomm_scan(address, timeout, retries, output):
     address = resolve_address(address)
     if not address:
         return
+    from blue_tap.core.recon_framework import build_recon_result
+    from blue_tap.core.result_schema import now_iso
     from blue_tap.recon.rfcomm_scan import RFCOMMScanner
 
     info(f"Scanning RFCOMM channels 1-30 on [bold]{address}[/bold] (timeout={timeout}s)...")
+    started_at = now_iso()
+    ctx = _recon_cli_context("rfcomm_scan", target=address, adapter="hci0")
+    _recon_start(ctx, execution_id="rfcomm_scan", message=f"RFCOMM scan started on {address}")
     scanner = RFCOMMScanner(address)
     results = scanner.scan_all_channels(timeout_per_ch=timeout, max_retries=retries)
 
@@ -1031,14 +1273,23 @@ def recon_rfcomm_scan(address, timeout, retries, output):
     open_channels = [r for r in results if r["status"] == "open"]
     info(f"Scanned {len(results)} channels: {len(open_channels)} open")
 
-    from blue_tap.utils.session import log_command
-    log_command("rfcomm_scan", results, category="recon", target=address)
-
+    result = build_recon_result(
+        target=address,
+        adapter="hci0",
+        run_id=ctx["run_id"],
+        operation="rfcomm_scan",
+        title="RFCOMM Channel Scan",
+        protocol="RFCOMM",
+        entries=results,
+        operator_context={"timeout_per_channel": timeout, "retries": retries},
+        started_at=started_at,
+    )
+    _recon_result(ctx, execution_id="rfcomm_scan", message=f"RFCOMM scan completed on {address}")
     if output:
         # Serialize (strip raw_response bytes for JSON)
         for r in results:
             r.pop("raw_response", None)
-        _save_json(results, output)
+    _recon_persist("rfcomm_scan", result, ctx, target=address, output=output)
 
 
 @recon.command("l2cap-scan")
@@ -1052,10 +1303,15 @@ def recon_l2cap_scan(address, dynamic, timeout, workers, output):
     address = resolve_address(address)
     if not address:
         return
+    from blue_tap.core.recon_framework import build_recon_result
+    from blue_tap.core.result_schema import now_iso
     from blue_tap.recon.l2cap_scan import L2CAPScanner
 
     range_desc = "standard + dynamic" if dynamic else "standard"
     info(f"Scanning L2CAP PSMs on [bold]{address}[/bold] ({range_desc}, timeout={timeout}s)...")
+    started_at = now_iso()
+    ctx = _recon_cli_context("l2cap_scan", target=address, adapter="hci0")
+    _recon_start(ctx, execution_id="l2cap_scan", message=f"L2CAP scan started on {address}")
     scanner = L2CAPScanner(address)
     results = scanner.scan_standard_psms(timeout=timeout)
 
@@ -1070,11 +1326,19 @@ def recon_l2cap_scan(address, dynamic, timeout, workers, output):
     if not open_psms:
         warning("No open L2CAP PSMs found")
 
-    from blue_tap.utils.session import log_command
-    log_command("l2cap_scan", results, category="recon", target=address)
-
-    if output:
-        _save_json(results, output)
+    result = build_recon_result(
+        target=address,
+        adapter="hci0",
+        run_id=ctx["run_id"],
+        operation="l2cap_scan",
+        title="L2CAP PSM Scan",
+        protocol="L2CAP",
+        entries=results,
+        operator_context={"dynamic": dynamic, "timeout": timeout, "workers": workers},
+        started_at=started_at,
+    )
+    _recon_result(ctx, execution_id="l2cap_scan", message=f"L2CAP scan completed on {address}")
+    _recon_persist("l2cap_scan", result, ctx, target=address, output=output)
 
 
 @recon.command("capture-start")
@@ -1083,6 +1347,8 @@ def recon_l2cap_scan(address, dynamic, timeout, workers, output):
 @click.option("--pcap", is_flag=True, help="Write btsnoop/pcap format for Wireshark")
 def recon_capture_start(output, hci, pcap):
     """Start HCI traffic capture via btmon."""
+    from blue_tap.core.recon_framework import build_recon_result
+    from blue_tap.core.result_schema import now_iso
     from blue_tap.recon.hci_capture import HCICapture
 
     # Auto-adjust extension for pcap mode
@@ -1090,36 +1356,113 @@ def recon_capture_start(output, hci, pcap):
         output = output.rsplit(".", 1)[0] + ".btsnoop"
 
     cap = HCICapture()
-    if cap.start(output, hci=hci, pcap=pcap):
+    started_at = now_iso()
+    ctx = _recon_cli_context("capture_start", target="", adapter=hci or "all", details={"pcap": pcap, "output": output})
+    _recon_start(ctx, execution_id="capture_start", message=f"HCI capture start requested on {hci or 'all'}")
+    started = cap.start(output, hci=hci, pcap=pcap)
+    if started:
         success(f"btmon capture started -> {output}")
     else:
         error("Failed to start capture")
+
+    result = build_recon_result(
+        target="",
+        adapter=hci or "all",
+        run_id=ctx["run_id"],
+        operation="capture_start",
+        title="HCI Capture Start",
+        protocol="HCI",
+        entries=[],
+        module_outcome="observed" if started else "collector_unavailable",
+        execution_status="completed" if started else "failed",
+        module_data_extra=_recon_module_data({"capture_started": started, "output": output, "pcap": pcap}, ctx),
+        operator_context={"pcap": pcap},
+        started_at=started_at,
+    )
+    if started:
+        _recon_result(
+            ctx,
+            execution_id="capture_start",
+            message="HCI capture started",
+        )
+    else:
+        _recon_error(ctx, execution_id="capture_start", message="HCI capture failed to start")
+    _recon_persist("capture_start", result, ctx)
 
 
 @recon.command("capture-stop")
 def recon_capture_stop():
     """Stop HCI traffic capture."""
+    from blue_tap.core.recon_framework import build_recon_result
+    from blue_tap.core.result_schema import now_iso
     from blue_tap.recon.hci_capture import HCICapture
 
     cap = HCICapture()
+    started_at = now_iso()
+    ctx = _recon_cli_context("capture_stop", target="", adapter="all")
+    _recon_start(ctx, execution_id="capture_stop", message="HCI capture stop requested")
     result = cap.stop()
     if result:
         success(f"Capture stopped: {result}")
     else:
         warning("No capture appears to be running")
 
+    artifacts = []
+    if result:
+        from blue_tap.core.result_schema import make_artifact
+        artifacts.append(make_artifact(kind="pcap", label="HCI capture output", path=result))
+    artifacts = []
+    if result.get("success"):
+        from blue_tap.core.result_schema import make_artifact
+        artifacts.append(make_artifact(kind=output_format, label="LMP capture", path=output))
+    artifacts = []
+    if result.get("success"):
+        from blue_tap.core.result_schema import make_artifact
+        artifacts.append(make_artifact(kind="pcap", label="BLE pairing capture", path=output))
+    envelope = build_recon_result(
+        target="",
+        adapter="all",
+        run_id=ctx["run_id"],
+        operation="capture_stop",
+        title="HCI Capture Stop",
+        protocol="HCI",
+        entries=[],
+        module_outcome="observed" if result else "prerequisite_missing",
+        execution_status="completed" if result else "skipped",
+        module_data_extra=_recon_module_data({"capture_stopped": bool(result), "output": result}, ctx),
+        artifacts=artifacts,
+        started_at=started_at,
+    )
+    if result:
+        _recon_artifact(
+            ctx,
+            execution_id="capture_stop",
+            message=f"HCI capture saved to {result}",
+            details={"path": result},
+        )
+        _recon_result(ctx, execution_id="capture_stop", message="HCI capture stop completed")
+    else:
+        _recon_skip(ctx, execution_id="capture_stop", message="No capture appears to be running")
+    _recon_persist("capture_stop", envelope, ctx)
+
 
 @recon.command("pairing-mode")
 @click.argument("address", required=False, default=None)
 @click.option("-i", "--hci", default="hci0")
-def recon_pairing_mode(address, hci):
+@click.option("-o", "--output", default=None, help="Output file (JSON)")
+def recon_pairing_mode(address, hci, output):
     """Detect target's pairing mode and IO capabilities."""
     address = resolve_address(address)
     if not address:
         return
+    from blue_tap.core.recon_framework import build_recon_result
+    from blue_tap.core.result_schema import now_iso
     from blue_tap.recon.hci_capture import detect_pairing_mode
 
     info(f"Detecting pairing mode on [bold]{address}[/bold]...")
+    started_at = now_iso()
+    ctx = _recon_cli_context("pairing_mode_probe", target=address, adapter=hci)
+    _recon_start(ctx, execution_id="pairing_mode_probe", message=f"Pairing mode probe started on {address}")
     result = detect_pairing_mode(address, hci)
     panel_text = (
         f"[cyan]SSP Supported:[/cyan] {result.get('ssp_supported') if result.get('ssp_supported') is not None else 'Inconclusive (probe failed)'}\n"
@@ -1128,16 +1471,51 @@ def recon_pairing_mode(address, hci):
     )
     console.print(Panel(panel_text, title="Pairing Mode Detection", border_style="cyan"))
 
+    envelope = build_recon_result(
+        target=address,
+        adapter=hci,
+        run_id=ctx["run_id"],
+        operation="pairing_mode_probe",
+        title="Pairing Mode Detection",
+        protocol="Pairing",
+        entries=[],
+        module_data_extra=_recon_module_data({"pairing_probe": result}, ctx),
+        started_at=started_at,
+    )
+    _recon_result(ctx, execution_id="pairing_mode_probe", message=f"Pairing mode probe completed for {address}")
+    _recon_persist("pairing_mode", envelope, ctx, target=address, output=output)
+
 
 @recon.command("nrf-scan")
 @click.option("-d", "--duration", default=30, help="Scan duration (seconds)")
-def recon_nrf_scan(duration):
+@click.option("-o", "--output", default=None, help="Output file (JSON)")
+def recon_nrf_scan(duration, output):
     """Scan BLE advertisers using nRF52840 dongle."""
+    from blue_tap.core.recon_framework import build_recon_result
+    from blue_tap.core.result_schema import now_iso
     from blue_tap.recon.sniffer import NRFBLESniffer
 
     info(f"Starting BLE advertisement scan via nRF52840 ({duration}s)...")
+    started_at = now_iso()
+    ctx = _recon_cli_context("nrf_ble_scan", target="", adapter="nrf52840", details={"duration": duration})
+    _recon_start(ctx, execution_id="nrf_ble_scan", message=f"nRF BLE scan started for {duration}s")
     sniffer = NRFBLESniffer()
-    sniffer.scan_advertisers(duration)
+    advertisers = sniffer.scan_advertisers(duration)
+
+    result = build_recon_result(
+        target="",
+        adapter="nrf52840",
+        run_id=ctx["run_id"],
+        operation="nrf_ble_scan",
+        title="nRF BLE Advertisement Scan",
+        protocol="BLE",
+        entries=advertisers,
+        operator_context={"duration": duration},
+        module_data_extra=_recon_module_data({"advertisers": advertisers, "duration": duration}, ctx),
+        started_at=started_at,
+    )
+    _recon_result(ctx, execution_id="nrf_ble_scan", message=f"nRF BLE scan completed with {len(advertisers)} advertiser(s)")
+    _recon_persist("nrf_scan", result, ctx, output=output)
 
 
 @recon.command("lmp-sniff")
@@ -1157,16 +1535,37 @@ def recon_lmp_sniff(address, duration, output, hci, output_format, lmp_filter):
     Captures pre-encryption negotiation (features, auth, key size).
     Exports to BTIDES v2 JSON or Wireshark pcap format.
     """
+    from blue_tap.core.recon_framework import build_recon_result
+    from blue_tap.core.result_schema import now_iso
     from blue_tap.recon.sniffer import DarkFirmwareSniffer, LMPFilter
 
+    started_at = now_iso()
     hci_dev = int(hci.replace("hci", "")) if isinstance(hci, str) and hci.startswith("hci") else int(hci)
     sniffer = DarkFirmwareSniffer(hci_dev=hci_dev)
     if not sniffer.is_available():
         error("DarkFirmware not available. Check adapter with: blue-tap adapter firmware-status")
+        ctx = _recon_cli_context("lmp_sniff", target=address or "", adapter=hci, details={"duration": duration, "output_format": output_format, "filter": lmp_filter or ""})
+        _recon_skip(ctx, execution_id="lmp_sniff", message="LMP capture skipped because DarkFirmware is unavailable")
+        envelope = build_recon_result(
+            target=address or "",
+            adapter=hci,
+            run_id=ctx["run_id"],
+            operation="lmp_sniff",
+            title="LMP Capture",
+            protocol="LMP",
+            entries=[],
+            module_outcome="prerequisite_missing",
+            execution_status="skipped",
+            module_data_extra=_recon_module_data({"capture_result": {"success": False, "error": "DarkFirmware unavailable"}, "output": output}, ctx),
+            started_at=started_at,
+        )
+        _recon_persist("lmp_sniff", envelope, ctx, target=address or "")
         return
 
     pkt_filter = LMPFilter(category=lmp_filter) if lmp_filter else None
     info(f"Starting LMP capture (duration={duration}s, output={output}, format={output_format})")
+    ctx = _recon_cli_context("lmp_sniff", target=address or "", adapter=hci, details={"duration": duration, "output_format": output_format, "filter": lmp_filter or ""})
+    _recon_start(ctx, execution_id="lmp_sniff", message=f"LMP capture started on {hci}")
     result = sniffer.start_capture(
         target=address,
         output=output,
@@ -1175,8 +1574,27 @@ def recon_lmp_sniff(address, duration, output, hci, output_format, lmp_filter):
         output_format=output_format,
     )
 
-    from blue_tap.utils.session import log_command
-    log_command("lmp_sniff", result, category="recon", target=address or "")
+    envelope = build_recon_result(
+        target=address or "",
+        adapter=hci,
+        run_id=ctx["run_id"],
+        operation="lmp_sniff",
+        title="LMP Capture",
+        protocol="LMP",
+        entries=[],
+        operator_context={"duration": duration, "output_format": output_format, "filter": lmp_filter or ""},
+        module_outcome="artifact_collected" if result.get("success") else "collector_unavailable",
+        execution_status="completed" if result.get("success") else "failed",
+        module_data_extra=_recon_module_data({"capture_result": result, "output": output}, ctx),
+        artifacts=artifacts,
+        started_at=started_at,
+    )
+    if result.get("success"):
+        _recon_artifact(ctx, execution_id="lmp_sniff", message=f"LMP capture saved to {output}", details={"path": output})
+        _recon_result(ctx, execution_id="lmp_sniff", message=f"LMP capture completed with success={result.get('success', False)}")
+    else:
+        _recon_error(ctx, execution_id="lmp_sniff", message=f"LMP capture failed: {result.get('error', 'unknown error')}")
+    _recon_persist("lmp_sniff", envelope, ctx, target=address or "")
 
     if result["success"]:
         success(f"Captured {result['packets']} LMP packets in {result['duration']}s")
@@ -1200,21 +1618,89 @@ def recon_lmp_monitor(address, duration, hci, dashboard, lmp_filter):
     Use --dashboard for a Rich live UI with packet stream table.
     Use Ctrl-C to stop monitoring.
     """
+    from blue_tap.core.recon_framework import build_recon_result
+    from blue_tap.core.result_schema import make_artifact, now_iso
     from blue_tap.recon.sniffer import DarkFirmwareSniffer, LMPFilter
 
+    started_at = now_iso()
     hci_dev = int(hci.replace("hci", "")) if isinstance(hci, str) and hci.startswith("hci") else int(hci)
     sniffer = DarkFirmwareSniffer(hci_dev=hci_dev)
     if not sniffer.is_available():
         error("DarkFirmware not available. Check adapter with: blue-tap adapter firmware-status")
+        ctx = _recon_cli_context("lmp_monitor", target=address or "", adapter=hci, details={"duration": duration, "dashboard": dashboard, "filter": lmp_filter or ""})
+        _recon_skip(ctx, execution_id="lmp_monitor", message="LMP monitor skipped because DarkFirmware is unavailable")
+        envelope = build_recon_result(
+            target=address or "",
+            adapter=hci,
+            run_id=ctx["run_id"],
+            operation="lmp_monitor",
+            title="LMP Live Monitor",
+            protocol="LMP",
+            entries=[],
+            module_outcome="prerequisite_missing",
+            execution_status="skipped",
+            module_data_extra=_recon_module_data({"capture_result": {"success": False, "error": "DarkFirmware unavailable"}}, ctx),
+            started_at=started_at,
+        )
+        _recon_persist("lmp_monitor", envelope, ctx, target=address or "")
         return
 
     pkt_filter = LMPFilter(category=lmp_filter) if lmp_filter else None
-    sniffer.monitor(
+    ctx = _recon_cli_context("lmp_monitor", target=address or "", adapter=hci, details={"duration": duration, "dashboard": dashboard, "filter": lmp_filter or ""})
+    _recon_start(ctx, execution_id="lmp_monitor", message=f"LMP monitor started on {hci}")
+    result = sniffer.monitor(
         target=address,
         duration=duration,
         lmp_filter=pkt_filter,
         dashboard=dashboard,
     )
+    artifacts = []
+    if result.get("packets"):
+        artifacts.append(
+            make_artifact(
+                kind="monitor_summary",
+                label="LMP monitor session",
+                path="console",
+                description="Interactive DarkFirmware LMP monitor session",
+            )
+        )
+    envelope = build_recon_result(
+        target=address or "",
+        adapter=hci,
+        run_id=ctx["run_id"],
+        operation="lmp_monitor",
+        title="LMP Live Monitor",
+        protocol="LMP",
+        entries=[],
+        module_outcome="artifact_collected" if result.get("success") else "collector_unavailable",
+        execution_status="completed" if result.get("success") else "failed",
+        operator_context={
+            "duration": duration,
+            "dashboard": dashboard,
+            "filter": lmp_filter or "",
+        },
+        module_data_extra=_recon_module_data({"capture_result": result}, ctx),
+        evidence_summary=(
+            f"LMP live monitor captured {result.get('packets', 0)} packet(s) "
+            f"in {result.get('duration', 0)}s"
+        ),
+        observations=[
+            f"dashboard={dashboard}",
+            f"duration={duration}",
+            f"filter={lmp_filter or 'none'}",
+            f"packets={result.get('packets', 0)}",
+            f"interrupted={result.get('interrupted', False)}",
+        ],
+        artifacts=artifacts,
+        started_at=started_at,
+    )
+    if artifacts:
+        _recon_artifact(ctx, execution_id="lmp_monitor", message="LMP monitor session artifact recorded", details={"count": len(artifacts)})
+    if result.get("success"):
+        _recon_result(ctx, execution_id="lmp_monitor", message=f"LMP monitor completed with {result.get('packets', 0)} packet(s)")
+    else:
+        _recon_error(ctx, execution_id="lmp_monitor", message=f"LMP monitor failed: {result.get('error', 'unknown error')}")
+    _recon_persist("lmp_monitor", envelope, ctx, target=address or "")
 
 
 @recon.command("nrf-sniff")
@@ -1223,12 +1709,39 @@ def recon_lmp_monitor(address, duration, hci, dashboard, lmp_filter):
 @click.option("-d", "--duration", default=120, help="Capture duration (seconds)")
 def recon_nrf_sniff(target, output, duration):
     """Sniff BLE pairing exchanges using nRF52840 dongle."""
+    from blue_tap.core.recon_framework import build_recon_result
+    from blue_tap.core.result_schema import now_iso
     from blue_tap.recon.sniffer import NRFBLESniffer
 
     target_str = f" following {target}" if target else ""
     info(f"Starting BLE pairing sniff via nRF52840{target_str} ({duration}s)...")
+    started_at = now_iso()
+    ctx = _recon_cli_context("nrf_pairing_sniff", target=target or "", adapter="nrf52840", details={"duration": duration, "output": output})
+    _recon_start(ctx, execution_id="nrf_pairing_sniff", message="nRF BLE pairing sniff started")
     sniffer = NRFBLESniffer()
-    sniffer.sniff_pairing(output, duration, target=target)
+    result = sniffer.sniff_pairing(output, duration, target=target)
+
+    envelope = build_recon_result(
+        target=target or "",
+        adapter="nrf52840",
+        run_id=ctx["run_id"],
+        operation="nrf_pairing_sniff",
+        title="nRF BLE Pairing Sniff",
+        protocol="BLE",
+        entries=[],
+        operator_context={"duration": duration},
+        module_outcome="artifact_collected" if result.get("success") else "collector_unavailable",
+        execution_status="completed" if result.get("success") else "failed",
+        module_data_extra=_recon_module_data({"capture_result": result, "output": output}, ctx),
+        artifacts=artifacts,
+        started_at=started_at,
+    )
+    if result.get("success"):
+        _recon_artifact(ctx, execution_id="nrf_pairing_sniff", message=f"BLE pairing pcap saved to {output}", details={"path": output})
+        _recon_result(ctx, execution_id="nrf_pairing_sniff", message=f"nRF pairing sniff completed with success={result.get('success', False)}")
+    else:
+        _recon_error(ctx, execution_id="nrf_pairing_sniff", message=f"nRF pairing sniff failed: {result.get('error', 'unknown error')}")
+    _recon_persist("nrf_sniff", envelope, ctx, target=target or "")
 
 
 @recon.command("combined-sniff")
@@ -1243,16 +1756,36 @@ def recon_combined_sniff(address, duration, output, hci):
     with a unified timeline. Covers the full attack surface from
     advertisements through link-layer negotiation.
     """
+    from blue_tap.core.recon_framework import build_recon_result
+    from blue_tap.core.result_schema import now_iso
     from blue_tap.recon.sniffer import (
         CombinedSniffer, NRFBLESniffer, DarkFirmwareSniffer,
     )
 
+    started_at = now_iso()
     hci_dev = int(hci.replace("hci", "")) if isinstance(hci, str) and hci.startswith("hci") else int(hci)
     nrf_ok = NRFBLESniffer.is_available()
     df_ok = DarkFirmwareSniffer(hci_dev=hci_dev).is_available()
+    ctx = _recon_cli_context("combined_sniff", target=address or "", adapter=hci, details={"duration": duration, "output": output})
+    _recon_start(ctx, execution_id="combined_sniff", message="Combined BLE and LMP capture started")
 
     if not nrf_ok and not df_ok:
         error("Neither nRF52840 nor DarkFirmware adapter available")
+        _recon_skip(ctx, execution_id="combined_sniff", message="Combined capture skipped because no collectors are available")
+        envelope = build_recon_result(
+            target=address or "",
+            adapter=hci,
+            run_id=ctx["run_id"],
+            operation="combined_sniff",
+            title="Combined BLE and LMP Capture",
+            protocol="Dual-Mode",
+            entries=[],
+            module_outcome="prerequisite_missing",
+            execution_status="skipped",
+            module_data_extra=_recon_module_data({"capture_result": {"success": False, "error": "no collectors available"}, "output": output}, ctx),
+            started_at=started_at,
+        )
+        _recon_persist("combined_sniff", envelope, ctx, target=address or "")
         return
 
     if not nrf_ok:
@@ -1267,12 +1800,41 @@ def recon_combined_sniff(address, duration, output, hci):
         hci_dev=hci_dev,
     )
     result = combined.monitor(target=address, duration=duration)
+    if result.get("success"):
+        try:
+            combined.export(output)
+        except Exception as exc:
+            result = dict(result)
+            result["success"] = False
+            result["error"] = f"export failed: {exc}"
 
-    from blue_tap.utils.session import log_command
-    log_command("combined_sniff", result, category="recon", target=address or "")
+    artifacts = []
+    if result.get("success"):
+        from blue_tap.core.result_schema import make_artifact
+        artifacts.append(make_artifact(kind="json", label="Combined BLE and LMP capture", path=output))
+    envelope = build_recon_result(
+        target=address or "",
+        adapter=hci,
+        run_id=ctx["run_id"],
+        operation="combined_sniff",
+        title="Combined BLE and LMP Capture",
+        protocol="Dual-Mode",
+        entries=[],
+        operator_context={"duration": duration, "output": output},
+        module_outcome="artifact_collected" if result.get("success") else "collector_unavailable",
+        execution_status="completed" if result.get("success") else "failed",
+        module_data_extra=_recon_module_data({"capture_result": result, "output": output}, ctx),
+        artifacts=artifacts,
+        started_at=started_at,
+    )
+    if result.get("success"):
+        _recon_artifact(ctx, execution_id="combined_sniff", message=f"Combined capture saved to {output}", details={"path": output})
+        _recon_result(ctx, execution_id="combined_sniff", message=f"Combined capture completed with success={result.get('success', False)}")
+    else:
+        _recon_error(ctx, execution_id="combined_sniff", message=f"Combined capture failed: {result.get('error', 'unknown error')}")
+    _recon_persist("combined_sniff", envelope, ctx, target=address or "")
 
     if result.get("success"):
-        combined.export(output)
         success(f"Combined capture: {result['lmp_count']} LMP + {result['ble_count']} BLE events")
         success(f"Output: {output}")
     else:
@@ -1284,11 +1846,73 @@ def recon_combined_sniff(address, duration, output, hci):
 @click.option("-o", "--output", default=None, help="Output decrypted pcap")
 def recon_crack_key(pcap_file, output):
     """Crack BLE pairing key from captured pcap using Crackle."""
+    from blue_tap.core.recon_framework import build_recon_result
+    from blue_tap.core.result_schema import make_artifact, now_iso
     from blue_tap.recon.sniffer import CrackleRunner
 
     info(f"Cracking BLE pairing key from [bold]{pcap_file}[/bold]...")
+    started_at = now_iso()
+    ctx = _recon_cli_context("crack_ble_key", target="", adapter="offline", details={"input_file": pcap_file, "output_file": output or ""})
+    _recon_start(ctx, execution_id="crack_ble_key", message=f"BLE key cracking started for {pcap_file}")
     runner = CrackleRunner()
     result = runner.crack_ble(pcap_file, output)
+    artifacts = [
+        make_artifact(
+            kind="pcap",
+            label="Input capture",
+            path=pcap_file,
+            description="Captured BLE pairing trace analyzed with Crackle",
+        )
+    ]
+    if output and result.get("success"):
+        artifacts.append(
+            make_artifact(
+                kind="pcap",
+                label="Decrypted BLE capture",
+                path=output,
+                description="Crackle decrypted output pcap",
+            )
+        )
+        _recon_artifact(ctx, execution_id="crack_ble_key", message=f"Decrypted BLE capture saved to {output}", details={"path": output})
+    envelope = build_recon_result(
+        target="",
+        adapter="offline",
+        run_id=ctx["run_id"],
+        operation="crack_ble_key",
+        title="BLE Pairing Key Recovery",
+        protocol="BLE",
+        entries=[],
+        module_outcome="observed" if result.get("success") else "failed",
+        execution_status="completed" if result.get("success") else "failed",
+        module_data_extra=_recon_module_data({
+            "analysis_result": result,
+            "input_file": pcap_file,
+            "output_file": output or "",
+            "key_material": {
+                "tk": result.get("tk"),
+                "ltk": result.get("ltk"),
+            },
+        }, ctx),
+        evidence_summary=(
+            "Recovered BLE key material from captured pairing exchange"
+            if result.get("success")
+            else "BLE key recovery did not yield reusable key material"
+        ),
+        observations=[
+            f"input_file={pcap_file}",
+            f"output_file={output or ''}",
+            f"success={result.get('success', False)}",
+            f"tk_present={bool(result.get('tk'))}",
+            f"ltk_present={bool(result.get('ltk'))}",
+        ],
+        artifacts=artifacts,
+        started_at=started_at,
+    )
+    if result.get("success"):
+        _recon_result(ctx, execution_id="crack_ble_key", message=f"BLE key cracking completed with success={result.get('success', False)}")
+    else:
+        _recon_error(ctx, execution_id="crack_ble_key", message="BLE key cracking failed")
+    _recon_persist("crack_key", envelope, ctx)
     if result.get("success"):
         if result.get("ltk"):
             success(f"LTK recovered: {result['ltk']}")
@@ -1302,11 +1926,57 @@ def recon_crack_key(pcap_file, output):
 @click.argument("pcap_file")
 def recon_extract_link_key(pcap_file):
     """Extract BR/EDR link key from captured pairing pcap (via tshark)."""
+    from blue_tap.core.recon_framework import build_recon_result
+    from blue_tap.core.result_schema import make_artifact, now_iso
     from blue_tap.recon.sniffer import LinkKeyExtractor
 
     info(f"Extracting link keys from [bold]{pcap_file}[/bold]...")
+    started_at = now_iso()
+    ctx = _recon_cli_context("extract_link_key", target="", adapter="offline", details={"input_file": pcap_file})
+    _recon_start(ctx, execution_id="extract_link_key", message=f"BR/EDR link-key extraction started for {pcap_file}")
     extractor = LinkKeyExtractor()
     result = extractor.extract_from_pcap(pcap_file)
+    envelope = build_recon_result(
+        target="",
+        adapter="offline",
+        run_id=ctx["run_id"],
+        operation="extract_link_key",
+        title="BR/EDR Link Key Extraction",
+        protocol="BR/EDR",
+        entries=[],
+        module_outcome="observed" if result.get("success") else "failed",
+        execution_status="completed" if result.get("success") else "failed",
+        module_data_extra=_recon_module_data({
+            "analysis_result": result,
+            "input_file": pcap_file,
+            "key_material": {"link_keys": result.get("keys", [])},
+        }, ctx),
+        evidence_summary=(
+            f"Extracted {len(result.get('keys', []))} potential BR/EDR link key(s)"
+            if result.get("success")
+            else "No reusable BR/EDR link key was extracted from the capture"
+        ),
+        observations=[
+            f"input_file={pcap_file}",
+            f"success={result.get('success', False)}",
+            f"key_count={len(result.get('keys', []))}",
+        ],
+        artifacts=[
+            make_artifact(
+                kind="pcap",
+                label="Input capture",
+                path=pcap_file,
+                description="Captured BR/EDR pairing trace analyzed for link keys",
+            )
+        ],
+        started_at=started_at,
+    )
+    _recon_artifact(ctx, execution_id="extract_link_key", message=f"BR/EDR link-key analysis recorded for {pcap_file}", details={"path": pcap_file})
+    if result.get("success"):
+        _recon_result(ctx, execution_id="extract_link_key", message=f"BR/EDR link-key extraction completed with success={result.get('success', False)}")
+    else:
+        _recon_error(ctx, execution_id="extract_link_key", message="BR/EDR link-key extraction failed")
+    _recon_persist("extract_link_key", envelope, ctx)
     if result.get("success"):
         for key in result.get("keys", []):
             success(f"Link key: {key}")
@@ -1324,16 +1994,68 @@ def recon_inject_link_key(remote_mac, link_key, hci, key_type):
     After recovering a link key (via nRF/DarkFirmware capture + crack, or other means),
     inject it so bluetoothctl can connect using the stolen key.
     """
+    from blue_tap.core.recon_framework import build_recon_result
+    from blue_tap.core.result_schema import now_iso
     from blue_tap.recon.sniffer import LinkKeyExtractor
 
     info(f"Injecting link key for [bold]{remote_mac}[/bold] into BlueZ ({hci})...")
+    started_at = now_iso()
+    ctx = _recon_cli_context("inject_link_key", target=remote_mac, adapter=hci, details={"key_type": key_type})
+    _recon_start(ctx, execution_id="inject_link_key", message=f"Link-key injection started for {remote_mac}")
     extractor = LinkKeyExtractor()
     adapter_mac = extractor.get_adapter_mac(hci)
+    ok = False
+    error_text = ""
+    action_result = {}
     if not adapter_mac:
         error(f"Cannot determine adapter MAC for {hci}")
-        return
-    extractor.inject_link_key(adapter_mac, remote_mac, link_key, key_type)
-    success(f"Link key injected — try: bluetoothctl connect {remote_mac}")
+        error_text = f"Cannot determine adapter MAC for {hci}"
+    else:
+        action_result = extractor.inject_link_key(adapter_mac, remote_mac, link_key, key_type)
+        ok = bool(action_result.get("success"))
+        if ok:
+            success(f"Link key injected — try: bluetoothctl connect {remote_mac}")
+        else:
+            error_text = action_result.get("error", "Link key injection failed")
+    envelope = build_recon_result(
+        target=remote_mac,
+        adapter=hci,
+        run_id=ctx["run_id"],
+        operation="inject_link_key",
+        title="BlueZ Link Key Injection",
+        protocol="BR/EDR",
+        entries=[],
+        module_outcome="observed" if ok else "failed",
+        execution_status="completed" if ok else "failed",
+        module_data_extra=_recon_module_data({
+            "action_result": {
+                **action_result,
+                "success": ok,
+                "adapter_mac": action_result.get("adapter_mac", adapter_mac or ""),
+                "remote_mac": action_result.get("remote_mac", remote_mac),
+                "key_type": key_type,
+                **({"error": error_text} if error_text else {}),
+            }
+        }, ctx),
+        evidence_summary=(
+            f"Injected recovered link key for {remote_mac} into BlueZ"
+            if ok
+            else f"Link key injection for {remote_mac} failed"
+        ),
+        observations=[
+            f"remote_mac={remote_mac}",
+            f"adapter={hci}",
+            f"adapter_mac={adapter_mac or ''}",
+            f"key_type={key_type}",
+            f"success={ok}",
+        ],
+        started_at=started_at,
+    )
+    if ok:
+        _recon_result(ctx, execution_id="inject_link_key", message=f"Link-key injection completed with success={ok}")
+    else:
+        _recon_error(ctx, execution_id="inject_link_key", message=f"Link-key injection failed: {error_text or 'unknown error'}")
+    _recon_persist("inject_link_key", envelope, ctx, target=remote_mac)
 
 
 # ============================================================================
