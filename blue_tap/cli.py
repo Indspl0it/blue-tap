@@ -3550,6 +3550,7 @@ def hfp_redial(address, channel):
         return
     from blue_tap.attack.hfp import HFPClient
     from blue_tap.recon.sdp import find_service_channel
+    capability_limitations = _profile_capability_limitations(family="hfp")
 
     if channel is None:
         channel = find_service_channel(address, "Hands-Free")
@@ -3566,7 +3567,23 @@ def hfp_redial(address, channel):
         info(f"Sending redial command to {address}...")
         result = client.redial()
         console.print(f"[yellow]{result}[/yellow]")
-        success("Redial command sent.")
+        redial_ok = _command_succeeded(result)
+        if redial_ok:
+            success("Redial command sent.")
+        else:
+            warning("Redial command failed.")
+        _log_standardized_operation(
+            module="audio",
+            command="hfp_redial",
+            title="HFP Redial Command",
+            protocol="HFP",
+            target=address,
+            result={"response": result, "channel": channel},
+            category="audio",
+            observations=[f"channel={channel}"],
+            capability_limitations=capability_limitations,
+            module_outcome="success" if redial_ok else "failed",
+        )
         client.disconnect()
         info("HFP session closed.")
     else:
@@ -3584,6 +3601,7 @@ def hfp_voice(address, on, channel):
         return
     from blue_tap.attack.hfp import HFPClient
     from blue_tap.recon.sdp import find_service_channel
+    capability_limitations = _profile_capability_limitations(family="hfp")
 
     if channel is None:
         channel = find_service_channel(address, "Hands-Free")
@@ -3601,7 +3619,23 @@ def hfp_voice(address, on, channel):
         info(f"Setting voice recognition {state_str} on {address}...")
         result = client.voice_recognition(on)
         console.print(f"[yellow]{result}[/yellow]")
-        success(f"Voice recognition {state_str} command sent.")
+        voice_ok = _command_succeeded(result)
+        if voice_ok:
+            success(f"Voice recognition {state_str} command sent.")
+        else:
+            warning(f"Voice recognition {state_str} command failed.")
+        _log_standardized_operation(
+            module="audio",
+            command="hfp_voice",
+            title="HFP Voice Recognition Control",
+            protocol="HFP",
+            target=address,
+            result={"enabled": on, "response": result, "channel": channel},
+            category="audio",
+            observations=[f"channel={channel}", f"enabled={on}"],
+            capability_limitations=capability_limitations,
+            module_outcome="success" if voice_ok else "failed",
+        )
         client.disconnect()
         info("HFP session closed.")
     else:
@@ -3631,7 +3665,12 @@ def audio_record_mic(mac, output, duration, no_setup):
     if not mac:
         return
     from blue_tap.attack.a2dp import record_car_mic
+    from blue_tap.core.audio_framework import artifact_if_file, build_audio_result
+    capability_limitations = _profile_capability_limitations(family="audio")
+    run_id = make_run_id("audio")
     dur_str = f"{duration}s" if duration > 0 else "until Ctrl+C"
+    emit_cli_event(event_type="run_started", module="audio", run_id=run_id, target=mac,
+                   message=f"Recording microphone audio from {mac} ({dur_str})")
     info(f"Recording microphone audio from {mac} ({dur_str}, output: {output})...")
     if not no_setup:
         info("Auto-configuring HFP profile and mic settings...")
@@ -3640,10 +3679,35 @@ def audio_record_mic(mac, output, duration, no_setup):
     if os.path.exists(output):
         size = os.path.getsize(output)
         success(f"Recording saved to {output} ({size} bytes)")
+        emit_cli_event(event_type="execution_result", module="audio", run_id=run_id, target=mac,
+                       message=f"Recording saved to {output} ({size} bytes)",
+                       details={"duration": duration, "output": output, "size": size})
     else:
         warning(f"Recording completed but output file {output} not found.")
+        emit_cli_event(event_type="execution_result", module="audio", run_id=run_id, target=mac,
+                       message=f"Recording completed but output file {output} not found",
+                       details={"duration": duration, "output": output})
     from blue_tap.utils.session import log_command
-    log_command("audio_record_mic", {"output": output, "duration": duration}, category="audio", target=mac)
+    artifact = artifact_if_file(
+        output,
+        kind="audio",
+        label="Car Microphone Recording",
+        description="Captured car microphone audio.",
+    )
+    envelope = build_audio_result(
+        target=mac,
+        adapter="hci0",
+        operation="audio_record_mic",
+        title="Car Microphone Recording",
+        summary_data={"duration": duration, "output_file": output},
+        observations=[f"duration={duration}", f"output={output}", f"auto_setup={not no_setup}"],
+        capability_limitations=capability_limitations,
+        module_data={"output_file": output, "duration": duration, "description": "Recorded from car Bluetooth microphone"},
+        artifacts=[artifact] if artifact else [],
+    )
+    log_command("audio_record_mic", envelope, category="audio", target=mac)
+    emit_cli_event(event_type="run_completed", module="audio", run_id=run_id, target=mac,
+                   message="Audio recording completed")
 
 
 @audio.command("live")
@@ -3655,11 +3719,29 @@ def audio_live(mac, no_setup):
     if not mac:
         return
     from blue_tap.attack.a2dp import live_eavesdrop
+    capability_limitations = _profile_capability_limitations(family="audio")
+    run_id = make_run_id("audio")
+    emit_cli_event(event_type="run_started", module="audio", run_id=run_id, target=mac,
+                   message=f"Starting live eavesdrop on {mac}")
     info(f"Starting live eavesdrop on {mac} (streaming car mic to laptop speakers)...")
     if not no_setup:
         info("Auto-configuring HFP profile and mic settings...")
-    live_eavesdrop(mac, auto_setup=not no_setup)
+    started = live_eavesdrop(mac, auto_setup=not no_setup)
+    _log_standardized_operation(
+        module="audio",
+        command="audio_live",
+        title="Live Microphone Eavesdrop",
+        protocol="HFP",
+        target=mac,
+        result={"auto_setup": not no_setup, "started": started},
+        category="audio",
+        observations=[f"auto_setup={not no_setup}"],
+        capability_limitations=capability_limitations,
+        module_outcome="success" if started else "failed",
+    )
     info("Live eavesdrop session ended.")
+    emit_cli_event(event_type="run_completed", module="audio", run_id=run_id, target=mac,
+                   message="Live eavesdrop session ended")
 
 
 @audio.command("play")
@@ -3672,11 +3754,31 @@ def audio_play(mac, audio_file, volume):
     if not mac:
         return
     from blue_tap.attack.a2dp import play_to_car
+    capability_limitations = _profile_capability_limitations(family="audio")
+    run_id = make_run_id("audio")
+    emit_cli_event(event_type="run_started", module="audio", run_id=run_id, target=mac,
+                   message=f"Playing {audio_file} through car speakers on {mac}")
     info(f"Playing {audio_file} through car speakers on {mac} (volume {volume}%)...")
-    play_to_car(mac, audio_file, volume)
-    success("Audio playback complete.")
-    from blue_tap.utils.session import log_command
-    log_command("audio_play", {"audio_file": audio_file, "volume": volume}, category="attack", target=mac)
+    played = play_to_car(mac, audio_file, volume)
+    if played:
+        success("Audio playback complete.")
+    else:
+        error("Audio playback failed.")
+    _log_standardized_operation(
+        module="audio",
+        command="audio_play",
+        title="A2DP Audio Playback",
+        protocol="A2DP",
+        target=mac,
+        result={"audio_file": audio_file, "volume": volume, "played": played},
+        category="audio",
+        observations=[f"audio_file={audio_file}", f"volume={volume}"],
+        capability_limitations=capability_limitations,
+        artifact_paths=[{"path": audio_file, "kind": "audio", "label": "Playback Source Audio", "description": "Operator-supplied audio played to the remote device."}],
+        module_outcome="success" if played else "failed",
+    )
+    emit_cli_event(event_type="run_completed", module="audio", run_id=run_id, target=mac,
+                   message="Audio playback completed")
 
 
 @audio.command("loopback")
@@ -3688,12 +3790,28 @@ def audio_loopback(mac, mic_source):
     if not mac:
         return
     from blue_tap.attack.a2dp import stream_mic_to_car
+    capability_limitations = _profile_capability_limitations(family="audio")
+    run_id = make_run_id("audio")
     src_str = mic_source if mic_source else "auto-detected"
+    emit_cli_event(event_type="run_started", module="audio", run_id=run_id, target=mac,
+                   message=f"Starting loopback: routing laptop mic ({src_str}) to car speakers on {mac}")
     info(f"Starting loopback: routing laptop mic ({src_str}) to car speakers on {mac}...")
-    stream_mic_to_car(mac, mic_source)
-    from blue_tap.utils.session import log_command
-    log_command("audio_loopback", {"address": mac}, category="attack", target=mac)
+    started = stream_mic_to_car(mac, mic_source)
+    _log_standardized_operation(
+        module="audio",
+        command="audio_loopback",
+        title="Microphone Loopback to Car Speakers",
+        protocol="A2DP",
+        target=mac,
+        result={"address": mac, "mic_source": mic_source, "started": started},
+        category="audio",
+        observations=[f"mic_source={mic_source or 'auto'}"],
+        capability_limitations=capability_limitations,
+        module_outcome="success" if started else "failed",
+    )
     info("Loopback session ended.")
+    emit_cli_event(event_type="run_completed", module="audio", run_id=run_id, target=mac,
+                   message="Loopback session ended")
 
 
 @audio.command("loopback-stop")
@@ -3715,16 +3833,51 @@ def audio_capture_a2dp(mac, output, duration):
     if not mac:
         return
     from blue_tap.attack.a2dp import capture_a2dp
+    from blue_tap.core.audio_framework import artifact_if_file, build_audio_result
+    capability_limitations = _profile_capability_limitations(family="audio")
+    run_id = make_run_id("audio")
+    emit_cli_event(event_type="run_started", module="audio", run_id=run_id, target=mac,
+                   message=f"Capturing A2DP media stream from {mac} ({duration}s)")
     info(f"Capturing A2DP media stream from {mac} ({duration}s, output: {output})...")
-    capture_a2dp(mac, output, duration)
+    capture_path = capture_a2dp(mac, output, duration)
     import os
-    if os.path.exists(output):
-        size = os.path.getsize(output)
+    if capture_path and os.path.exists(capture_path):
+        size = os.path.getsize(capture_path)
         success(f"A2DP capture saved to {output} ({size} bytes)")
+        module_outcome = "success"
+        emit_cli_event(event_type="execution_result", module="audio", run_id=run_id, target=mac,
+                       message=f"A2DP capture saved to {output} ({size} bytes)",
+                       details={"duration": duration, "output": output, "size": size})
     else:
         warning(f"Capture completed but output file {output} not found.")
+        size = 0
+        module_outcome = "failed"
+        emit_cli_event(event_type="execution_result", module="audio", run_id=run_id, target=mac,
+                       message=f"Capture completed but output file {output} not found",
+                       details={"duration": duration, "output": output})
     from blue_tap.utils.session import log_command
-    log_command("audio_capture_a2dp", {"output": output, "duration": duration}, category="audio", target=mac)
+    artifact = artifact_if_file(
+        output,
+        kind="audio",
+        label="A2DP Capture",
+        description="Captured A2DP media stream.",
+    )
+    envelope = build_audio_result(
+        target=mac,
+        adapter="hci0",
+        operation="audio_capture_a2dp",
+        title="A2DP Audio Capture",
+        protocol="A2DP",
+        summary_data={"duration": duration, "output_file": output},
+        observations=[f"duration={duration}", f"output={output}", f"size={size}"],
+        capability_limitations=capability_limitations,
+        module_data={"output_file": output, "duration": duration, "size": size, "description": "Captured A2DP media stream"},
+        artifacts=[artifact] if artifact else [],
+        module_outcome=module_outcome,
+    )
+    log_command("audio_capture_a2dp", envelope, category="audio", target=mac)
+    emit_cli_event(event_type="run_completed", module="audio", run_id=run_id, target=mac,
+                   message="A2DP capture completed")
 
 
 @audio.command("profile")
@@ -3735,13 +3888,31 @@ def audio_profile(mac, mode):
     mac = resolve_address(mac)
     if not mac:
         return
-    from blue_tap.attack.a2dp import set_profile_hfp, set_profile_a2dp
+    from blue_tap.attack.a2dp import get_active_profile, set_profile_hfp, set_profile_a2dp
+    capability_limitations = _profile_capability_limitations(family="audio")
+    run_id = make_run_id("audio")
+    emit_cli_event(event_type="run_started", module="audio", run_id=run_id, target=mac,
+                   message=f"Switching {mac} to {mode.upper()} profile")
     info(f"Switching {mac} to {mode.upper()} profile...")
-    if mode == "hfp":
-        set_profile_hfp(mac)
+    switched = set_profile_hfp(mac) if mode == "hfp" else set_profile_a2dp(mac)
+    if switched:
+        success(f"Profile switched to {mode.upper()}.")
     else:
-        set_profile_a2dp(mac)
-    success(f"Profile switched to {mode.upper()}.")
+        error(f"Profile switch to {mode.upper()} failed.")
+    _log_standardized_operation(
+        module="audio",
+        command="audio_profile",
+        title="Bluetooth Audio Profile Switch",
+        protocol="Audio",
+        target=mac,
+        result={"mode": mode, "switched": switched, "active_profile": get_active_profile(mac)},
+        category="audio",
+        observations=[f"mode={mode}", f"active_profile={get_active_profile(mac)}"],
+        capability_limitations=capability_limitations,
+        module_outcome="success" if switched else "failed",
+    )
+    emit_cli_event(event_type="run_completed", module="audio", run_id=run_id, target=mac,
+                   message=f"Profile switched to {mode.upper()}")
 
 
 @audio.command("devices")
@@ -3880,14 +4051,42 @@ def opp_push(address, filepath, channel):
     file_size = os.path.getsize(filepath) if os.path.exists(filepath) else 0
     info(f"Pushing {filepath} ({file_size} bytes) to {address} via OPP on channel {channel}...")
     client = OPPClient(address, channel=channel)
+    pushed = False
     if client.connect():
         success(f"OPP connection established with {address}.")
-        client.push_file(filepath)
-        success(f"File {filepath} sent ({file_size} bytes).")
+        pushed = client.push_file(filepath)
+        if pushed:
+            success(f"File {filepath} sent ({file_size} bytes).")
+        else:
+            error(f"File push failed for {filepath}.")
         client.disconnect()
         info("OPP session closed.")
     else:
         error(f"OPP connection to {address} on channel {channel} failed.")
+    _log_standardized_operation(
+        module="attack",
+        command="opp_push",
+        title="OPP File Push",
+        protocol="OBEX/OPP",
+        target=address,
+        result={
+            "filepath": filepath,
+            "channel": channel,
+            "bytes": file_size,
+            "pushed": pushed,
+            "backend": client.last_backend,
+            "connect_error": client.last_connect_error,
+            "transfer": dict(client.last_transfer),
+        },
+        category="attack",
+        observations=[
+            f"channel={channel}",
+            f"bytes={file_size}",
+            f"backend={client.last_backend or 'none'}",
+        ],
+        artifact_paths=[{"path": filepath, "kind": "file", "label": "Pushed File", "description": "Operator-supplied file sent via OPP."}],
+        module_outcome="success" if pushed else "failed",
+    )
 
 
 @opp.command("vcard")
@@ -3913,14 +4112,43 @@ def opp_vcard(address, name, phone, email, channel):
 
     info(f"Pushing vCard for '{name}' ({phone}) to {address} via OPP...")
     client = OPPClient(address, channel=channel)
+    pushed = False
     if client.connect():
         success(f"OPP connection established with {address}.")
-        client.push_vcard(name, phone, email)
-        success(f"vCard for '{name}' sent to {address}.")
+        pushed = client.push_vcard(name, phone, email)
+        if pushed:
+            success(f"vCard for '{name}' sent to {address}.")
+        else:
+            error(f"vCard push failed for '{name}'.")
         client.disconnect()
         info("OPP session closed.")
     else:
         error(f"OPP connection to {address} failed.")
+    _log_standardized_operation(
+        module="attack",
+        command="opp_vcard",
+        title="OPP vCard Push",
+        protocol="OBEX/OPP",
+        target=address,
+        result={
+            "name": name,
+            "phone": phone,
+            "email": email,
+            "channel": channel,
+            "pushed": pushed,
+            "backend": client.last_backend,
+            "connect_error": client.last_connect_error,
+            "transfer": dict(client.last_transfer),
+        },
+        category="attack",
+        observations=[
+            f"channel={channel}",
+            f"name={name}",
+            f"phone={phone}",
+            f"backend={client.last_backend or 'none'}",
+        ],
+        module_outcome="success" if pushed else "failed",
+    )
 
 
 # ============================================================================
@@ -3928,7 +4156,12 @@ def opp_vcard(address, name, phone, email, channel):
 # ============================================================================
 @main.group("at")
 def at_cmd():
-    """AT command data extraction via RFCOMM (bluesnarfer alternative)."""
+    """AT command data extraction via RFCOMM.
+
+    Common extraction/query commands are parsed into structured data.
+    Unknown or vendor-specific AT commands remain operator-driven and their
+    raw responses are shown without pretending they are standardized.
+    """
 
 
 @at_cmd.command("connect")
@@ -3945,6 +4178,18 @@ def at_connect(address, channel):
     client = ATClient(address, channel=channel)
     if not client.connect():
         error("AT connection failed — check channel number or pairing status")
+        _log_standardized_operation(
+            module="data",
+            command="at_connect",
+            title="Interactive AT Session",
+            protocol="AT/RFCOMM",
+            target=address,
+            result={"family": "at", "channel": channel, "interactive": True, "connected": False},
+            category="data",
+            observations=[f"channel={channel}", "interactive=true", "connected=false"],
+            capability_limitations=["RFCOMM AT session could not be established; channel selection or pairing may be required"],
+            module_outcome="failed",
+        )
         return
 
     success("AT session established. Type 'quit' to exit.")
@@ -3959,6 +4204,17 @@ def at_connect(address, channel):
                 console.print(result)
         except (EOFError, KeyboardInterrupt):
             break
+    _log_standardized_operation(
+        module="data",
+        command="at_connect",
+        title="Interactive AT Session",
+        protocol="AT/RFCOMM",
+        target=address,
+        result={"family": "at", "channel": channel, "interactive": True, "connected": True},
+        category="data",
+        observations=[f"channel={channel}", "interactive=true", "connected=true"],
+        module_outcome="success",
+    )
     client.disconnect()
 
 
@@ -3972,22 +4228,74 @@ def at_dump(address, channel, output_dir):
     if not address:
         return
     from blue_tap.attack.bluesnarfer import ATClient
+    from blue_tap.core.data_framework import artifact_if_path, build_data_result
+    from blue_tap.core.result_schema import now_iso
 
+    started_at = now_iso()
     info(f"Starting AT data dump from [bold]{address}[/bold] (ch={channel})...")
     info("  Targets: IMEI, IMSI, phonebook (SM/ME), SMS, battery, signal")
     client = ATClient(address, channel=channel)
     if not client.connect():
         error("AT connection failed")
+        from blue_tap.utils.session import log_command
+        envelope = build_data_result(
+            target=address,
+            adapter="hci0",
+            family="at",
+            operation="at_dump",
+            title="AT Data Dump",
+            summary_data={"output_dir": output_dir, "connected": False},
+            observations=[f"output_dir={output_dir}", "connected=false"],
+            capability_limitations=["RFCOMM AT session could not be established; channel selection or pairing may be required"],
+            module_data={"results": {}, "output_dir": output_dir, "connected": False},
+            started_at=started_at,
+            module_outcome="failed",
+        )
+        log_command("at_dump", envelope, category="data", target=address)
         return
     try:
         info("  Extracting data via AT commands...")
         results = client.dump_all(output_dir)
-        if results:
+        device_info = results.get("device_info", {}) if isinstance(results, dict) else {}
+        meaningful = any(
+            bool(value)
+            for value in (
+                device_info.get("imei"),
+                device_info.get("imsi"),
+                device_info.get("subscriber_numbers"),
+                (device_info.get("operator") or {}).get("operator") if isinstance(device_info.get("operator"), dict) else "",
+            )
+        ) or any(
+            isinstance(value, list) and bool(value)
+            for key, value in results.items()
+            if key != "device_info"
+        )
+        if meaningful:
             success(f"AT dump complete -> {output_dir}/")
-            from blue_tap.utils.session import log_command
-            log_command("at_dump", results, category="data", target=address)
         else:
             warning("No data extracted via AT commands")
+        from blue_tap.utils.session import log_command
+        artifact = artifact_if_path(
+            output_dir,
+            kind="directory",
+            label="AT Dump Directory",
+            description="Directory containing AT-derived data dump artifacts.",
+        )
+        envelope = build_data_result(
+            target=address,
+            adapter="hci0",
+            family="at",
+            operation="at_dump",
+            title="AT Data Dump",
+            summary_data={"output_dir": output_dir, "result_keys": len(results), "meaningful_data": meaningful},
+            observations=[f"output_dir={output_dir}", f"result_keys={len(results)}", f"meaningful_data={meaningful}"],
+            capability_limitations=list(client.last_capability_limitations),
+            module_data={"results": results, "output_dir": output_dir},
+            artifacts=[artifact] if artifact else [],
+            started_at=started_at,
+            module_outcome="success" if meaningful else "failed",
+        )
+        log_command("at_dump", envelope, category="data", target=address)
     finally:
         client.disconnect()
         info("  AT session closed")
@@ -4014,7 +4322,19 @@ def at_snarf(address, memory, entry_range):
     except ValueError:
         error("Range values must be integers")
         return
-    bluesnarfer_extract(address, memory, start, end)
+    output = bluesnarfer_extract(address, memory, start, end)
+    _log_standardized_operation(
+        module="data",
+        command="at_snarf",
+        title="Bluesnarfer Extraction",
+        protocol="AT/RFCOMM",
+        target=address,
+        result={"family": "at", "memory": memory, "start": start, "end": end, "output": output},
+        category="data",
+        observations=[f"memory={memory}", f"range={start}-{end}"],
+        capability_limitations=[] if output else ["bluesnarfer extraction failed or the bluesnarfer binary is unavailable on this host"],
+        module_outcome="success" if bool(output) else "failed",
+    )
 
 
 # ============================================================================
@@ -4054,7 +4374,7 @@ def vulnscan(address, hci, output, phone):
     info(f"Starting vulnerability assessment on [bold]{address}[/bold]...")
     info("  Running 20+ checks: SSP, KNOB, BIAS, BlueBorne, BLURtooth, BLUFFS, PerfektBlue, BrakTooth...")
     result = run_vulnerability_scan(address, hci, active=True, phone_address=phone_address)
-    findings = result["findings"]
+    findings = result.get("module_data", {}).get("findings", [])
     summary = summarize_findings(findings)
     critical = sum(1 for f in findings if f.get("severity", "").upper() == "CRITICAL")
     high = sum(1 for f in findings if f.get("severity", "").upper() == "HIGH")
@@ -4187,22 +4507,18 @@ def hijack(ivi_address, phone_address, phone_name, hci, output_dir,
                     info("Phase 4/4: Audio setup skipped (--skip-audio)")
             else:
                 warning("BIAS connection failed — target may not be vulnerable")
-            results = {"method": "bias", "phases": {"recon": "success"}}
-            os.makedirs(output_dir, exist_ok=True)
-            _save_json(results, os.path.join(output_dir, "attack_results.json"))
-            success(f"BIAS attack results saved to {output_dir}/attack_results.json")
-            from blue_tap.utils.session import log_command
-            log_command("hijack", results, category="attack", target=ivi_address)
         else:
             info("Running full attack chain (recon → impersonate → connect → dump → audio)...")
-            results = session.run_full_attack()
-            # Save results
-            os.makedirs(output_dir, exist_ok=True)
-            results_file = os.path.join(output_dir, "attack_results.json")
-            _save_json(results, results_file)
-            success(f"Full attack complete — results saved to {results_file}")
-            from blue_tap.utils.session import log_command
-            log_command("hijack", results, category="attack", target=ivi_address)
+            session.run_full_attack()
+
+        # Save results and log standardized envelope from session
+        os.makedirs(output_dir, exist_ok=True)
+        envelope = session.build_envelope()
+        results_file = os.path.join(output_dir, "attack_results.json")
+        _save_json(envelope, results_file)
+        success(f"Attack results saved to {results_file}")
+        from blue_tap.utils.session import log_command
+        log_command("hijack", envelope, category="attack", target=ivi_address)
     except KeyboardInterrupt:
         warning("\nInterrupted by user")
     finally:
@@ -4249,10 +4565,11 @@ def bias_probe(ivi_address, phone_address, phone_name, hci):
     try:
         attack.probe_vulnerability()
         success("BIAS probe complete")
-        from blue_tap.utils.session import log_command
-        log_command("bias_probe", {"ivi_address": ivi_address, "phone_address": phone_address}, category="attack", target=ivi_address)
     except Exception as exc:
         error(f"BIAS probe failed: {exc}")
+    finally:
+        from blue_tap.utils.session import log_command
+        log_command("bias_probe", attack.build_envelope(), category="attack", target=ivi_address)
 
 
 @bias.command("attack")
@@ -4292,10 +4609,11 @@ def bias_attack(ivi_address, phone_address, phone_name, hci, method):
     try:
         attack.execute(method)
         success("BIAS attack execution complete")
-        from blue_tap.utils.session import log_command
-        log_command("bias_attack", {"ivi_address": ivi_address, "phone_address": phone_address, "method": method}, category="attack", target=ivi_address)
     except Exception as exc:
         error(f"BIAS attack failed: {exc}")
+    finally:
+        from blue_tap.utils.session import log_command
+        log_command("bias_attack", attack.build_envelope(), category="attack", target=ivi_address)
 
 
 # ============================================================================
@@ -4321,10 +4639,22 @@ def avrcp_play(address):
         return
     try:
         info(f"Sending PLAY command to {address}...")
-        ctrl.play()
-        success("PLAY command sent.")
-        from blue_tap.utils.session import log_command
-        log_command("avrcp_play", {"address": address, "action": "play"}, category="attack", target=address)
+        played = ctrl.play()
+        if played:
+            success("PLAY command sent.")
+        else:
+            warning("PLAY command failed.")
+        _log_standardized_operation(
+            module="attack",
+            command="avrcp_play",
+            title="AVRCP Play Command",
+            protocol="AVRCP",
+            target=address,
+            result={"address": address, "action": "play", "success": played},
+            category="attack",
+            observations=["action=play"],
+            module_outcome="success" if played else "failed",
+        )
     finally:
         ctrl.disconnect()
 
@@ -4344,10 +4674,22 @@ def avrcp_pause(address):
         return
     try:
         info(f"Sending PAUSE command to {address}...")
-        ctrl.pause()
-        success("PAUSE command sent.")
-        from blue_tap.utils.session import log_command
-        log_command("avrcp_pause", {"address": address, "action": "pause"}, category="attack", target=address)
+        paused = ctrl.pause()
+        if paused:
+            success("PAUSE command sent.")
+        else:
+            warning("PAUSE command failed.")
+        _log_standardized_operation(
+            module="attack",
+            command="avrcp_pause",
+            title="AVRCP Pause Command",
+            protocol="AVRCP",
+            target=address,
+            result={"address": address, "action": "pause", "success": paused},
+            category="attack",
+            observations=["action=pause"],
+            module_outcome="success" if paused else "failed",
+        )
     finally:
         ctrl.disconnect()
 
@@ -4367,10 +4709,22 @@ def avrcp_stop(address):
         return
     try:
         info(f"Sending STOP command to {address}...")
-        ctrl.stop()
-        success("STOP command sent.")
-        from blue_tap.utils.session import log_command
-        log_command("avrcp_stop", {"address": address, "action": "stop"}, category="attack", target=address)
+        stopped = ctrl.stop()
+        if stopped:
+            success("STOP command sent.")
+        else:
+            warning("STOP command failed.")
+        _log_standardized_operation(
+            module="attack",
+            command="avrcp_stop",
+            title="AVRCP Stop Command",
+            protocol="AVRCP",
+            target=address,
+            result={"address": address, "action": "stop", "success": stopped},
+            category="attack",
+            observations=["action=stop"],
+            module_outcome="success" if stopped else "failed",
+        )
     finally:
         ctrl.disconnect()
 
@@ -4390,10 +4744,22 @@ def avrcp_next(address):
         return
     try:
         info(f"Sending NEXT TRACK command to {address}...")
-        ctrl.next_track()
-        success("NEXT TRACK command sent.")
-        from blue_tap.utils.session import log_command
-        log_command("avrcp_next", {"address": address, "action": "next"}, category="attack", target=address)
+        moved = ctrl.next_track()
+        if moved:
+            success("NEXT TRACK command sent.")
+        else:
+            warning("NEXT TRACK command failed.")
+        _log_standardized_operation(
+            module="attack",
+            command="avrcp_next",
+            title="AVRCP Next Track Command",
+            protocol="AVRCP",
+            target=address,
+            result={"address": address, "action": "next", "success": moved},
+            category="attack",
+            observations=["action=next"],
+            module_outcome="success" if moved else "failed",
+        )
     finally:
         ctrl.disconnect()
 
@@ -4413,10 +4779,22 @@ def avrcp_prev(address):
         return
     try:
         info(f"Sending PREVIOUS TRACK command to {address}...")
-        ctrl.previous_track()
-        success("PREVIOUS TRACK command sent.")
-        from blue_tap.utils.session import log_command
-        log_command("avrcp_prev", {"address": address, "action": "prev"}, category="attack", target=address)
+        moved = ctrl.previous_track()
+        if moved:
+            success("PREVIOUS TRACK command sent.")
+        else:
+            warning("PREVIOUS TRACK command failed.")
+        _log_standardized_operation(
+            module="attack",
+            command="avrcp_prev",
+            title="AVRCP Previous Track Command",
+            protocol="AVRCP",
+            target=address,
+            result={"address": address, "action": "prev", "success": moved},
+            category="attack",
+            observations=["action=prev"],
+            module_outcome="success" if moved else "failed",
+        )
     finally:
         ctrl.disconnect()
 
@@ -4437,10 +4815,22 @@ def avrcp_volume(address, level):
         return
     try:
         info(f"Setting volume to {level} on {address}...")
-        ctrl.set_volume(level)
-        success(f"Volume set to {level}.")
-        from blue_tap.utils.session import log_command
-        log_command("avrcp_volume", {"address": address, "action": "set_volume", "level": level}, category="attack", target=address)
+        set_ok = ctrl.set_volume(level)
+        if set_ok:
+            success(f"Volume set to {level}.")
+        else:
+            warning(f"Volume set failed for {level}.")
+        _log_standardized_operation(
+            module="attack",
+            command="avrcp_volume",
+            title="AVRCP Volume Set",
+            protocol="AVRCP",
+            target=address,
+            result={"address": address, "action": "set_volume", "level": level, "success": set_ok},
+            category="attack",
+            observations=[f"level={level}"],
+            module_outcome="success" if set_ok else "failed",
+        )
     finally:
         ctrl.disconnect()
 
@@ -4463,10 +4853,22 @@ def avrcp_volume_ramp(address, start, end, step_ms):
         return
     try:
         info(f"Ramping volume from {start} to {end} (step {step_ms}ms) on {address}...")
-        ctrl.volume_ramp(start=start, target=end, step_ms=step_ms)
-        success(f"Volume ramp complete ({start} -> {end}).")
-        from blue_tap.utils.session import log_command
-        log_command("avrcp_volume_ramp", {"address": address, "action": "volume_ramp", "start": start, "end": end, "step_ms": step_ms}, category="attack", target=address)
+        ramped = ctrl.volume_ramp(start=start, target=end, step_ms=step_ms)
+        if ramped:
+            success(f"Volume ramp complete ({start} -> {end}).")
+        else:
+            warning(f"Volume ramp failed ({start} -> {end}).")
+        _log_standardized_operation(
+            module="attack",
+            command="avrcp_volume_ramp",
+            title="AVRCP Volume Ramp",
+            protocol="AVRCP",
+            target=address,
+            result={"address": address, "action": "volume_ramp", "start": start, "end": end, "step_ms": step_ms, "success": ramped},
+            category="attack",
+            observations=[f"start={start}", f"end={end}", f"step_ms={step_ms}"],
+            module_outcome="success" if ramped else "failed",
+        )
     finally:
         ctrl.disconnect()
 
@@ -4488,10 +4890,22 @@ def avrcp_skip_flood(address, count, interval):
         return
     try:
         info(f"Starting skip flood: {count} skips at {interval}s interval on {address}...")
-        ctrl.skip_flood(count, int(interval * 1000))
-        success(f"Skip flood complete ({count} skips sent).")
-        from blue_tap.utils.session import log_command
-        log_command("avrcp_skip_flood", {"address": address, "action": "skip_flood", "count": count, "interval": interval}, category="attack", target=address)
+        flooded = ctrl.skip_flood(count, int(interval * 1000))
+        if flooded:
+            success(f"Skip flood complete ({count} skips sent).")
+        else:
+            warning("Skip flood did not send any commands successfully.")
+        _log_standardized_operation(
+            module="attack",
+            command="avrcp_skip_flood",
+            title="AVRCP Skip Flood",
+            protocol="AVRCP",
+            target=address,
+            result={"address": address, "action": "skip_flood", "count": count, "interval": interval, "success": flooded},
+            category="attack",
+            observations=[f"count={count}", f"interval={interval}"],
+            module_outcome="success" if flooded else "failed",
+        )
     finally:
         ctrl.disconnect()
 
@@ -4511,17 +4925,33 @@ def avrcp_metadata(address):
         return
     try:
         info(f"Fetching track metadata from {address}...")
-        track = ctrl.get_track_info()
-        status = ctrl.get_status()
+        snapshot = ctrl.get_metadata_snapshot()
+        track = snapshot.get("track", {})
+        status = snapshot.get("status", "")
+        player = snapshot.get("player", {})
+        settings = snapshot.get("settings", {})
         console.print(f"[bold cyan]Status:[/bold cyan] {status}")
+        if player.get("Name"):
+            console.print(f"[bold cyan]Active Player:[/bold cyan] {player.get('Name')}")
         if track:
             success("Track metadata retrieved.")
             for key, val in track.items():
                 console.print(f"  [cyan]{key}:[/cyan] {val}")
         else:
             warning("No track info available")
-        from blue_tap.utils.session import log_command
-        log_command("avrcp_metadata", {"address": address, "action": "metadata", "track": track, "status": status}, category="attack", target=address)
+        if settings:
+            for key, val in settings.items():
+                console.print(f"  [magenta]{key}:[/magenta] {val}")
+        _log_standardized_operation(
+            module="attack",
+            command="avrcp_metadata",
+            title="AVRCP Metadata Query",
+            protocol="AVRCP",
+            target=address,
+            result={"address": address, "action": "metadata", **snapshot},
+            category="attack",
+            observations=[f"status={status}", f"active_app={snapshot.get('active_app', '')}"],
+        )
     finally:
         ctrl.disconnect()
 
