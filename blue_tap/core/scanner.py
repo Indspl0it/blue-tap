@@ -1,9 +1,14 @@
-"""Bluetooth Classic and BLE scanning with extended data extraction."""
+"""Bluetooth discovery and scan orchestration."""
 
 import asyncio
 import re
+import time
+from typing import Any
 
-from blue_tap.utils.bt_helpers import run_cmd
+from blue_tap.core.scan_framework import build_scan_result, now_iso
+from blue_tap.core.cli_events import emit_cli_event
+from blue_tap.core.result_schema import make_run_id
+from blue_tap.utils.bt_helpers import lookup_oui, run_cmd
 from blue_tap.utils.output import info, success, error, verbose
 
 
@@ -177,27 +182,45 @@ def estimate_distance(rssi: int, tx_power: int = -59) -> float | None:
 # Classic Bluetooth Scanning
 # ============================================================================
 
-def scan_classic(duration: int = 10, hci: str = "hci0") -> list[dict]:
-    """Scan for Bluetooth Classic devices using hcitool.
+def _normalize_device_name(name: str) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", "", str(name or "").lower())
+    return normalized
 
-    Performs both 'hcitool scan' (names) and 'hcitool inq' (class + clock offset)
-    and merges results into enriched device records.
-    """
+
+def _service_uuid_preview(service_uuids: list[str]) -> str:
+    if not service_uuids:
+        return ""
+    if len(service_uuids) <= 2:
+        return ", ".join(service_uuids)
+    return f"{', '.join(service_uuids[:2])} (+{len(service_uuids) - 2})"
+
+
+def _manufacturer_preview(device: dict) -> str:
+    if device.get("manufacturer_name"):
+        return str(device["manufacturer_name"])
+    manufacturer_data = device.get("manufacturer_data") or []
+    if manufacturer_data:
+        first = manufacturer_data[0]
+        return str(first.get("company_name") or first.get("company_hex") or "")
+    return ""
+
+
+def _run_classic_inquiry(duration: int, hci: str) -> list[dict]:
+    """Collect Classic inquiry results with class information."""
     from blue_tap.utils.bt_helpers import ensure_adapter_ready
+
     if not ensure_adapter_ready(hci):
         return []
 
-    info(f"Scanning Classic BT for {duration}s on {hci}...")
+    info(f"Classic inquiry on {hci} for {duration}s")
 
-    # Run inquiry first (gives class + clock offset, no names)
-    # --length is in units of 1.28 seconds, not seconds
-    inq_length = max(int(duration / 1.28), 4)
+    # --length uses 1.28 second units. Keep within the requested scan window.
+    inq_length = max(int(round(duration / 1.28)), 1)
     inq_result = run_cmd(
         ["hcitool", "-i", hci, "inq", "--length", str(inq_length)],
         timeout=duration + 15,
     )
 
-    # Build device map from inquiry
     device_map = {}
     if inq_result.returncode == 0:
         for line in inq_result.stdout.splitlines():
@@ -212,51 +235,68 @@ def scan_classic(duration: int = 10, hci: str = "hci0") -> list[dict]:
                     "name": "",
                     "rssi": "N/A",
                     "type": "Classic",
+                    "discovered_via": ["classic_inquiry"],
                     "class": m.group(3),
                     "clock_offset": m.group(2),
                     "class_info": parse_device_class(m.group(3)),
+                    "classic_address": m.group(1).upper(),
+                    "oui_vendor": lookup_oui(m.group(1)),
                 }
     else:
-        # Fallback: check if adapter is up
         if "device is not up" in inq_result.stderr.lower():
             error(f"{hci} is not up. Run: blue-tap adapter up {hci}")
             return []
-
-    # Run scan for names
-    scan_result = run_cmd(
-        ["hcitool", "-i", hci, "scan"],
-        timeout=duration + 15,
-    )
-    if scan_result.returncode == 0:
-        for line in scan_result.stdout.strip().splitlines():
-            m = re.match(r"\s*([0-9A-Fa-f:]{17})\s+(.*)", line)
-            if m:
-                addr = m.group(1).upper()
-                name = m.group(2).strip()
-                if addr in device_map:
-                    device_map[addr]["name"] = name if name else "Unknown"
-                else:
-                    device_map[addr] = {
-                        "address": m.group(1),
-                        "name": name if name else "Unknown",
-                        "rssi": "N/A",
-                        "type": "Classic",
-                    }
-    elif not device_map:
-        error(f"Classic scan failed: {scan_result.stderr.strip()}")
-        return []
+        if not device_map:
+            error(f"Classic inquiry failed: {inq_result.stderr.strip()}")
+            return []
 
     devices = list(device_map.values())
+    if devices:
+        success(f"Classic inquiry found {len(devices)} device(s)")
+    else:
+        info("Classic inquiry completed with no devices in range")
+    return devices
 
-    # Resolve names for devices found only via inquiry
-    for dev in devices:
-        if not dev.get("name") or dev["name"] == "":
-            dev["name"] = resolve_name(dev["address"], hci)
+
+def _resolve_missing_classic_names(devices: list[dict], hci: str, time_budget: float) -> None:
+    """Resolve names for inquiry results without blowing through the total budget."""
+
+    if not devices or time_budget <= 0:
+        return
+    unresolved = [dev for dev in devices if not dev.get("name")]
+    if not unresolved:
+        return
+
+    info(f"Resolving Classic names for {len(unresolved)} device(s)")
+    deadline = time.time() + max(time_budget, 0)
+    for index, dev in enumerate(unresolved, start=1):
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            info("Classic name resolution budget exhausted")
+            break
+        per_device_timeout = min(5, max(2, int(remaining / max(len(unresolved) - index + 1, 1))))
+        name = resolve_name(dev["address"], hci, retries=1, timeout=per_device_timeout)
+        dev["name"] = name
+        if name != "Unknown":
+            dev.setdefault("discovered_via", []).append("classic_name")
+            verbose(f"Resolved {dev['address']} as {name}")
+        elif dev.get("oui_vendor"):
+            verbose(f"Name resolution failed for {dev['address']} ({dev['oui_vendor']})")
+
+
+def scan_classic(duration: int = 10, hci: str = "hci0") -> list[dict]:
+    """Scan for Bluetooth Classic devices using inquiry plus bounded name resolution."""
+
+    started = time.time()
+    devices = _run_classic_inquiry(duration, hci)
+    elapsed = time.time() - started
+    _resolve_missing_classic_names(devices, hci, time_budget=max(duration + 5 - elapsed, 0))
 
     if not devices:
-        info("Scan completed — no devices in range")
-    else:
-        success(f"Found {len(devices)} Classic device(s)")
+        info("Scan completed — no Classic devices in range")
+        return []
+
+    success(f"Found {len(devices)} Classic device(s)")
     return devices
 
 
@@ -278,7 +318,9 @@ async def scan_ble(duration: int = 10, passive: bool = False, adapter: str = "")
         error("bleak not installed. Install: pip install bleak")
         return []
 
-    info(f"Scanning BLE for {duration}s {'(passive)' if passive else ''}...")
+    adapter_label = adapter or "default adapter"
+    mode_label = "passive" if passive else "active"
+    info(f"BLE scan on {adapter_label} for {duration}s ({mode_label})")
 
     # bleak's scanning_mode parameter: "active" sends SCAN_REQ, "passive" does not
     scanning_mode = "passive" if passive else "active"
@@ -303,27 +345,40 @@ async def scan_ble(duration: int = 10, passive: bool = False, adapter: str = "")
             "rssi": rssi,
             "type": "BLE",
             "distance_m": estimate_distance(rssi),
+            "discovered_via": ["ble_advertising"],
+            "ble_address": str(d.address).upper(),
         }
 
-        # Parse advertising data from AdvertisementData object
         mfr_data = adv.manufacturer_data
         if mfr_data:
-            dev["manufacturer_ids"] = list(mfr_data.keys())
-            dev["manufacturer_name"] = _lookup_ble_manufacturer(
-                list(mfr_data.keys())[0] if mfr_data else 0
-            )
+            manufacturer_entries = []
+            for company_id, payload in sorted(mfr_data.items()):
+                payload_bytes = bytes(payload)
+                manufacturer_entries.append({
+                    "company_id": company_id,
+                    "company_hex": f"0x{company_id:04X}",
+                    "company_name": _lookup_ble_manufacturer(company_id),
+                    "data_hex": payload_bytes.hex(),
+                    "length": len(payload_bytes),
+                })
+            dev["manufacturer_ids"] = [entry["company_id"] for entry in manufacturer_entries]
+            dev["manufacturer_data"] = manufacturer_entries
+            dev["manufacturer_name"] = manufacturer_entries[0]["company_name"]
 
-        # Extract service UUIDs
         uuids = adv.service_uuids
         if uuids:
-            dev["service_uuids"] = uuids
+            dev["service_uuids"] = sorted(uuids)
 
-        # TX Power level (used for distance estimation)
         tx_power = adv.tx_power
         if tx_power is not None:
             dev["tx_power"] = tx_power
             dev["distance_m"] = estimate_distance(rssi, tx_power)
 
+        verbose(
+            f"BLE device {dev['address']} name={dev['name']} "
+            f"mfr={_manufacturer_preview(dev) or 'n/a'} "
+            f"services={_service_uuid_preview(dev.get('service_uuids', [])) or 'n/a'}"
+        )
         devices.append(dev)
 
     success(f"Found {len(devices)} BLE device(s)")
@@ -381,27 +436,82 @@ def scan_ble_sync(duration: int = 10, passive: bool = False, adapter: str = "") 
 # Combined Scanning
 # ============================================================================
 
-def scan_all(duration: int = 10, hci: str = "hci0") -> list[dict]:
-    """Scan both Classic and BLE, merge and deduplicate results.
+def _should_correlate_dual_mode(classic_dev: dict, ble_dev: dict) -> tuple[bool, str]:
+    """Return a conservative correlation hint for likely dual-mode devices."""
 
-    Classic scan runs first (uses hcitool), then BLE scan (uses bleak).
-    Both are needed sequentially because bleak requires the main thread
-    event loop on Linux (D-Bus).
-    """
-    classic = scan_classic(duration, hci)
-    ble = scan_ble_sync(duration, adapter=hci)
+    classic_name = _normalize_device_name(classic_dev.get("name", ""))
+    ble_name = _normalize_device_name(ble_dev.get("name", ""))
+    if not classic_name or classic_name != ble_name:
+        return False, ""
 
-    # Merge, dedup by address, prefer richer records
-    seen = {}
+    classic_vendor = str(classic_dev.get("oui_vendor", "")).lower()
+    ble_vendor = str(_manufacturer_preview(ble_dev)).lower()
+    vendor_match = classic_vendor and ble_vendor and (
+        classic_vendor in ble_vendor or ble_vendor in classic_vendor
+    )
+
+    ble_rssi = ble_dev.get("rssi")
+    close_signal = isinstance(ble_rssi, int) and ble_rssi >= -75
+    recognizable_class = classic_dev.get("class_info", {}).get("major") in {
+        "Phone", "Audio/Video", "Computer", "Wearable",
+    }
+
+    if vendor_match:
+        return True, "matching_name_and_vendor"
+    if close_signal and recognizable_class:
+        return True, "matching_name_and_signal_profile"
+    return False, ""
+
+
+def _annotate_dual_mode_candidates(classic: list[dict], ble: list[dict]) -> list[dict]:
+    """Annotate likely cross-transport correlations without risky auto-merges."""
+
+    candidates: list[dict] = []
+    for classic_dev in classic:
+        for ble_dev in ble:
+            if classic_dev["address"].upper() == ble_dev["address"].upper():
+                continue
+            matched, reason = _should_correlate_dual_mode(classic_dev, ble_dev)
+            if not matched:
+                continue
+            classic_dev.setdefault("possible_dual_mode_with", []).append({
+                "address": ble_dev["address"],
+                "transport": "BLE",
+                "reason": reason,
+            })
+            ble_dev.setdefault("possible_dual_mode_with", []).append({
+                "address": classic_dev["address"],
+                "transport": "Classic",
+                "reason": reason,
+            })
+            candidates.append({
+                "classic_address": classic_dev["address"],
+                "ble_address": ble_dev["address"],
+                "reason": reason,
+            })
+            verbose(
+                f"Correlated Classic {classic_dev['address']} with BLE {ble_dev['address']} "
+                f"via {reason}"
+            )
+    return candidates
+
+
+def _merge_scan_results(classic: list[dict], ble: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Merge exact-address dual-mode matches and annotate non-destructive hints."""
+
+    seen: dict[str, dict[str, Any]] = {}
     for dev in classic:
-        seen[dev["address"].upper()] = dev
+        seen[dev["address"].upper()] = dict(dev)
 
     for dev in ble:
         addr = dev["address"].upper()
         if addr in seen:
-            # Device found in both — mark as dual-mode and merge data
             existing = seen[addr]
             existing["type"] = "Classic+BLE"
+            existing["merge_reason"] = "exact_address"
+            existing["classic_address"] = existing.get("classic_address", addr)
+            existing["ble_address"] = addr
+            existing["discovered_via"] = sorted(set(existing.get("discovered_via", []) + dev.get("discovered_via", [])))
             if existing.get("rssi") == "N/A" and dev.get("rssi") != "N/A":
                 existing["rssi"] = dev["rssi"]
             if dev.get("distance_m"):
@@ -410,25 +520,217 @@ def scan_all(duration: int = 10, hci: str = "hci0") -> list[dict]:
                 existing["service_uuids"] = dev["service_uuids"]
             if dev.get("manufacturer_name"):
                 existing["manufacturer_name"] = dev["manufacturer_name"]
+            if dev.get("manufacturer_ids"):
+                existing["manufacturer_ids"] = dev["manufacturer_ids"]
+            if dev.get("manufacturer_data"):
+                existing["manufacturer_data"] = dev["manufacturer_data"]
+            if dev.get("tx_power") is not None:
+                existing["tx_power"] = dev["tx_power"]
             if not existing.get("name") or existing["name"] == "Unknown":
                 existing["name"] = dev.get("name", "Unknown")
         else:
-            seen[addr] = dev
+            seen[addr] = dict(dev)
 
-    return list(seen.values())
+    merged_devices = list(seen.values())
+    candidate_summary = _annotate_dual_mode_candidates(classic, ble)
+    merged_by_addr = {dev["address"].upper(): dev for dev in merged_devices}
+    for dev in classic + ble:
+        merged = merged_by_addr.get(dev["address"].upper())
+        if merged and dev.get("possible_dual_mode_with"):
+            merged["possible_dual_mode_with"] = dev["possible_dual_mode_with"]
+    return merged_devices, candidate_summary
+
+
+def scan_all(duration: int = 10, hci: str = "hci0") -> list[dict]:
+    """Scan both Classic and BLE, exact-merge same-address devices, annotate hints."""
+
+    classic = scan_classic(duration, hci)
+    ble = scan_ble_sync(duration, adapter=hci)
+    devices, candidates = _merge_scan_results(classic, ble)
+    info(
+        "Combined scan summary: "
+        f"{len(classic)} Classic, {len(ble)} BLE, "
+        f"{sum(1 for d in devices if d.get('merge_reason') == 'exact_address')} exact dual-mode matches, "
+        f"{len(candidates)} correlation hint(s)"
+    )
+    return devices
+
+
+def _build_collector_entry(collector_id: str, title: str, devices: list[dict], **metadata: Any) -> dict:
+    return {
+        "collector_id": collector_id,
+        "title": title,
+        "device_count": len(devices),
+        "metadata": metadata,
+    }
+
+
+def scan_classic_result(duration: int = 10, hci: str = "hci0") -> dict:
+    """Structured Classic scan result envelope."""
+
+    started_at = now_iso()
+    run_id = make_run_id("scan")
+    emit_cli_event(
+        event_type="run_started",
+        module="scan",
+        run_id=run_id,
+        target="range_scan",
+        adapter=hci,
+        message=f"Discovery run started: classic scan on {hci} for {duration}s",
+        details={"scan_mode": "classic", "duration_requested": duration},
+    )
+    info("Collector phase: Classic inquiry and name resolution")
+    devices = scan_classic(duration, hci)
+    collectors = [
+        _build_collector_entry(
+            "classic_inquiry",
+            "Classic inquiry and name resolution",
+            devices,
+            adapter=hci,
+            passive=False,
+        ),
+    ]
+    result = build_scan_result(
+        scan_mode="classic",
+        adapter=hci,
+        duration_requested=duration,
+        passive=False,
+        devices=devices,
+        collectors=collectors,
+        started_at=started_at,
+        run_id=run_id,
+    )
+    emit_cli_event(
+        event_type="run_completed",
+        module="scan",
+        run_id=run_id,
+        target="range_scan",
+        adapter=hci,
+        message=f"Discovery run completed: {len(devices)} Classic device(s) discovered",
+    )
+    return result
+
+
+def scan_ble_result_sync(duration: int = 10, passive: bool = False, adapter: str = "") -> dict:
+    """Structured BLE scan result envelope."""
+
+    started_at = now_iso()
+    run_id = make_run_id("scan")
+    emit_cli_event(
+        event_type="run_started",
+        module="scan",
+        run_id=run_id,
+        target="range_scan",
+        adapter=adapter or "",
+        message=f"Discovery run started: BLE {'passive' if passive else 'active'} scan on {adapter or 'default adapter'} for {duration}s",
+        details={"scan_mode": "ble", "duration_requested": duration, "passive": passive},
+    )
+    info("Collector phase: BLE advertising discovery")
+    devices = scan_ble_sync(duration, passive=passive, adapter=adapter)
+    collectors = [
+        _build_collector_entry(
+            "ble_advertising",
+            "BLE advertising collector",
+            devices,
+            adapter=adapter or "",
+            passive=passive,
+        ),
+    ]
+    result = build_scan_result(
+        scan_mode="ble",
+        adapter=adapter or "",
+        duration_requested=duration,
+        passive=passive,
+        devices=devices,
+        collectors=collectors,
+        started_at=started_at,
+        run_id=run_id,
+    )
+    emit_cli_event(
+        event_type="run_completed",
+        module="scan",
+        run_id=run_id,
+        target="range_scan",
+        adapter=adapter or "",
+        message=f"Discovery run completed: {len(devices)} BLE device(s) discovered",
+    )
+    return result
+
+
+def scan_all_result(duration: int = 10, hci: str = "hci0") -> dict:
+    """Structured combined scan result envelope."""
+
+    started_at = now_iso()
+    run_id = make_run_id("scan")
+    emit_cli_event(
+        event_type="run_started",
+        module="scan",
+        run_id=run_id,
+        target="combined_range_scan",
+        adapter=hci,
+        message=f"Discovery run started: combined Classic+BLE scan on {hci} for {duration}s",
+        details={"scan_mode": "all", "duration_requested": duration},
+    )
+    info("Collector phase 1/3: Classic inquiry and name resolution")
+    classic = scan_classic(duration, hci)
+    info("Collector phase 2/3: BLE advertising discovery")
+    ble = scan_ble_sync(duration, adapter=hci)
+    info("Collector phase 3/3: exact merge and correlation analysis")
+    devices, candidates = _merge_scan_results(classic, ble)
+    collectors = [
+        _build_collector_entry(
+            "classic_inquiry",
+            "Classic inquiry and name resolution",
+            classic,
+            adapter=hci,
+            passive=False,
+        ),
+        _build_collector_entry(
+            "ble_advertising",
+            "BLE advertising collector",
+            ble,
+            adapter=hci,
+            passive=False,
+        ),
+        _build_collector_entry(
+            "combined_merge",
+            "Combined address merge and correlation",
+            devices,
+            exact_dual_mode_matches=sum(1 for d in devices if d.get("merge_reason") == "exact_address"),
+            correlation_hints=len(candidates),
+        ),
+    ]
+    result = build_scan_result(
+        scan_mode="all",
+        adapter=hci,
+        duration_requested=duration,
+        passive=False,
+        devices=devices,
+        collectors=collectors,
+        started_at=started_at,
+        run_id=run_id,
+    )
+    emit_cli_event(
+        event_type="run_completed",
+        module="scan",
+        run_id=run_id,
+        target="combined_range_scan",
+        adapter=hci,
+        message=f"Discovery run completed: {len(devices)} device(s), {len(candidates)} correlation hint(s)",
+    )
+    return result
 
 
 # ============================================================================
 # Name Resolution
 # ============================================================================
 
-def resolve_name(address: str, hci: str = "hci0", retries: int = 2) -> str:
+def resolve_name(address: str, hci: str = "hci0", retries: int = 2, timeout: int = 10) -> str:
     """Resolve the friendly name of a BT device with retry."""
     for attempt in range(retries + 1):
-        result = run_cmd(["hcitool", "-i", hci, "name", address], timeout=10)
+        result = run_cmd(["hcitool", "-i", hci, "name", address], timeout=timeout)
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip()
         if attempt < retries:
-            import time
             time.sleep(1)
     return "Unknown"
