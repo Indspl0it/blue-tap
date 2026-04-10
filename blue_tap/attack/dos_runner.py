@@ -15,6 +15,8 @@ from blue_tap.attack.dos_framework import (
     wait_for_target_recovery,
 )
 from blue_tap.attack.dos_registry import DOS_CHECK_INDEX, DOS_CHECKS
+from blue_tap.core.cli_events import emit_cli_event
+from blue_tap.core.result_schema import make_run_id
 from blue_tap.utils.bt_helpers import ensure_adapter_ready
 from blue_tap.utils.output import info, section, success, warning
 
@@ -45,12 +47,22 @@ def _normalize_params(defaults: dict, overrides: dict | None) -> dict:
 
 
 def _run_one_check(address: str, hci: str, check_id: str, params: dict | None = None,
-                   recovery_timeout: int = 180) -> dict:
+                   recovery_timeout: int = 180, run_id: str = "") -> dict:
     check = DOS_CHECK_INDEX[check_id]
     merged_params = _normalize_params(check.default_params, params)
     effective_hci = str(merged_params.pop("hci", hci))
     started_at = now_iso()
     recovery_probes = tuple(check.recovery_probes or default_recovery_probes(check.protocol))
+    emit_cli_event(
+        event_type="execution_started",
+        module="dos",
+        run_id=run_id,
+        execution_id=check.check_id,
+        target=address,
+        adapter=effective_hci,
+        message=f"DoS check started: {check.check_id} ({check.title})",
+        details={"protocol": check.protocol, "requires_pairing": check.requires_pairing},
+    )
 
     info(f"[DoS] {check.check_id} — {check.title}")
     info(f"[DoS] protocol={check.protocol} destructive={check.destructive} params={merged_params if merged_params else '{}'}")
@@ -118,6 +130,16 @@ def _run_one_check(address: str, hci: str, check_id: str, params: dict | None = 
 
     if status == DOS_STATUS_UNRESPONSIVE:
         warning(f"[DoS] {check.check_id}: target appears unresponsive; waiting for recovery")
+        emit_cli_event(
+            event_type="recovery_wait_started",
+            module="dos",
+            run_id=run_id,
+            execution_id=check.check_id,
+            target=address,
+            adapter=effective_hci,
+            message=f"Recovery wait started for {check.check_id}",
+            details={"timeout_seconds": recovery_timeout, "probe_strategy": list(recovery_probes)},
+        )
         recovery = wait_for_target_recovery(
             address,
             effective_hci,
@@ -159,7 +181,7 @@ def _run_one_check(address: str, hci: str, check_id: str, params: dict | None = 
     if recovery.get("last_probe"):
         evidence_bits.append(f"recovery_probe={recovery['last_probe']}")
 
-    return {
+    result = {
         "check_id": check.check_id,
         "title": check.title,
         "protocol": check.protocol,
@@ -176,19 +198,41 @@ def _run_one_check(address: str, hci: str, check_id: str, params: dict | None = 
         "started_at": started_at,
         "completed_at": now_iso(),
     }
+    emit_cli_event(
+        event_type="execution_result",
+        module="dos",
+        run_id=run_id,
+        execution_id=check.check_id,
+        target=address,
+        adapter=effective_hci,
+        message=f"DoS check finished: {check.check_id} -> {status}",
+        details={"status": status},
+    )
+    return result
 
 
 def run_dos_checks(address: str, hci: str = "hci0", check_ids: list[str] | None = None,
                    param_overrides: dict[str, dict] | None = None,
                    recovery_timeout: int = 180) -> dict:
     started_at = now_iso()
+    run_id = make_run_id("dos")
     selected = check_ids or [check.check_id for check in DOS_CHECKS]
     checks: list[dict] = []
     interrupted_on: str | None = None
     abort_reason: str | None = None
 
+    emit_cli_event(
+        event_type="run_started",
+        module="dos",
+        run_id=run_id,
+        target=address,
+        adapter=hci,
+        message=f"DoS run started against {address} with {len(selected)} check(s)",
+        details={"selected_checks": selected, "recovery_timeout": recovery_timeout},
+    )
+
     if not ensure_adapter_ready(hci):
-        return build_dos_run_result(
+        result = build_dos_run_result(
             target=address,
             adapter=hci,
             mode="all" if len(selected) > 1 else "single",
@@ -205,7 +249,17 @@ def run_dos_checks(address: str, hci: str = "hci0", check_ids: list[str] | None 
             started_at=started_at,
             recovery_timeout=recovery_timeout,
             abort_reason=f"Adapter {hci} not ready",
+            run_id=run_id,
         )
+        emit_cli_event(
+            event_type="run_error",
+            module="dos",
+            run_id=run_id,
+            target=address,
+            adapter=hci,
+            message=f"DoS run aborted: adapter {hci} not ready",
+        )
+        return result
 
     for check_id in selected:
         check = DOS_CHECK_INDEX.get(check_id)
@@ -228,6 +282,7 @@ def run_dos_checks(address: str, hci: str = "hci0", check_ids: list[str] | None 
             check_id,
             params=(param_overrides or {}).get(check_id),
             recovery_timeout=recovery_timeout,
+            run_id=run_id,
         )
         checks.append(result)
         if result["status"] == DOS_STATUS_UNRESPONSIVE:
@@ -236,7 +291,7 @@ def run_dos_checks(address: str, hci: str = "hci0", check_ids: list[str] | None 
             abort_reason = f"{check_id} left target unresponsive after recovery wait"
             break
 
-    return build_dos_run_result(
+    result = build_dos_run_result(
         target=address,
         adapter=hci,
         mode="all" if len(selected) > 1 else "single",
@@ -246,4 +301,17 @@ def run_dos_checks(address: str, hci: str = "hci0", check_ids: list[str] | None 
         recovery_timeout=recovery_timeout,
         interrupted_on=interrupted_on,
         abort_reason=abort_reason,
+        run_id=run_id,
     )
+    emit_cli_event(
+        event_type="run_completed" if not abort_reason else "run_aborted",
+        module="dos",
+        run_id=run_id,
+        target=address,
+        adapter=hci,
+        message=(
+            f"DoS run completed: {len(checks)} check(s), "
+            f"{sum(1 for c in checks if c.get('status') == DOS_STATUS_UNRESPONSIVE)} unresponsive"
+        ) if not abort_reason else f"DoS run aborted: {abort_reason}",
+    )
+    return result
