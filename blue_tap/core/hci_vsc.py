@@ -703,16 +703,26 @@ class HCIVSCSocket:
     def write_memory(self, address: int, data: bytes) -> bool:
         """Write memory on the Bluetooth controller via VSC 0xFC62.
 
+        The RTL8761B firmware interprets the size parameter as a write mode,
+        mirroring read_memory: ``0x20`` (32) writes a full 4-byte word,
+        while smaller values write only 1 byte.  We always use ``0x20`` for
+        4-byte writes and ``1`` for single-byte writes.
+
         Args:
-            address: 32-bit memory address to write to.
-            data:    Bytes to write (typically 4 bytes for 32-bit write).
+            address: 32-bit memory address to write to (should be 4-byte
+                     aligned for 4-byte writes).
+            data:    Bytes to write (4 bytes for word write, 1 byte for
+                     single-byte write).
 
         Returns:
             *True* on success, *False* on failure.
         """
         logger.debug("Writing memory at %#010x", address)
         # Params: size(1B) + address(4B LE) + data
-        params = struct.pack("<BI", len(data), address) + data
+        # Use 0x20 for 4-byte writes (matching read_memory behavior);
+        # len(data) for sub-word writes (1-3 bytes).
+        size_param = 0x20 if len(data) == 4 else len(data)
+        params = struct.pack("<BI", size_param, address) + data
         try:
             result = self.send_vsc(self.VSC_MEM_WRITE, params)
             status = result[0] if result else 0xFF

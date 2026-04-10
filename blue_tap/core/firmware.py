@@ -477,6 +477,239 @@ class DarkFirmwareManager:
             warning("Adapter may need additional time or manual replug to apply")
             return False
 
+    def patch_bdaddr_ram(self, target_mac: str, hci: str = "hci0") -> bool:
+        """Live-patch BDADDR in controller RAM without modifying the firmware file.
+
+        Writes the new BDADDR to all known locations in the RTL8761B's RAM
+        where the controller stores address copies.  This is instant (no USB
+        reset, no firmware reload) and volatile — the change is lost on
+        adapter reset or replug.
+
+        Requires DarkFirmware for memory write access (VSC 0xFC62).
+
+        Discovery method:
+          The BDADDR locations were found by scanning RAM 0x80100000-0x80134000
+          for the current BDADDR pattern.  RTL8761B stores 5 copies:
+            - 0x80111605: patch area (firmware's own BDADDR for LMP)
+            - 0x801200A0: HCI state (controller's active BD_ADDR)
+            - 0x80120470: HCI state (advertising/scan response)
+            - 0x80122DFC: HCI state (page scan address)
+            - 0x8012384E: HCI state (event filter address)
+
+        Steps:
+          1. Read current BDADDR from RAM to find all copies dynamically
+          2. Write new BDADDR (reversed) to each location
+          3. Verify each write by reading back
+          4. Reset HCI device to refresh host stack cache
+
+        Args:
+            target_mac: Target MAC address (XX:XX:XX:XX:XX:XX).
+            hci: HCI device name (default "hci0").
+
+        Returns:
+            True if all RAM writes succeeded and verification passed.
+        """
+        from blue_tap.utils.bt_helpers import validate_mac, normalize_mac
+
+        target_mac = normalize_mac(target_mac)
+        if not validate_mac(target_mac):
+            error(f"Invalid MAC address: {target_mac}")
+            return False
+
+        if not self.is_darkfirmware_loaded(hci):
+            error("DarkFirmware not loaded — RAM BDADDR patch requires VSC memory access")
+            return False
+
+        # Parse current and target MAC bytes (reversed for firmware storage)
+        current_addr = self.get_current_bdaddr(hci)
+        if not current_addr:
+            error("Cannot read current BDADDR — adapter may be down")
+            return False
+
+        current_bytes = bytes(int(b, 16) for b in current_addr.split(":"))[::-1]
+        target_bytes = bytes(int(b, 16) for b in target_mac.split(":"))[::-1]
+
+        info(f"RAM BDADDR patch: {current_addr} → {target_mac}")
+
+        hci_idx = int(hci.replace("hci", "")) if hci.startswith("hci") else 0
+
+        try:
+            from blue_tap.core.hci_vsc import HCIVSCSocket
+
+            with HCIVSCSocket(hci_dev=hci_idx) as sock:
+                # Step 1: Scan RAM for current BDADDR to find all copies dynamically
+                # This handles different firmware versions that may store BDADDR
+                # at different offsets.
+                bdaddr_locations: list[int] = []
+                prev_data = b""
+
+                for addr in range(0x80100000, 0x80134000, 4):
+                    data = sock.read_memory(addr, 4)
+                    if not data or len(data) < 4:
+                        prev_data = b""
+                        continue
+
+                    window = prev_data + data
+                    for i in range(len(window) - 5):
+                        if window[i:i + 6] == current_bytes:
+                            actual_addr = (addr - len(prev_data)) + i
+                            bdaddr_locations.append(actual_addr)
+                    prev_data = data
+
+                if not bdaddr_locations:
+                    error("No BDADDR copies found in RAM — cannot patch")
+                    return False
+
+                info(f"Found {len(bdaddr_locations)} BDADDR copies in RAM")
+
+                # Step 2: Write new BDADDR to each location
+                # Memory writes must be 4-byte aligned, so handle unaligned
+                # 6-byte writes by reading the surrounding word, modifying,
+                # and writing back.
+                patched = 0
+                for loc in bdaddr_locations:
+                    ok = self._write_bdaddr_at(sock, loc, target_bytes)
+                    if ok:
+                        patched += 1
+                        info(f"  Patched {loc:#010x}")
+                    else:
+                        warning(f"  Failed to patch {loc:#010x}")
+
+                if patched == 0:
+                    error("All RAM BDADDR writes failed")
+                    return False
+
+                # Step 3: Verify by reading back
+                verified = 0
+                for loc in bdaddr_locations:
+                    readback = self._read_bytes_at(sock, loc, 6)
+                    if readback == target_bytes:
+                        verified += 1
+                    else:
+                        warning(
+                            f"  Verify failed at {loc:#010x}: "
+                            f"got {readback.hex()} expected {target_bytes.hex()}"
+                        )
+
+                info(f"Verified {verified}/{len(bdaddr_locations)} locations")
+
+        except PermissionError:
+            error("Cannot access HCI socket — need root or CAP_NET_RAW")
+            return False
+        except Exception as exc:
+            error(f"RAM BDADDR patch failed: {exc}")
+            return False
+
+        # Step 4: Reset HCI to refresh host stack's cached address
+        info("Resetting HCI device to refresh host stack...")
+        run_cmd(["sudo", "hciconfig", hci, "reset"])
+        time.sleep(1)
+        run_cmd(["sudo", "hciconfig", hci, "up"])
+        time.sleep(0.5)
+
+        # Verify via hciconfig
+        new_addr = self.get_current_bdaddr(hci)
+        if new_addr and new_addr.upper() == target_mac.upper():
+            success(f"RAM BDADDR patch verified: {hci} = {new_addr}")
+            return True
+        else:
+            warning(
+                f"RAM patched but hciconfig shows {new_addr} (expected {target_mac}). "
+                f"Host stack may need btmgmt power cycle to refresh."
+            )
+            # Try btmgmt power cycle as fallback
+            idx = hci.replace("hci", "")
+            run_cmd(["sudo", "btmgmt", "--index", idx, "power", "off"])
+            time.sleep(0.5)
+            run_cmd(["sudo", "btmgmt", "--index", idx, "power", "on"])
+            time.sleep(0.5)
+
+            new_addr = self.get_current_bdaddr(hci)
+            if new_addr and new_addr.upper() == target_mac.upper():
+                success(f"RAM BDADDR patch verified after power cycle: {hci} = {new_addr}")
+                return True
+
+            warning(f"BDADDR still shows {new_addr} — RAM patch applied but host cache stale")
+            return False
+
+    @staticmethod
+    def _write_bdaddr_at(sock: object, addr: int, mac_bytes: bytes) -> bool:
+        """Write 6 BDADDR bytes at a potentially unaligned address.
+
+        Memory writes on RTL8761B must be 4-byte aligned.  For an unaligned
+        6-byte write we do read-modify-write on the boundary words.
+        """
+        align_offset = addr & 3
+        aligned_addr = addr & ~3
+
+        if align_offset == 0:
+            # Perfectly aligned: write first 4 bytes, then read-modify-write last 2
+            ok1 = sock.write_memory(aligned_addr, mac_bytes[:4])
+            # Read the next word, replace first 2 bytes
+            existing = sock.read_memory(aligned_addr + 4, 4)
+            if not existing or len(existing) < 4:
+                return False
+            modified = mac_bytes[4:6] + existing[2:]
+            ok2 = sock.write_memory(aligned_addr + 4, modified)
+            return ok1 and ok2
+
+        elif align_offset == 1:
+            # 1 byte into a word: read word, replace bytes 1-3, write back
+            w0 = sock.read_memory(aligned_addr, 4)
+            if not w0 or len(w0) < 4:
+                return False
+            modified0 = bytes([w0[0]]) + mac_bytes[:3]
+            ok1 = sock.write_memory(aligned_addr, modified0)
+            # Next word: replace bytes 0-2
+            w1 = sock.read_memory(aligned_addr + 4, 4)
+            if not w1 or len(w1) < 4:
+                return False
+            modified1 = mac_bytes[3:6] + bytes([w1[3]])
+            ok2 = sock.write_memory(aligned_addr + 4, modified1)
+            return ok1 and ok2
+
+        elif align_offset == 2:
+            # 2 bytes into a word: read word, replace bytes 2-3
+            w0 = sock.read_memory(aligned_addr, 4)
+            if not w0 or len(w0) < 4:
+                return False
+            modified0 = w0[:2] + mac_bytes[:2]
+            ok1 = sock.write_memory(aligned_addr, modified0)
+            # Next word: full 4 bytes
+            ok2 = sock.write_memory(aligned_addr + 4, mac_bytes[2:6])
+            return ok1 and ok2
+
+        else:  # align_offset == 3
+            # 3 bytes into a word: read word, replace byte 3
+            w0 = sock.read_memory(aligned_addr, 4)
+            if not w0 or len(w0) < 4:
+                return False
+            modified0 = w0[:3] + mac_bytes[:1]
+            ok1 = sock.write_memory(aligned_addr, modified0)
+            # Next word: full 4 bytes
+            ok2 = sock.write_memory(aligned_addr + 4, mac_bytes[1:5])
+            # Third word: read, replace byte 0
+            w2 = sock.read_memory(aligned_addr + 8, 4)
+            if not w2 or len(w2) < 4:
+                return False
+            modified2 = mac_bytes[5:6] + w2[1:]
+            ok3 = sock.write_memory(aligned_addr + 8, modified2)
+            return ok1 and ok2 and ok3
+
+    @staticmethod
+    def _read_bytes_at(sock: object, addr: int, length: int) -> bytes:
+        """Read *length* bytes from a potentially unaligned address."""
+        result = b""
+        aligned_start = addr & ~3
+        total_words = ((addr + length) - aligned_start + 3) // 4
+
+        for i in range(total_words):
+            word = sock.read_memory(aligned_start + i * 4, 4)
+            result += word if word else b"\x00" * 4
+
+        offset = addr - aligned_start
+        return result[offset:offset + length]
+
     def install_firmware(self, source_path: str | None = None) -> bool:
         """Install DarkFirmware, backing up the original first.
 

@@ -242,18 +242,31 @@ def spoof_btmgmt(hci: str, target_mac: str) -> bool:
 
 
 def spoof_rtl8761b(hci: str, target_mac: str) -> bool:
-    """Spoof BDADDR on RTL8761B via DarkFirmware firmware patching.
+    """Spoof BDADDR on RTL8761B via DarkFirmware.
 
-    Patches the firmware binary at the BDADDR offset and performs a USB
-    reset to reload the firmware with the new address.  This is the only
-    reliable spoofing method for Realtek chipsets (bdaddr, spooftooph,
-    and btmgmt all return 'Unsupported manufacturer').
+    Preferred method: RAM-only live patch (instant, no USB reset, volatile).
+    Fallback: firmware file patch + USB reset (persistent, slower).
+
+    The RAM method writes the new BDADDR directly to all copies in
+    controller memory, then verifies via hciconfig.  If hciconfig still
+    shows the old address after RAM patching (host stack cache stale),
+    falls back to the firmware file method with USB reset.
     """
     try:
         from blue_tap.core.firmware import DarkFirmwareManager
         fw = DarkFirmwareManager()
         if not fw.detect_rtl8761b(hci):
             return False
+
+        # Preferred: RAM-only live patch (no file modification, instant)
+        if fw.is_darkfirmware_loaded(hci):
+            info("Attempting RAM-only BDADDR patch (preferred, no USB reset)...")
+            if fw.patch_bdaddr_ram(target_mac, hci):
+                return True
+            warning("RAM patch did not verify — falling back to firmware file patch")
+
+        # Fallback: firmware file patch + USB reset (persistent, slower)
+        info("Using firmware file BDADDR patch (USB reset required)...")
         return fw.patch_bdaddr(target_mac, hci)
     except Exception as exc:
         error(f"RTL8761B BDADDR spoofing failed: {exc}")
