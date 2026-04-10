@@ -5182,7 +5182,7 @@ def dos_run(address, hci, checks, recovery_timeout):
     selected = [item.strip() for item in checks.split(",") if item.strip()] or None
     info(f"Running DoS battery against [bold]{address}[/bold] via {hci}")
     result = run_dos_checks(address, hci=hci, check_ids=selected, recovery_timeout=recovery_timeout)
-    summary = summarize_dos_checks(result.get("checks", []))
+    summary = summarize_dos_checks(result.get("module_data", {}).get("checks", []))
     success(
         f"DoS battery complete: {summary['total']} check(s), "
         f"{summary['success']} success, {summary['recovered']} recovered, "
@@ -5227,14 +5227,26 @@ def dos_pair_flood(address, count, interval):
     if not address:
         return
     from blue_tap.attack.dos import PairingFlood
+    from blue_tap.attack.dos_framework import build_dos_operation_result
+    from blue_tap.core.result_schema import now_iso
     flood = PairingFlood(address)
     info(f"Starting pairing flood: {count} attempts, {interval}s delay")
+    started_at = now_iso()
     result = flood.flood_pairing_requests(count, interval)
     success(f"Flood complete: {result.get('successful', 0)} paired, "
             f"{result.get('failed', 0)} failed in {result.get('elapsed_seconds', 0):.1f}s "
             f"({result.get('rate_per_second', 0):.1f} req/s)")
     from blue_tap.utils.session import log_command
-    log_command("dos_pair_flood", result, category="dos", target=address)
+    envelope = build_dos_operation_result(
+        target=address,
+        adapter="hci0",
+        operation="dos_pair_flood",
+        title="Pairing Flood",
+        protocol="Pairing",
+        raw_result=result,
+        started_at=started_at,
+    )
+    log_command("dos_pair_flood", envelope, category="dos", target=address)
 
 
 @dos.command("name-flood")
@@ -5246,8 +5258,11 @@ def dos_name_flood(address, length):
     if not address:
         return
     from blue_tap.attack.dos import PairingFlood
+    from blue_tap.attack.dos_framework import build_dos_operation_result
+    from blue_tap.core.result_schema import now_iso
     flood = PairingFlood(address)
     info(f"Setting adapter name to {length} bytes and attempting pairing...")
+    started_at = now_iso()
     result = flood.long_name_flood(length)
     status = result.get("status", "unknown")
     if status == "paired":
@@ -5255,7 +5270,16 @@ def dos_name_flood(address, length):
     else:
         info(f"Long name pairing result: {status}")
     from blue_tap.utils.session import log_command
-    log_command("dos_name_flood", result, category="dos", target=address)
+    envelope = build_dos_operation_result(
+        target=address,
+        adapter="hci0",
+        operation="dos_name_flood",
+        title="Long Name Flood",
+        protocol="Pairing",
+        raw_result=result,
+        started_at=started_at,
+    )
+    log_command("dos_name_flood", envelope, category="dos", target=address)
 
 
 @dos.command("rate-test")
@@ -5268,7 +5292,11 @@ def dos_rate_test(address, attempts, pair_timeout):
     if not address:
         return
     from blue_tap.attack.dos import PairingFlood
+    from blue_tap.attack.dos_framework import build_dos_operation_result
+    from blue_tap.core.result_schema import now_iso
+    from blue_tap.utils.session import log_command
     flood = PairingFlood(address)
+    started_at = now_iso()
     result = flood.detect_rate_limiting(attempts=attempts, pair_timeout=pair_timeout)
 
     if result.get("rate_limited"):
@@ -5277,6 +5305,16 @@ def dos_rate_test(address, attempts, pair_timeout):
         success("No rate limiting detected")
     for k, v in result.items():
         info(f"  {k}: {v}")
+    envelope = build_dos_operation_result(
+        target=address,
+        adapter="hci0",
+        operation="dos_rate_test",
+        title="Pairing Rate Limit Test",
+        protocol="Pairing",
+        raw_result=result,
+        started_at=started_at,
+    )
+    log_command("dos_rate_test", envelope, category="dos", target=address)
 
 
 @dos.command("pin-brute")
@@ -5289,13 +5327,27 @@ def dos_pin_brute(address, start, end, delay):
     address = resolve_address(address)
     if not address:
         return
+    from blue_tap.attack.dos_framework import build_dos_operation_result
+    from blue_tap.core.result_schema import now_iso
     from blue_tap.attack.pin_brute import PINBruteForce
+    from blue_tap.utils.session import log_command
     bf = PINBruteForce(address)
+    started_at = now_iso()
     pin = bf.brute_force(start, end, delay)
     if pin:
         success(f"PIN found: {pin}")
     else:
         warning("PIN not found in range")
+    envelope = build_dos_operation_result(
+        target=address,
+        adapter="hci0",
+        operation="dos_pin_brute",
+        title="Legacy PIN Brute Force",
+        protocol="Pairing",
+        raw_result={"result": "success" if pin else "failed", "notes": f"pin_found={pin or ''}"},
+        started_at=started_at,
+    )
+    log_command("dos_pin_brute", envelope, category="dos", target=address)
 
 
 @dos.command("l2ping-flood")
@@ -5309,16 +5361,28 @@ def dos_l2ping_flood(address, count, size, no_flood):
     if not address:
         return
     from blue_tap.attack.dos import PairingFlood
+    from blue_tap.attack.dos_framework import build_dos_operation_result
+    from blue_tap.core.result_schema import now_iso
     flood = PairingFlood(address)
     mode = "flood" if not no_flood else "normal"
     info(f"Starting L2CAP ping flood: {count} pings, {size}B payload, {mode} mode")
+    started_at = now_iso()
     result = flood.l2ping_flood(count=count, size=size, flood=not no_flood)
     if result.get("error"):
         error(f"L2ping failed: {result['error']}")
     else:
         success(f"L2ping flood complete")
     from blue_tap.utils.session import log_command
-    log_command("dos_l2ping_flood", result, category="dos", target=address)
+    envelope = build_dos_operation_result(
+        target=address,
+        adapter="hci0",
+        operation="dos_l2ping_flood",
+        title="L2Ping Flood",
+        protocol="L2CAP",
+        raw_result=result,
+        started_at=started_at,
+    )
+    log_command("dos_l2ping_flood", envelope, category="dos", target=address)
 
 
 # ---- Protocol-level DoS attacks (L2CAP, SDP, RFCOMM, OBEX, HFP) ----
@@ -5505,8 +5569,12 @@ def dos_lmp(target, method, count, delay, hci):
     target = resolve_address(target)
     if not target:
         return
+    from blue_tap.attack.dos_framework import build_dos_operation_result
+    from blue_tap.core.result_schema import now_iso
     from blue_tap.attack.protocol_dos import LMPDoS
+    from blue_tap.utils.session import log_command
 
+    started_at = now_iso()
     hci_dev = int(hci.replace("hci", "")) if isinstance(hci, str) and hci.startswith("hci") else int(hci)
     hci_str = f"hci{hci_dev}"
     info(f"Launching LMP DoS ({method}) against [bold]{target}[/bold] "
@@ -5577,8 +5645,16 @@ def dos_lmp(target, method, count, delay, hci):
             info(f"LMP DoS [bold]{method}[/bold]: {status} "
                  f"({sent} packets, {errors} errors, {duration}s)")
 
-    from blue_tap.utils.session import log_command
-    log_command("dos_lmp", result, category="dos", target=target)
+    envelope = build_dos_operation_result(
+        target=target,
+        adapter=hci_str,
+        operation="dos_lmp",
+        title="LMP DoS",
+        protocol="LMP",
+        raw_result=result,
+        started_at=started_at,
+    )
+    log_command("dos_lmp", envelope, category="dos", target=target)
 
 
 def _show_dos_result(result: dict) -> None:
