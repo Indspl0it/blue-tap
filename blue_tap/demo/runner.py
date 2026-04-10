@@ -452,34 +452,115 @@ def run_demo(output_dir: str = "demo_output"):
             _delay(0.5, 0.2)
 
         from blue_tap.report.generator import ReportGenerator
+        from blue_tap.demo.report_data import (
+            build_demo_dos_result,
+            build_demo_fingerprint_result,
+            build_demo_fuzz_result,
+            build_demo_recon_result,
+            build_demo_scan_result,
+            build_demo_vuln_result,
+        )
 
         report = ReportGenerator()
 
-        # Feed all mock data into the report generator
-        report.add_scan_results(M.SCAN_DEVICES)
-        report.add_fingerprint(M.FINGERPRINT)
-        report.add_vuln_findings(M.VULN_FINDINGS)
-        report.add_recon_results(M.SDP_SERVICES)
+        # Feed standardized demo envelopes into the report generator
+        report.add_run_envelope(
+            build_demo_scan_result(
+                devices=M.SCAN_DEVICES,
+                adapter=M.IVI_HCI,
+                duration_requested=15,
+            )
+        )
+        report.add_run_envelope(
+            build_demo_fingerprint_result(
+                target=M.IVI_ADDRESS,
+                adapter=M.IVI_HCI,
+                fingerprint=M.FINGERPRINT,
+            )
+        )
+        report.add_run_envelope(
+            build_demo_vuln_result(
+                target=M.IVI_ADDRESS,
+                adapter=M.IVI_HCI,
+                findings=M.VULN_FINDINGS,
+            )
+        )
+        report.add_run_envelope(
+            build_demo_recon_result(
+                target=M.IVI_ADDRESS,
+                adapter=M.IVI_HCI,
+                entries=M.SDP_SERVICES,
+            )
+        )
 
-        report.add_attack_results({
-            "pairing_attacks": results["phases"].get("pairing_attacks", {}),
-            "exploitation": M.HIJACK_RESULT,
-        })
+        from blue_tap.core.attack_framework import build_attack_result
+        from blue_tap.core.data_framework import build_data_result
 
-        report.add_pbap_results({
-            "contacts": M.PBAP_CONTACTS,
-            "source": f"PBAP dump from {M.IVI_NAME}",
-        })
+        report.add_run_envelope(
+            build_attack_result(
+                target=M.IVI_ADDRESS,
+                adapter=M.IVI_HCI,
+                operation="demo_attack_phases",
+                title="Demo Attack Phases",
+                protocol="multi",
+                module_data={
+                    "results": {
+                        "pairing_attacks": results["phases"].get("pairing_attacks", {}),
+                        "exploitation": M.HIJACK_RESULT,
+                    }
+                },
+                summary_data={"demo": True},
+                observations=["source=demo"],
+            )
+        )
 
-        report.add_map_results({
-            "messages": M.MAP_MESSAGES,
-            "source": f"MAP dump from {M.IVI_NAME}",
-        })
+        report.add_run_envelope(
+            build_data_result(
+                target=M.IVI_ADDRESS,
+                adapter=M.IVI_HCI,
+                family="pbap",
+                operation="demo_pbap_dump",
+                title="Demo PBAP Dump",
+                module_data={
+                    "results": {"contacts": M.PBAP_CONTACTS, "source": f"PBAP dump from {M.IVI_NAME}"},
+                    "output_dir": "demo_pbap",
+                },
+                summary_data={"demo": True},
+                observations=["source=demo"],
+            )
+        )
 
-        report.add_fuzz_results(M.FUZZ_RESULTS)
+        report.add_run_envelope(
+            build_data_result(
+                target=M.IVI_ADDRESS,
+                adapter=M.IVI_HCI,
+                family="map",
+                operation="demo_map_dump",
+                title="Demo MAP Dump",
+                module_data={
+                    "results": {"messages": M.MAP_MESSAGES, "source": f"MAP dump from {M.IVI_NAME}"},
+                    "output_dir": "demo_map",
+                },
+                summary_data={"demo": True},
+                observations=["source=demo"],
+            )
+        )
 
-        for dos_r in M.DOS_RESULTS:
-            report.add_dos_results({"data": dos_r})
+        report.add_run_envelope(
+            build_demo_fuzz_result(
+                target=M.IVI_ADDRESS,
+                adapter=M.IVI_HCI,
+                fuzz_results=M.FUZZ_RESULTS,
+            )
+        )
+
+        report.add_run_envelope(
+            build_demo_dos_result(
+                target=M.IVI_ADDRESS,
+                adapter=M.IVI_HCI,
+                checks=M.DOS_RESULTS,
+            )
+        )
 
         report.add_lmp_captures(M.LMP_CAPTURES)
 
