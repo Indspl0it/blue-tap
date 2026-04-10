@@ -30,6 +30,11 @@ import time
 
 from blue_tap.utils.bt_helpers import normalize_mac
 from blue_tap.utils.output import error, info, success, warning
+from blue_tap.core.result_schema import (
+    EXECUTION_COMPLETED, EXECUTION_FAILED, EXECUTION_ERROR,
+    build_run_envelope, make_execution, make_evidence, make_run_id, now_iso,
+)
+from blue_tap.core.cli_events import emit_cli_event
 
 
 class EncryptionDowngradeAttack:
@@ -48,6 +53,18 @@ class EncryptionDowngradeAttack:
         self.hci = hci
         self._hci_idx = int(hci.replace("hci", "")) if hci.startswith("hci") else 0
         self._darkfirmware_available: bool | None = None
+        self.run_id = make_run_id("enc-downgrade")
+        self._started_at = now_iso()
+        self._cli_events: list[dict] = []
+        self._executions: list[dict] = []
+
+    def _emit(self, event_type: str, message: str, **details):
+        evt = emit_cli_event(
+            event_type=event_type, module="attack", run_id=self.run_id,
+            target=self.target, adapter=self.hci, message=message,
+            details=details,
+        )
+        self._cli_events.append(evt)
 
     def _check_darkfirmware(self) -> bool:
         """Verify DarkFirmware is loaded and ready for LMP injection."""
@@ -141,8 +158,24 @@ class EncryptionDowngradeAttack:
         info("=== Encryption Downgrade: Disable Encryption ===")
         info(f"Target: {self.target}, Adapter: {self.hci}")
 
+        phase_start = now_iso()
+        self._emit("phase_started", "disable_encryption phase started")
+
         if not self._check_darkfirmware():
             error("DarkFirmware not available — cannot inject LMP PDUs")
+            self._executions.append(make_execution(
+                kind="check",
+                id="disable_encryption",
+                title="Disable Encryption",
+                module="attack",
+                protocol="BR/EDR",
+                execution_status=EXECUTION_FAILED,
+                module_outcome="failed",
+                started_at=phase_start,
+                completed_at=now_iso(),
+                tags=["encryption", "downgrade", "disable"],
+                evidence=make_evidence(summary="DarkFirmware not available", confidence="high"),
+            ))
             return {"success": False, "error": "darkfirmware_unavailable"}
 
         info("Sending LMP_ENCRYPTION_MODE_REQ(mode=0) to disable encryption")
@@ -169,6 +202,19 @@ class EncryptionDowngradeAttack:
         else:
             warning("No response received — target may have dropped the link")
 
+        self._executions.append(make_execution(
+            kind="check",
+            id="disable_encryption",
+            title="Disable Encryption",
+            module="attack",
+            protocol="BR/EDR",
+            execution_status=EXECUTION_COMPLETED,
+            module_outcome="confirmed" if result.get("vulnerable") else "success",
+            started_at=phase_start,
+            completed_at=now_iso(),
+            tags=["encryption", "downgrade", "disable"],
+            evidence=make_evidence(summary="LMP encryption mode request result", confidence="high", module_evidence=result),
+        ))
         return result
 
     def toggle_encryption(self, rounds: int = 5) -> dict:
@@ -193,8 +239,24 @@ class EncryptionDowngradeAttack:
         info("=== Encryption Downgrade: Toggle Encryption ===")
         info(f"Target: {self.target}, Rounds: {rounds}")
 
+        phase_start = now_iso()
+        self._emit("phase_started", "toggle_encryption phase started")
+
         if not self._check_darkfirmware():
             error("DarkFirmware not available — cannot inject LMP PDUs")
+            self._executions.append(make_execution(
+                kind="check",
+                id="toggle_encryption",
+                title="Toggle Encryption",
+                module="attack",
+                protocol="BR/EDR",
+                execution_status=EXECUTION_FAILED,
+                module_outcome="failed",
+                started_at=phase_start,
+                completed_at=now_iso(),
+                tags=["encryption", "downgrade", "toggle"],
+                evidence=make_evidence(summary="DarkFirmware not available", confidence="high"),
+            ))
             return {"success": False, "error": "darkfirmware_unavailable"}
 
         packets: list[bytes] = []
@@ -237,6 +299,19 @@ class EncryptionDowngradeAttack:
             success(f"Target accepted {accepted_count} PDU(s) during toggle sequence")
         info(f"Toggle results: {accepted_count} accepted, {rejected_count} rejected")
 
+        self._executions.append(make_execution(
+            kind="check",
+            id="toggle_encryption",
+            title="Toggle Encryption",
+            module="attack",
+            protocol="BR/EDR",
+            execution_status=EXECUTION_COMPLETED,
+            module_outcome="confirmed" if accepted_count > 0 else "success",
+            started_at=phase_start,
+            completed_at=now_iso(),
+            tags=["encryption", "downgrade", "toggle"],
+            evidence=make_evidence(summary="LMP stop/start toggle result", confidence="high", module_evidence=result),
+        ))
         return result
 
     def force_legacy(self) -> dict:
@@ -263,8 +338,24 @@ class EncryptionDowngradeAttack:
         info("=== Encryption Downgrade: Force Legacy (Reject SC) ===")
         info(f"Target: {self.target}")
 
+        phase_start = now_iso()
+        self._emit("phase_started", "force_legacy phase started")
+
         if not self._check_darkfirmware():
             error("DarkFirmware not available — cannot inject LMP PDUs")
+            self._executions.append(make_execution(
+                kind="check",
+                id="force_legacy",
+                title="Force Legacy Secure Connections",
+                module="attack",
+                protocol="BR/EDR",
+                execution_status=EXECUTION_FAILED,
+                module_outcome="failed",
+                started_at=phase_start,
+                completed_at=now_iso(),
+                tags=["encryption", "downgrade", "legacy", "sc-reject"],
+                evidence=make_evidence(summary="DarkFirmware not available", confidence="high"),
+            ))
             return {"success": False, "error": "darkfirmware_unavailable"}
 
         # Feature mask with Secure Connections bit cleared
@@ -306,7 +397,44 @@ class EncryptionDowngradeAttack:
         else:
             warning("No responses — target may have dropped the link or ignored PDUs")
 
+        self._executions.append(make_execution(
+            kind="check",
+            id="force_legacy",
+            title="Force Legacy Secure Connections",
+            module="attack",
+            protocol="BR/EDR",
+            execution_status=EXECUTION_COMPLETED,
+            module_outcome="confirmed" if result.get("vulnerable") else "success",
+            started_at=phase_start,
+            completed_at=now_iso(),
+            tags=["encryption", "downgrade", "legacy", "sc-reject"],
+            evidence=make_evidence(summary="LMP legacy enforcement sequence result", confidence="high", module_evidence=result),
+        ))
         return result
+
+    def build_envelope(self) -> dict:
+        capability_limitations = [
+            "Requires DarkFirmware on RTL8761B and an active ACL connection to inject BR/EDR LMP downgrade sequences."
+        ]
+        return build_run_envelope(
+            schema="blue_tap.attack.result",
+            module="attack",
+            target=self.target,
+            adapter=self.hci,
+            operator_context={"command": "encryption-downgrade"},
+            summary={
+                "operation": "encryption_downgrade",
+                "vulnerable_methods": [
+                    e["id"] for e in self._executions
+                    if e.get("module_outcome") in ("confirmed", "success")
+                ],
+                "capability_limitations": capability_limitations,
+            },
+            executions=self._executions,
+            module_data={"cli_events": self._cli_events, "capability_limitations": capability_limitations},
+            started_at=self._started_at,
+            run_id=self.run_id,
+        )
 
     def execute(self, method: str = "all") -> dict:
         """Run all or specific downgrade attack methods.
@@ -329,8 +457,24 @@ class EncryptionDowngradeAttack:
         info(f"=== Encryption Downgrade Attack: method={method} ===")
         info(f"Target: {self.target}, Adapter: {self.hci}")
 
+        self._emit("run_started", "encryption_downgrade run started", method=method)
+
         if not self._check_darkfirmware():
             error("DarkFirmware not available — encryption downgrade requires LMP injection")
+            self._executions.append(make_execution(
+                kind="check",
+                id="execute",
+                title="Encryption Downgrade Attack",
+                module="attack",
+                protocol="BR/EDR",
+                execution_status=EXECUTION_FAILED,
+                module_outcome="failed",
+                started_at=self._started_at,
+                completed_at=now_iso(),
+                tags=["encryption", "downgrade"],
+                evidence=make_evidence(summary="DarkFirmware not available", confidence="high"),
+            ))
+            self._emit("run_completed", "Encryption downgrade skipped: DarkFirmware unavailable")
             return {"success": False, "error": "darkfirmware_unavailable"}
 
         results: dict = {"target": self.target, "methods": {}}
@@ -360,4 +504,5 @@ class EncryptionDowngradeAttack:
         else:
             info("No encryption downgrade methods succeeded against this target")
 
+        self._emit("run_completed", "encryption_downgrade run completed", vulnerable_methods=vulnerable_methods)
         return results
