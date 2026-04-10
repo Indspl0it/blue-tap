@@ -1,0 +1,5 @@
+AT+CPBR=1,3
++CPBR: 1,"+1234567890",145,"Alice Example"
++CPBR: 2,"5551234",129,"Bob Example"
+
+OK

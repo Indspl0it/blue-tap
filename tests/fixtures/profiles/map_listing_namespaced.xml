@@ -1,0 +1,5 @@
+<?xml version="1.0"?>
+<map:MAP-msg-listing xmlns:map="urn:bluetooth:map" version="1.0">
+  <map:msg handle="200001" subject="hi" sender_name="Alice" recipient_name="Bob" />
+  <map:msg handle="200002" subject="hello" sender_addressing="+1234" />
+</map:MAP-msg-listing>

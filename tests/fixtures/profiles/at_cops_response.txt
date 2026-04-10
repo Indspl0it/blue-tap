@@ -1,0 +1,4 @@
+AT+COPS?
++COPS: 0,0,"ExampleTel",7
+
+OK
