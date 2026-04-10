@@ -58,6 +58,13 @@ _PROTOCOL_SHORT_MAP: dict[str, list[str]] = {
 }
 
 
+def _current_adapter() -> str:
+    session = get_session()
+    if session is None:
+        return ""
+    return str(session.metadata.get("adapter", "") or "")
+
+
 def _expand_protocol_names(short_names: list[str]) -> list[str]:
     """Expand short CLI protocol names to corpus generator keys."""
     expanded = []
@@ -97,8 +104,11 @@ def _run_fuzz_cases(
         Summary dict with ``sent``, ``crashes``, ``errors``,
         ``elapsed``, and ``crash_db_path`` keys.
     """
+    from blue_tap.core.result_schema import now_iso
     from blue_tap.fuzz.crash_db import CrashDB, CrashType, CrashSeverity
     from blue_tap.fuzz.corpus import Corpus, generate_full_corpus
+
+    started_at = now_iso()
 
     # Ensure full corpus is generated (visible progress to user)
     if not session_dir:
@@ -129,12 +139,14 @@ def _run_fuzz_cases(
             error(f"Failed to connect to {style_target(address)} for {protocol}")
             db.close()
             return {"sent": 0, "crashes": 0, "errors": 1, "elapsed": 0.0,
-                    "crash_db_path": crash_db_path}
+                    "crash_db_path": crash_db_path, "total_cases": len(cases),
+                    "started_at": started_at, "completed_at": now_iso()}
     except Exception as exc:
         error(f"Connection error: {exc}")
         db.close()
         return {"sent": 0, "crashes": 0, "errors": 1, "elapsed": 0.0,
-                "crash_db_path": crash_db_path}
+                "crash_db_path": crash_db_path, "total_cases": len(cases),
+                "started_at": started_at, "completed_at": now_iso()}
 
     total = len(cases)
 
@@ -250,6 +262,9 @@ def _run_fuzz_cases(
         "errors": errors,
         "elapsed": elapsed,
         "crash_db_path": crash_db_path,
+        "total_cases": total,
+        "started_at": started_at,
+        "completed_at": now_iso(),
     }
 
 
@@ -269,7 +284,23 @@ def _show_fuzz_summary(protocol: str, address: str, result: dict) -> None:
     summary_panel(f"Fuzz {protocol.upper()} Results", items, style=style)
 
     # Log to session
-    log_command(f"fuzz_{protocol}", result, category="fuzz", target=address)
+    from blue_tap.core.fuzz_framework import build_fuzz_result
+
+    session = get_session()
+    adapter = ""
+    if session is not None:
+        adapter = str(session.metadata.get("adapter", "") or "")
+
+    envelope = build_fuzz_result(
+        target=address,
+        adapter=adapter,
+        command=f"fuzz_{protocol}",
+        protocol=protocol,
+        result=result,
+        started_at=result.get("started_at"),
+        completed_at=result.get("completed_at"),
+    )
+    log_command(f"fuzz_{protocol}", envelope, category="fuzz", target=address)
 
 
 # ===========================================================================
@@ -1031,14 +1062,37 @@ def register_extra_commands(fuzz_group):
         style = "red" if result.get("errors", 0) > 0 else "green"
         summary_panel("Replay Results", replay_items, style=style)
 
-        log_command("fuzz_replay", {
-            "capture_file": capture_file,
-            "target": target,
-            "protocol": protocol,
-            "mutate": mutate,
-            "sent": result.get("sent", 0),
-            "errors": result.get("errors", 0),
-        }, category="fuzz", target=target)
+        from blue_tap.core.fuzz_framework import build_fuzz_operation_result
+
+        envelope = build_fuzz_operation_result(
+            target=target,
+            adapter=_current_adapter(),
+            operation="fuzz_replay",
+            title="Replay Fuzz Operation",
+            protocol=protocol or "",
+            summary_data={
+                "operation": "fuzz_replay",
+                "protocol": protocol or "",
+                "sent": result.get("sent", 0),
+                "errors": result.get("errors", 0),
+                "crashes": 0,
+            },
+            observations=[
+                f"capture_file={capture_file}",
+                f"mutate={mutate}",
+                f"protocol={protocol or 'all'}",
+                f"sent={result.get('sent', 0)}",
+                f"errors={result.get('errors', 0)}",
+            ],
+            module_data={
+                "capture_file": capture_file,
+                "target": target,
+                "protocol": protocol,
+                "mutate": mutate,
+                "result": dict(result),
+            },
+        )
+        log_command("fuzz_replay", envelope, category="fuzz", target=target)
 
     # -------------------------------------------------------------------
     # blue-tap fuzz minimize
@@ -1212,15 +1266,39 @@ def register_extra_commands(fuzz_group):
                 "Tests performed": str(result.tests_performed),
             }, style="red")
 
-        log_command("fuzz_minimize", {
-            "crash_id": crash_id,
-            "strategy": strategy,
-            "success": result.success,
-            "original_size": result.original_size,
-            "minimized_size": result.minimized_size,
-            "reduction_percent": result.reduction_percent,
-            "tests_performed": result.tests_performed,
-        }, category="fuzz", target=target)
+        from blue_tap.core.fuzz_framework import build_fuzz_operation_result
+
+        envelope = build_fuzz_operation_result(
+            target=target,
+            adapter=_current_adapter(),
+            operation="fuzz_minimize",
+            title="Crash Payload Minimization",
+            protocol=protocol,
+            module_outcome="completed" if result.success else "failed",
+            summary_data={
+                "operation": "fuzz_minimize",
+                "protocol": protocol,
+                "sent": 0,
+                "crashes": 0,
+                "errors": 0 if result.success else 1,
+            },
+            observations=[
+                f"crash_id={crash_id}",
+                f"strategy={strategy}",
+                f"success={result.success}",
+                f"tests_performed={result.tests_performed}",
+            ],
+            module_data={
+                "crash_id": crash_id,
+                "strategy": strategy,
+                "success": result.success,
+                "original_size": result.original_size,
+                "minimized_size": result.minimized_size,
+                "reduction_percent": result.reduction_percent,
+                "tests_performed": result.tests_performed,
+            },
+        )
+        log_command("fuzz_minimize", envelope, category="fuzz", target=target)
 
     # -------------------------------------------------------------------
     # blue-tap fuzz l2cap-sig
@@ -1399,12 +1477,33 @@ def register_extra_commands(fuzz_group):
             console.print()
 
         success(f"Generated {total_seeds} seeds in {corpus_dir}")
-        log_command("fuzz_corpus_generate", {
-            "protocols": protocols,
-            "total_seeds": total_seeds,
-            "total_bytes": total_bytes,
-            "corpus_dir": corpus_dir,
-        }, category="fuzz")
+        from blue_tap.core.fuzz_framework import build_fuzz_operation_result
+
+        envelope = build_fuzz_operation_result(
+            target="",
+            adapter=_current_adapter(),
+            operation="fuzz_corpus_generate",
+            title="Fuzz Corpus Generation",
+            summary_data={
+                "operation": "fuzz_corpus_generate",
+                "protocol": "multi",
+                "sent": 0,
+                "crashes": 0,
+                "errors": 0,
+            },
+            observations=[
+                f"protocol_count={len(protocols)}",
+                f"total_seeds={total_seeds}",
+                f"total_bytes={total_bytes}",
+            ],
+            module_data={
+                "protocols": protocols,
+                "total_seeds": total_seeds,
+                "total_bytes": total_bytes,
+                "corpus_dir": corpus_dir,
+            },
+        )
+        log_command("fuzz_corpus_generate", envelope, category="fuzz")
 
     # -------------------------------------------------------------------
     # blue-tap fuzz corpus list
@@ -1596,12 +1695,33 @@ def register_extra_commands(fuzz_group):
         else:
             info("No duplicates found. Corpus is already minimal.")
 
-        log_command("fuzz_corpus_minimize", {
-            "before": before_count,
-            "after": corpus.seed_count(),
-            "removed": removed,
-            "corpus_dir": corpus_dir,
-        }, category="fuzz")
+        from blue_tap.core.fuzz_framework import build_fuzz_operation_result
+
+        envelope = build_fuzz_operation_result(
+            target="",
+            adapter=_current_adapter(),
+            operation="fuzz_corpus_minimize",
+            title="Fuzz Corpus Minimization",
+            summary_data={
+                "operation": "fuzz_corpus_minimize",
+                "protocol": "multi",
+                "sent": 0,
+                "crashes": 0,
+                "errors": 0,
+            },
+            observations=[
+                f"before={before_count}",
+                f"after={corpus.seed_count()}",
+                f"removed={removed}",
+            ],
+            module_data={
+                "before": before_count,
+                "after": corpus.seed_count(),
+                "removed": removed,
+                "corpus_dir": corpus_dir,
+            },
+        )
+        log_command("fuzz_corpus_minimize", envelope, category="fuzz")
 
 
 # ---------------------------------------------------------------------------

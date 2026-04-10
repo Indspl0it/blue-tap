@@ -50,6 +50,7 @@ from blue_tap.utils.output import (
 )
 from blue_tap.utils.bt_helpers import run_cmd
 from blue_tap.utils.session import log_command
+from blue_tap.core.fuzz_framework import build_fuzz_campaign_result, campaign_started_at_from_stats
 
 # ---------------------------------------------------------------------------
 # Conditional imports for modules being built in parallel by other agents.
@@ -1500,13 +1501,21 @@ class FuzzCampaign:
         # Print summary
         self._print_final_summary()
 
-        # Log to session system
-        log_command(
-            "fuzz_campaign",
-            self._build_summary(),
-            category="fuzz",
+        # Log to session using the standardized fuzz result envelope.
+        campaign_summary = self._build_summary()
+        try:
+            crashes = self.crash_db.get_crashes()
+        except Exception:
+            crashes = []
+        envelope = build_fuzz_campaign_result(
             target=self.target,
+            adapter="session",
+            campaign_summary=campaign_summary,
+            crashes=crashes,
+            session_fuzz_dir=self._fuzz_dir,
+            started_at=campaign_started_at_from_stats(self.stats.start_time),
         )
+        log_command("fuzz_campaign", envelope, category="fuzz", target=self.target)
 
     def _build_summary(self) -> dict:
         """Build a summary dict of the campaign for serialization."""
