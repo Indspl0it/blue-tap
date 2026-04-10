@@ -13,12 +13,17 @@ import shutil
 from datetime import datetime
 
 from blue_tap.attack.cve_framework import summarize_findings
+from blue_tap.report.adapters import REPORT_ADAPTERS
+from blue_tap.report.renderers import render_sections
 from blue_tap.utils.output import info, success, error
 
 try:
     from blue_tap import __version__
 except ImportError:
     __version__ = "unknown"
+
+
+_REPORT_ADAPTER_MAP = {adapter.module: adapter for adapter in REPORT_ADAPTERS}
 
 
 # ---------------------------------------------------------------------------
@@ -182,6 +187,7 @@ def _display_vuln_findings(vuln_findings: list[dict]) -> list[dict]:
     return [f for f in vuln_findings if f.get("status") != "not_applicable"]
 
 
+
 # ---------------------------------------------------------------------------
 # HTML Template
 # ---------------------------------------------------------------------------
@@ -286,6 +292,35 @@ tr:hover td { background: #f8fafc; }
 .evidence-list li { padding: 4px 0; color: #475569; }
 .footer { text-align: center; color: #94a3b8; font-size: 0.8em; padding: 20px 36px;
     border-top: 1px solid #e2e8f0; background: #f8fafc; }
+.card-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; margin: 14px 0; }
+.card { border: 1px solid #e2e8f0; border-radius: 10px; padding: 16px 20px; background: #fff; }
+.card-header { margin-bottom: 8px; font-size: 0.95em; }
+.card-details { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; margin: 8px 0; font-size: 0.85em; }
+.card-details dt { color: #64748b; font-weight: 600; }
+.card-details dd { margin: 0; color: #334155; }
+.card-body { color: #475569; font-size: 0.85em; margin: 6px 0 0; }
+.badge { display: inline-block; padding: 2px 10px; border-radius: 9999px; font-size: 0.75em; font-weight: 600;
+    letter-spacing: 0.03em; margin: 2px; }
+.badge-danger { background: #fef2f2; color: #dc2626; border: 1px solid #fecaca; }
+.badge-warning { background: #fffbeb; color: #d97706; border: 1px solid #fde68a; }
+.badge-info { background: #eff6ff; color: #2563eb; border: 1px solid #bfdbfe; }
+.badge-critical { background: #fef2f2; color: #991b1b; border: 1px solid #fca5a5; }
+.badge-pairing { background: #faf5ff; color: #7c3aed; border: 1px solid #ddd6fe; }
+.badge-default { background: #f1f5f9; color: #475569; border: 1px solid #e2e8f0; }
+.badge-group { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
+.status-summary { display: flex; flex-wrap: wrap; gap: 18px; margin: 14px 0; padding: 14px 18px;
+    background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; }
+.status-item { text-align: center; }
+.status-count { display: block; font-size: 1.5em; font-weight: 800; }
+.status-label { display: block; font-size: 0.75em; color: #64748b; text-transform: uppercase; letter-spacing: 0.05em; }
+.timeline { border-left: 3px solid #e2e8f0; margin: 14px 0; padding-left: 18px; }
+.timeline-event { margin: 10px 0; display: flex; gap: 10px; align-items: baseline; }
+.timeline-ts { color: #64748b; font-family: 'JetBrains Mono', monospace; font-size: 0.8em; white-space: nowrap; }
+.timeline-label { font-weight: 600; font-size: 0.85em; }
+.timeline-msg { color: #475569; font-size: 0.85em; }
+.kv-list { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; margin: 10px 0; }
+.kv-list dt { color: #64748b; font-weight: 600; font-size: 0.85em; }
+.kv-list dd { margin: 0; color: #334155; font-size: 0.85em; }
 @media print {
     body { background: #fff; }
     .page-container { box-shadow: none; max-width: 100%; border-radius: 0; margin: 0; }
@@ -325,18 +360,14 @@ class ReportGenerator:
 
     def __init__(self):
         self.scan_results: list[dict] = []
+        self.scan_runs: list[dict] = []
         self.vuln_findings: list[dict] = []
         self.vuln_scan_runs: list[dict] = []
-        self.pbap_results: dict = {}
-        self.map_results: dict = {}
-        self.attack_results: dict = {}
         self.recon_results: list[dict] = []
+        self.fuzz_runs: list[dict] = []
         self.fuzz_results: list = []
         self.dos_results: list = []
         self.dos_runs: list[dict] = []
-        self.fingerprint_results: dict = {}
-        self.audio_captures: list[dict] = []
-        self.other_data: dict = {}
         self.notes: list[str] = []
         # Structured fuzz campaign data
         self._fuzz_campaign_stats: dict = {}
@@ -354,61 +385,128 @@ class ReportGenerator:
         self._fuzz_baselines: dict = {}
         # LMP capture data (Phase 4 sniffer)
         self._lmp_captures: list[dict] = []
+        self._module_report_state: dict[str, dict] = {
+            "scan": {"scan_runs": [], "scan_results": [], "scan_executions": []},
+            "vulnscan": {"vuln_scan_runs": [], "vuln_findings": [], "vuln_executions": []},
+            "attack": {"attack_runs": [], "attack_executions": [], "attack_operations": []},
+            "data": {"data_runs": [], "data_executions": [], "data_operations": []},
+            "audio": {"audio_runs": [], "audio_executions": [], "audio_operations": []},
+            "dos": {"dos_runs": [], "dos_results": [], "dos_executions": []},
+            "fuzz": {"fuzz_runs": [], "campaigns": [], "protocol_runs": [], "operations": [], "crashes": []},
+            "recon": {"recon_runs": [], "recon_results": [], "fingerprints": [], "capture_results": [], "recon_executions": []},
+        }
 
-    # ------------------------------------------------------------------
-    # Data intake (public API — signatures must not change)
-    # ------------------------------------------------------------------
+    def _all_module_executions(self) -> list[dict]:
+        executions: list[dict] = []
+        seen_execution_ids: set[str] = set()
+        for adapter in REPORT_ADAPTERS:
+            section = adapter.build_json_section(self._module_report_state.get(adapter.module, {}))
+            for execution in section.get("executions", []):
+                execution_id = str(execution.get("execution_id", ""))
+                if execution_id and execution_id in seen_execution_ids:
+                    continue
+                if execution_id:
+                    seen_execution_ids.add(execution_id)
+                executions.append(execution)
+        return executions
 
-    def add_scan_results(self, devices: list[dict]):
-        self.scan_results.extend(devices)
+    def _module_json_section(self, module: str) -> dict:
+        return _REPORT_ADAPTER_MAP[module].build_json_section(self._module_report_state.get(module, {}))
 
-    def add_vuln_findings(self, findings: list[dict]):
-        if isinstance(findings, dict):
-            self.add_vuln_scan_result(findings)
-            return
-        self.vuln_findings.extend(findings)
+    def _data_operations(self, family: str | None = None) -> list[dict]:
+        operations = list(self._module_report_state.get("data", {}).get("data_operations", []))
+        if family is None:
+            return operations
+        return [operation for operation in operations if operation.get("family") == family]
 
-    def add_vuln_scan_result(self, result: dict):
-        """Add a structured vulnscan result envelope."""
-        if result.get("schema") == "blue_tap.vulnscan.result":
-            self.vuln_scan_runs.append(result)
-            self.vuln_findings.extend(result.get("findings", []))
-            return
-        findings = result.get("findings")
-        if isinstance(findings, list):
-            self.vuln_findings.extend(findings)
+    def _ingest_standardized_envelope(self, envelope: dict) -> bool:
+        for adapter in REPORT_ADAPTERS:
+            if adapter.accepts(envelope):
+                adapter.ingest(envelope, self._module_report_state.setdefault(adapter.module, {}))
+                return True
+        return False
+
+    def add_run_envelope(self, envelope: dict) -> bool:
+        """Ingest a standardized module run envelope."""
+        if not isinstance(envelope, dict):
+            return False
+        schema = str(envelope.get("schema", ""))
+        if not schema.startswith("blue_tap.") or not schema.endswith(".result"):
+            return False
+
+        module = envelope.get("module")
+        if module == "scan":
+            self.scan_runs.append(envelope)
+            self.scan_results.extend(envelope.get("module_data", {}).get("devices", []))
+        elif module == "vulnscan":
+            self.vuln_scan_runs.append(envelope)
+            self.vuln_findings.extend(envelope.get("module_data", {}).get("findings", []))
+        elif module == "attack":
+            pass
+        elif module == "data":
+            pass
+        elif module == "audio":
+            pass
+        elif module == "dos":
+            self.dos_runs.append(envelope)
+            self.dos_results.extend(envelope.get("module_data", {}).get("checks", []))
+        elif module == "fuzz":
+            self.fuzz_runs.append(envelope)
+            module_data = envelope.get("module_data", {})
+            run_type = module_data.get("run_type")
+            if run_type == "campaign":
+                campaign_stats = module_data.get("campaign_stats", {})
+                if isinstance(campaign_stats, dict):
+                    self._fuzz_campaign_stats = campaign_stats
+                    self._fuzz_state_coverage = campaign_stats.get("state_coverage", {}) or {}
+                    self._fuzz_field_weights = campaign_stats.get("field_weights", {}) or {}
+                    self._fuzz_health_events = (campaign_stats.get("health_monitor", {}) or {}).get("events", []) or []
+                crashes = module_data.get("crashes", [])
+                if isinstance(crashes, list):
+                    self._fuzz_crashes = crashes
+                fuzz_dir = module_data.get("session_fuzz_dir")
+                if isinstance(fuzz_dir, str) and fuzz_dir:
+                    self._fuzz_evidence_dir = fuzz_dir
+            elif run_type == "single_protocol_run":
+                result = module_data.get("result", {})
+                if isinstance(result, dict):
+                    self.fuzz_results.append(
+                        {
+                            "command": module_data.get("command", ""),
+                            "protocol": module_data.get("protocol", ""),
+                            **result,
+                        }
+                    )
+            else:
+                self.fuzz_results.append(module_data or envelope)
+        elif module == "recon":
+            module_data = envelope.get("module_data", {})
+            entries = module_data.get("entries", [])
+            if isinstance(entries, list):
+                self.recon_results.extend(entries)
         else:
-            self.vuln_findings.append(result)
+            return False
 
-    def add_pbap_results(self, data: dict):
-        self.pbap_results.update(data)
+        self._ingest_standardized_envelope(envelope)
+        return True
 
-    def add_map_results(self, messages: dict):
-        self.map_results.update(messages)
-
-    def add_attack_results(self, results: dict):
-        self.attack_results.update(results)
-
-    def add_recon_results(self, data: list[dict]):
-        self.recon_results.extend(data)
+    # ------------------------------------------------------------------
+    # Data intake
+    # ------------------------------------------------------------------
 
     def add_fuzz_results(self, data: dict):
+        if isinstance(data, dict) and self.add_run_envelope(data):
+            return
+        # TODO(standardization): Remove this legacy fuzz dict intake after
+        # fuzz CLI commands log standardized run envelopes consistently.
         self.fuzz_results.append(data)
 
     def add_dos_results(self, data: dict):
-        if isinstance(data, dict) and data.get("schema") == "blue_tap.dos.result":
-            self.dos_runs.append(data)
-            self.dos_results.extend(data.get("checks", []))
+        if isinstance(data, dict) and self.add_run_envelope(data):
             return
+        # TODO(standardization): Remove this legacy DoS intake once demo/auto and
+        # any remaining direct callers stop passing ad hoc DoS result dicts.
         self.dos_results.append(data)
-
-    def add_fingerprint(self, data: dict):
-        self.fingerprint_results.update(data)
-
-    def add_audio_capture(self, filepath: str, duration: float = 0, description: str = ""):
-        self.audio_captures.append({
-            "file": filepath, "duration": duration, "description": description,
-        })
 
     def add_note(self, note: str):
         self.notes.append(note)
@@ -447,6 +545,10 @@ class ReportGenerator:
 
     def load_fuzz_from_session(self, session_dir: str) -> None:
         """Auto-load fuzzing data from a session's fuzz/ subdirectory."""
+        # TODO(standardization): Keep this as artifact hydration for standardized
+        # fuzz envelopes, not as the primary fuzz report model. Once campaign and
+        # crash-management commands emit complete fuzz envelopes, this loader
+        # should enrich those envelopes rather than acting as a parallel intake path.
         fuzz_dir = os.path.join(session_dir, "fuzz")
         if not os.path.isdir(fuzz_dir):
             return
@@ -686,71 +788,63 @@ class ReportGenerator:
     # ------------------------------------------------------------------
 
     def load_from_directory(self, dump_dir: str):
-        """Load all available data from a Blue-Tap output directory."""
+        """Load standardized report data from a Blue-Tap directory."""
         if not os.path.isdir(dump_dir):
             error(f"Directory not found: {dump_dir}")
             return
-
-        results_file = os.path.join(dump_dir, "attack_results.json")
-        if os.path.exists(results_file):
-            try:
-                with open(results_file) as f:
-                    self.attack_results = json.load(f)
-                info(f"Loaded attack results from {results_file}")
-            except (json.JSONDecodeError, OSError) as exc:
-                error(f"Could not load attack_results.json: {exc}")
+        processed_json_paths: set[str] = set()
 
         fuzz_dir = os.path.join(dump_dir, "fuzz")
         if os.path.isdir(fuzz_dir):
             self.load_fuzz_from_session(dump_dir)
 
+        session_meta_path = os.path.join(dump_dir, "session.json")
+        if os.path.exists(session_meta_path):
+            try:
+                with open(session_meta_path) as f:
+                    metadata = json.load(f)
+                if isinstance(metadata, dict):
+                    self.add_session_metadata(metadata)
+                    for cmd_entry in metadata.get("commands", []):
+                        if not isinstance(cmd_entry, dict):
+                            continue
+                        entry_file = cmd_entry.get("file")
+                        if not entry_file:
+                            continue
+                        entry_path = os.path.join(dump_dir, str(entry_file))
+                        if not os.path.exists(entry_path):
+                            continue
+                        processed_json_paths.add(os.path.abspath(entry_path))
+                        try:
+                            with open(entry_path) as f:
+                                entry = json.load(f)
+                        except (json.JSONDecodeError, OSError):
+                            continue
+                        if isinstance(entry, dict):
+                            self.add_run_envelope(entry.get("data", {}))
+                info(f"Loaded standardized session data from {dump_dir}")
+            except (json.JSONDecodeError, OSError) as exc:
+                warning(f"Could not load session.json from {dump_dir}: {exc}")
+
         for root, _dirs, files in os.walk(dump_dir):
             for fname in files:
                 fpath = os.path.join(root, fname)
                 rel = os.path.relpath(fpath, dump_dir)
-                rel_lower = rel.lower()
-
-                if fname.endswith(".json") and fname != "attack_results.json":
-                    if rel_lower.startswith("fuzz/") or rel_lower.startswith("fuzz\\"):
-                        continue
-                    try:
-                        with open(fpath) as f:
-                            data = json.load(f)
-                        if "pbap" in rel_lower:
-                            self.pbap_results[rel] = data
-                        elif "map" in rel_lower:
-                            self.map_results[rel] = data
-                        elif "vuln" in rel_lower:
-                            if isinstance(data, dict) and data.get("schema") == "blue_tap.vulnscan.result":
-                                self.add_vuln_scan_result(data)
-                            elif isinstance(data, list):
-                                self.vuln_findings.extend(data)
-                            else:
-                                self.add_vuln_findings(data)
-                        elif "fuzz" in rel_lower:
-                            self.fuzz_results.append({"source": rel, "data": data})
-                        elif "dos" in rel_lower or "flood" in rel_lower or "brute" in rel_lower:
-                            self.dos_results.append({"source": rel, "data": data})
-                        elif "rfcomm" in rel_lower or "l2cap" in rel_lower or "scan" in rel_lower:
-                            if isinstance(data, list):
-                                self.recon_results.extend(data)
-                            else:
-                                self.recon_results.append(data)
-                        else:
-                            self.other_data[rel] = data
-                    except (json.JSONDecodeError, OSError):
-                        pass
-
-                elif fname.endswith(".vcf"):
-                    try:
-                        with open(fpath) as f:
-                            content = f.read()
-                        count = content.count("BEGIN:VCARD")
-                        self.pbap_results[rel] = {
-                            "file": rel, "entries": count, "size": os.path.getsize(fpath),
-                        }
-                    except OSError:
-                        pass
+                if not fname.endswith(".json") or fname == "session.json":
+                    continue
+                if rel.startswith("fuzz/") or rel.startswith("fuzz\\"):
+                    continue
+                if os.path.abspath(fpath) in processed_json_paths:
+                    continue
+                try:
+                    with open(fpath) as f:
+                        data = json.load(f)
+                except (json.JSONDecodeError, OSError):
+                    continue
+                if isinstance(data, dict) and self.add_run_envelope(data):
+                    continue
+                if isinstance(data, dict):
+                    self.add_run_envelope(data.get("data", {}))
 
     # ===================================================================
     # HTML Section Builders
@@ -840,28 +934,23 @@ class ReportGenerator:
                     'indicating input validation weaknesses in the '
                     'target\'s Bluetooth stack.'
                 )
-        if self.pbap_results or self.map_results:
+        pbap_operations = self._data_operations("pbap")
+        map_operations = self._data_operations("map")
+        if pbap_operations or map_operations:
             data_types = []
-            for path in self.pbap_results:
-                path_lower = path.lower()
-                if "ch" in path_lower or "call" in path_lower:
-                    data_types.append("call logs")
-                elif "fav" in path_lower:
-                    data_types.append("favorites")
-                else:
-                    data_types.append("contacts")
-            if self.map_results:
+            if pbap_operations:
+                data_types.append("contacts")
+            if map_operations:
                 data_types.append("messages")
-            unique_types = sorted(set(data_types)) or ["personal data"]
             narrative += (
-                f' Sensitive data including {"/".join(unique_types)} was '
+                f' Sensitive data including {"/".join(data_types)} was '
                 f'successfully extracted without user awareness.'
             )
         narrative += '</p>'
         s.append(narrative)
 
         # Metric cards
-        data_exfil = len(self.pbap_results) + len(self.map_results)
+        data_exfil = len(pbap_operations) + len(map_operations)
         packets = self._fuzz_campaign_stats.get("packets_sent", 0)
 
         s.append('<div class="metric-grid">')
@@ -994,302 +1083,47 @@ class ReportGenerator:
         s.append('</table></div>')
         return "\n".join(s)
 
-    def _build_fingerprint_html(self) -> str:
-        fp = self.fingerprint_results
-        if not fp:
-            return ""
-
-        s = []
-        s.append('<div class="section" id="sec-fingerprint">')
-        s.append('<h2>Device Fingerprint</h2>')
-
-        # Identity table
-        s.append('<h3>Identity</h3>')
-        s.append('<table><tr><th>Property</th><th>Value</th></tr>')
-        for key in ("address", "name", "manufacturer", "device_class", "ivi_likely"):
-            val = fp.get(key)
-            if val is not None:
-                s.append(f'<tr><td>{_esc(key.replace("_", " ").title())}</td><td>{_esc(str(val))}</td></tr>')
-        s.append('</table>')
-
-        # Protocol support
-        proto_keys = ("bt_version", "lmp_version", "lmp_subversion")
-        has_proto = any(fp.get(k) is not None for k in proto_keys)
-        if has_proto:
-            s.append('<h3>Protocol Support</h3>')
-            s.append('<table><tr><th>Property</th><th>Value</th></tr>')
-            for key in proto_keys:
-                val = fp.get(key)
-                if val is not None:
-                    s.append(f'<tr><td>{_esc(key.replace("_", " ").title())}</td><td>{_esc(str(val))}</td></tr>')
-            s.append('</table>')
-
-        # Attack surface
-        surface = fp.get("attack_surface", [])
-        if surface:
-            s.append('<h3>Attack Surface</h3>')
-            for item in surface:
-                s.append(f'<span class="tag">{_esc(item)}</span> ')
-
-        # Vuln hints
-        hints = fp.get("vuln_hints", [])
-        if hints:
-            s.append('<h3>Vulnerability Indicators</h3><ul>')
-            for hint in hints:
-                s.append(f'<li><span class="severity-badge severity-MEDIUM">INDICATOR</span> {_esc(hint)}</li>')
-            s.append('</ul>')
-
-        s.append('</div>')
-        return "\n".join(s)
-
     def _build_scan_html(self) -> str:
-        if not self.scan_results:
-            return ""
-        s = []
-        s.append('<div class="section" id="sec-devices">')
-        s.append('<h2>Discovered Devices</h2>')
-        s.append(f'<p>{len(self.scan_results)} device(s) discovered during scanning.</p>')
-        s.append('<table><tr><th>Address</th><th>Name</th><th>RSSI</th><th>Type</th></tr>')
-        for d in self.scan_results:
-            s.append(
-                f'<tr><td class="mono">{_esc(d.get("address", ""))}</td>'
-                f'<td>{_esc(d.get("name", "Unknown"))}</td>'
-                f'<td>{_esc(str(d.get("rssi", "")))}</td>'
-                f'<td>{_esc(d.get("type", "Classic"))}</td></tr>'
-            )
-        s.append('</table></div>')
-        return "\n".join(s)
+        adapter_state = self._module_report_state.get("scan", {})
+        if adapter_state.get("scan_runs"):
+            sections = _REPORT_ADAPTER_MAP["scan"].build_sections(adapter_state)
+            return render_sections(sections)
+        return ""
 
     def _build_vuln_html(self) -> str:
-        if not self.vuln_findings:
-            return ""
-        display_findings = _display_vuln_findings(self.vuln_findings)
-        vuln_summary = summarize_findings(self.vuln_findings)
-        s = []
-        s.append('<div class="section" id="sec-vulnerabilities">')
-        s.append('<h2>Vulnerability Findings</h2>')
-        s.append('<p>The following findings were produced by Blue-Tap vulnerability scanning. '
-                 'Confirmed findings are backed by an observed OTA protocol differential. '
-                 'Inconclusive findings reached the target but did not produce a binary answer. '
-                 'Pairing-required checks could not be validated in the current session.</p>')
-
-        s.append('<p><strong>Status Breakdown:</strong> '
-                 f'confirmed={vuln_summary["confirmed"]}, '
-                 f'inconclusive={vuln_summary["inconclusive"]}, '
-                 f'pairing_required={vuln_summary["pairing_required"]}, '
-                 f'not_applicable={vuln_summary["not_applicable"]}</p>')
-
-        if self.vuln_scan_runs:
-            latest = self.vuln_scan_runs[-1]
-            non_cve_checks = latest.get("non_cve_checks", [])
-            if non_cve_checks:
-                s.append('<h3>Non-CVE Check Execution</h3>')
-                s.append('<table><tr><th>Check ID</th><th>Check</th><th>Section</th><th>Status</th><th>Findings</th></tr>')
-                for check in non_cve_checks:
-                    s.append(
-                        f'<tr><td>{_esc(check.get("check_id", ""))}</td>'
-                        f'<td>{_esc(check.get("title", ""))}</td>'
-                        f'<td>{_esc(check.get("section", ""))}</td>'
-                        f'<td class="status-{_esc(check.get("primary_status", "unknown"))}">'
-                        f'{_esc(check.get("primary_status", "unknown"))}</td>'
-                        f'<td>{_esc(str(check.get("finding_count", 0)))}</td></tr>'
-                    )
-                s.append('</table>')
-            checks = latest.get("cve_checks", [])
-            if checks:
-                s.append('<h3>CVE Check Execution</h3>')
-                s.append('<table><tr><th>CVE</th><th>Check</th><th>Section</th><th>Status</th><th>Findings</th></tr>')
-                for check in checks:
-                    s.append(
-                        f'<tr><td>{_esc(check.get("cve", ""))}</td>'
-                        f'<td>{_esc(check.get("title", ""))}</td>'
-                        f'<td>{_esc(check.get("section", ""))}</td>'
-                        f'<td class="status-{_esc(check.get("primary_status", "unknown"))}">'
-                        f'{_esc(check.get("primary_status", "unknown"))}</td>'
-                        f'<td>{_esc(str(check.get("finding_count", 0)))}</td></tr>'
-                    )
-                s.append('</table>')
-
-        # Summary table
-        s.append('<table><tr><th>ID</th><th>Severity</th><th>Status</th>'
-                 '<th>Finding</th><th>CVE</th></tr>')
-        for i, v in enumerate(display_findings, 1):
-            sev = v.get("severity", "INFO").upper()
-            status = v.get("status", "inconclusive")
-            confidence = v.get("confidence", "")
-            status_display = f'{status} ({confidence})' if confidence else status
-            cve = v.get("cve", "N/A")
-            s.append(
-                f'<tr><td>VULN-{i:03d}</td>'
-                f'<td><span class="severity-badge severity-{sev}">{_esc(sev)}</span></td>'
-                f'<td class="status-{_esc(status)}">{_esc(status_display)}</td>'
-                f'<td>{_esc(v.get("name", ""))}</td>'
-                f'<td>{_esc(cve)}</td></tr>'
-            )
-        s.append('</table>')
-
-        # Individual finding cards
-        s.append('<h3>Finding Details</h3>')
-        for i, v in enumerate(display_findings, 1):
-            sev = v.get("severity", "INFO").upper()
-            status = v.get("status", "inconclusive")
-            confidence = v.get("confidence", "")
-            cve = v.get("cve", "N/A")
-            desc = v.get("description", "")
-            impact = v.get("impact", "")
-            evidence = v.get("evidence", "")
-            remediation = v.get("remediation", "")
-            category = v.get("category", "")
-            check_title = v.get("check_title", "")
-            check_section = v.get("section", "")
-
-            s.append(f'<div class="finding-card sev-{sev}">')
-            s.append(f'<h4>VULN-{i:03d}: {_esc(v.get("name", "Unknown Finding"))}</h4>')
-            s.append(f'<p><span class="severity-badge severity-{sev}">{_esc(sev)}</span> '
-                     f'<span class="status-{_esc(status)}">{_esc(status)}</span>'
-                     f'{" / " + _esc(confidence) + " confidence" if confidence else ""}'
-                     f'{" | CVE: " + _esc(cve) if cve and cve != "N/A" else ""}'
-                     f'{" | " if category else ""}'
-                     f'{"<span class=tag>" + _esc(category) + "</span>" if category else ""}'
-                     f'</p>')
-
-            if desc:
-                s.append(f'<p><strong>Description:</strong> {_esc(desc)}</p>')
-            if check_title:
-                s.append(f'<p><strong>Check:</strong> {_esc(check_title)}</p>')
-            if check_section:
-                s.append(f'<p><strong>Scanner Section:</strong> {_esc(check_section)}</p>')
-            if impact:
-                s.append(f'<p><strong>Impact:</strong> {_esc(impact)}</p>')
-            preconditions = v.get("preconditions") or []
-            if preconditions:
-                s.append(f'<p><strong>Preconditions:</strong> {_esc(", ".join(map(str, preconditions)))}</p>')
-
-            if evidence:
-                s.append('<div class="evidence-block">'
-                         '<div class="ev-label">Evidence</div>'
-                         f'<pre>{_esc(evidence)}</pre></div>')
-
-            if remediation:
-                s.append(f'<p><strong>Remediation:</strong> {_esc(remediation)}</p>')
-
-            s.append('</div>')
-
-        s.append('</div>')
-        return "\n".join(s)
+        adapter_state = self._module_report_state.get("vulnscan", {})
+        if adapter_state.get("vuln_scan_runs"):
+            sections = _REPORT_ADAPTER_MAP["vulnscan"].build_sections(adapter_state)
+            return render_sections(sections)
+        return ""
 
     def _build_attack_html(self) -> str:
-        if not self.attack_results:
-            return ""
-        s = []
-        s.append('<div class="section" id="sec-attack">')
-        s.append('<h2>Attack Chain Results</h2>')
-        s.append('<p>The following attack chain was executed to demonstrate the real-world '
-                 'impact of identified vulnerabilities. Each phase builds on the previous, '
-                 'simulating how an attacker would compromise the target vehicle\'s '
-                 'Bluetooth system.</p>')
-
-        phases = self.attack_results.get("phases", {})
-        if phases:
-            s.append('<table><tr><th>Phase</th><th>Status</th><th>Details</th></tr>')
-            for phase, result in phases.items():
-                status = result.get("status", "unknown")
-                details = result.get("error", result.get("details", ""))
-                if status == "success":
-                    css = "severity-badge severity-LOW"
-                elif status == "failed":
-                    css = "severity-badge severity-HIGH"
-                else:
-                    css = "severity-badge severity-MEDIUM"
-                s.append(f'<tr><td>{_esc(phase)}</td>'
-                         f'<td><span class="{css}">{_esc(status.upper())}</span></td>'
-                         f'<td>{_esc(str(details))}</td></tr>')
-            s.append('</table>')
-        else:
-            s.append(f'<pre>{_esc(json.dumps(self.attack_results, indent=2, default=str)[:3000])}</pre>')
-
-        # Attack type impact narratives
-        if self.attack_results.get("ssp_downgrade"):
-            ssp = self.attack_results["ssp_downgrade"]
-            s.append('<h3>Pairing Security Bypass: SSP Downgrade</h3>')
-            s.append('<p>The target accepted a downgrade from Secure Simple Pairing (SSP) '
-                     'to legacy PIN-based pairing. This bypasses the mutual authentication '
-                     'and ECDH key exchange protections of SSP, allowing an attacker to '
-                     'perform man-in-the-middle attacks during the pairing process. Legacy '
-                     'pairing uses a short PIN that can be brute-forced in seconds.</p>')
-            if isinstance(ssp, dict):
-                s.append(f'<pre>{_esc(json.dumps(ssp, indent=2, default=str)[:2000])}</pre>')
-
-        if self.attack_results.get("knob_attack"):
-            knob = self.attack_results["knob_attack"]
-            s.append('<h3>Encryption Weakness: KNOB Attack</h3>')
-            s.append('<p>The Key Negotiation of Bluetooth (KNOB) attack was successful '
-                     'against the target. The encryption key entropy was negotiated down '
-                     'to the minimum allowed length, making it feasible for an attacker to '
-                     'brute-force the session key in real time. This allows decryption and '
-                     'modification of all Bluetooth traffic between the target and its '
-                     'paired devices.</p>')
-            if isinstance(knob, dict):
-                s.append(f'<pre>{_esc(json.dumps(knob, indent=2, default=str)[:2000])}</pre>')
-
-        if self.attack_results.get("bluffs_attack"):
-            bluffs = self.attack_results["bluffs_attack"]
-            s.append('<h3>Session Key Downgrade: BLUFFS (CVE-2023-24023)</h3>')
-            s.append('<p>The BLUFFS attack exploits weaknesses in BR/EDR session key '
-                     'derivation to force both endpoints to derive a weak, reusable '
-                     'session key. This allows an attacker to decrypt past and future '
-                     'communications (breaking both forward and future secrecy). The '
-                     'attack manipulates LMP encryption setup at the link layer via '
-                     'DarkFirmware LMP injection on RTL8761B.</p>')
-            if isinstance(bluffs, dict):
-                variant = bluffs.get("variant", "unknown")
-                vulnerable = bluffs.get("vulnerable", bluffs.get("success", False))
-                s.append(f'<p><strong>Variant:</strong> {_esc(str(variant))} | '
-                         f'<strong>Vulnerable:</strong> {"Yes" if vulnerable else "No"}</p>')
-                for detail in bluffs.get("details", []):
-                    s.append(f'<p class="note">{_esc(str(detail))}</p>')
-                s.append(f'<pre>{_esc(json.dumps(bluffs, indent=2, default=str)[:2000])}</pre>')
-
-        if self.attack_results.get("encryption_downgrade"):
-            enc = self.attack_results["encryption_downgrade"]
-            s.append('<h3>Encryption Downgrade (Beyond KNOB)</h3>')
-            s.append('<p>Alternative encryption downgrade paths were tested against the '
-                     'target via DarkFirmware LMP injection. These attacks exploit '
-                     'different link manager code paths than KNOB (CVE-2019-9506): '
-                     'disabling encryption entirely, forcing re-negotiation with weaker '
-                     'parameters, or rejecting Secure Connections to force Legacy SC.</p>')
-            if isinstance(enc, dict):
-                vulnerable_methods = enc.get("vulnerable_methods", [])
-                if vulnerable_methods:
-                    s.append(f'<p class="critical"><strong>Vulnerable methods:</strong> '
-                             f'{_esc(", ".join(vulnerable_methods))}</p>')
-                for m_name, m_result in enc.get("methods", {}).items():
-                    status = "VULNERABLE" if m_result.get("vulnerable") else "Rejected"
-                    s.append(f'<p><strong>{_esc(m_name)}:</strong> {status}</p>')
-                s.append(f'<pre>{_esc(json.dumps(enc, indent=2, default=str)[:2000])}</pre>')
-
-        if self.attack_results.get("fleet_assess"):
-            fleet = self.attack_results["fleet_assess"]
-            s.append('<h3>Fleet-Wide Exposure Assessment</h3>')
-            s.append('<p>The vulnerabilities identified in this assessment are likely to '
-                     'affect other vehicles in the same fleet that share identical head '
-                     'unit hardware and firmware. Fleet-wide remediation should be '
-                     'prioritized, as a single exploit chain developed against one vehicle '
-                     'can be replicated across the entire fleet without modification.</p>')
-            if isinstance(fleet, dict):
-                s.append(f'<pre>{_esc(json.dumps(fleet, indent=2, default=str)[:2000])}</pre>')
-
-        s.append('</div>')
-        return "\n".join(s)
+        adapter_state = self._module_report_state.get("attack", {})
+        if adapter_state.get("runs") or adapter_state.get("attack_runs"):
+            sections = _REPORT_ADAPTER_MAP["attack"].build_sections(adapter_state)
+            return render_sections(sections)
+        return ""
 
     def _build_fuzz_html(self) -> list[str]:
-        """Build the detailed fuzzing campaign HTML section."""
+        """Build the detailed fuzzing campaign HTML section.
+
+        TODO(standardization): Move the ~270 lines of campaign narrative,
+        severity breakdown, crash cards, and protocol coverage logic below
+        into FuzzReportAdapter.build_sections().  The adapter already handles
+        badge/table blocks; this method should delegate to it fully, matching
+        the pattern used by _build_vuln_html / _build_dos_html / _build_scan_html.
+        """
         sections: list[str] = []
+        adapter_sections = _REPORT_ADAPTER_MAP["fuzz"].build_sections(self._module_report_state.get("fuzz", {}))
         has_campaign = bool(self._fuzz_campaign_stats)
         has_crashes = bool(self._fuzz_crashes)
+        has_standardized_runs = bool(adapter_sections)
 
-        if not has_campaign and not has_crashes and not self.fuzz_results:
+        if not has_campaign and not has_crashes and not self.fuzz_results and not has_standardized_runs:
             return sections
+
+        if has_standardized_runs:
+            sections.append(render_sections(adapter_sections))
 
         sections.append('<div class="section" id="sec-fuzzing">')
         sections.append("<h2>Fuzzing Campaign Results</h2>")
@@ -1549,7 +1383,11 @@ class ReportGenerator:
         return sections
 
     def _build_fuzz_intelligence_html(self) -> str:
-        """Build the fuzzing intelligence section (state coverage, field weights, health)."""
+        """Build the fuzzing intelligence section (state coverage, field weights, health).
+
+        TODO(standardization): Move this intelligence rendering into
+        FuzzReportAdapter or a dedicated FuzzIntelligenceAdapter.
+        """
         has_data = any([self._fuzz_state_coverage, self._fuzz_field_weights,
                         self._fuzz_health_events, self._fuzz_baselines])
         if not has_data:
@@ -1663,6 +1501,10 @@ class ReportGenerator:
 
     def _build_lmp_html(self) -> str:
         """Render LMP capture findings as HTML section.
+
+        TODO(standardization): Move this into a dedicated LmpCaptureAdapter
+        or integrate into the ReconReportAdapter, matching the adapter-based
+        rendering pattern used by other modules.
 
         Produces a table of captured LMP packets color-coded by category
         (auth=red, encryption=orange, features=blue), a feature bitmap
@@ -1795,78 +1637,19 @@ class ReportGenerator:
         return "\n".join(s)
 
     def _build_recon_html(self) -> str:
-        if not self.recon_results:
-            return ""
-        s = []
-        s.append('<div class="section" id="sec-recon">')
-        s.append('<h2>Reconnaissance Results</h2>')
-        s.append('<p>Service enumeration revealed the following Bluetooth services '
-                 'exposed by the target. Each exposed service represents a potential '
-                 'attack surface.</p>')
-
-        # Try to categorize recon data
-        sdp_services = []
-        gatt_services = []
-        channel_scans = []
-        other_recon = []
-
-        for entry in self.recon_results:
-            if isinstance(entry, dict):
-                if entry.get("uuid") or entry.get("service_name") or entry.get("service_id"):
-                    sdp_services.append(entry)
-                elif entry.get("handle") or entry.get("characteristic"):
-                    gatt_services.append(entry)
-                elif entry.get("channel") or entry.get("psm"):
-                    channel_scans.append(entry)
-                else:
-                    other_recon.append(entry)
-            else:
-                other_recon.append(entry)
-
-        if sdp_services:
-            s.append('<h3>SDP Services</h3>')
-            s.append('<table><tr><th>UUID</th><th>Service Name</th><th>Description</th><th>Channel</th></tr>')
-            for svc in sdp_services:
-                s.append(
-                    f'<tr><td class="mono">{_esc(str(svc.get("uuid", svc.get("service_id", ""))))}</td>'
-                    f'<td>{_esc(str(svc.get("service_name", svc.get("name", ""))))}</td>'
-                    f'<td>{_esc(str(svc.get("description", "")))}</td>'
-                    f'<td>{_esc(str(svc.get("channel", svc.get("port", ""))))}</td></tr>'
-                )
-            s.append('</table>')
-
-        if gatt_services:
-            s.append('<h3>GATT Services</h3>')
-            s.append('<table><tr><th>Handle</th><th>UUID</th><th>Name</th><th>Properties</th></tr>')
-            for svc in gatt_services:
-                s.append(
-                    f'<tr><td>{_esc(str(svc.get("handle", "")))}</td>'
-                    f'<td class="mono">{_esc(str(svc.get("uuid", "")))}</td>'
-                    f'<td>{_esc(str(svc.get("name", svc.get("characteristic", ""))))}</td>'
-                    f'<td>{_esc(str(svc.get("properties", "")))}</td></tr>'
-                )
-            s.append('</table>')
-
-        if channel_scans:
-            s.append('<h3>Channel Scan Results</h3>')
-            s.append('<table><tr><th>Channel/PSM</th><th>Status</th><th>Service</th></tr>')
-            for ch in channel_scans:
-                chan = ch.get("channel", ch.get("psm", ""))
-                s.append(
-                    f'<tr><td>{_esc(str(chan))}</td>'
-                    f'<td>{_esc(str(ch.get("status", ch.get("state", ""))))}</td>'
-                    f'<td>{_esc(str(ch.get("service", ch.get("description", ""))))}</td></tr>'
-                )
-            s.append('</table>')
-
-        if other_recon:
-            s.append('<h3>Additional Recon Data</h3>')
-            s.append(f'<pre>{_esc(json.dumps(other_recon, indent=2, default=str)[:3000])}</pre>')
-
-        s.append('</div>')
-        return "\n".join(s)
+        adapter_state = self._module_report_state.get("recon", {})
+        if adapter_state.get("recon_runs"):
+            sections = _REPORT_ADAPTER_MAP["recon"].build_sections(adapter_state)
+            return render_sections(sections)
+        return ""
 
     def _build_dos_html(self) -> str:
+        adapter_state = self._module_report_state.get("dos", {})
+        if adapter_state.get("dos_runs"):
+            sections = _REPORT_ADAPTER_MAP["dos"].build_sections(adapter_state)
+            return render_sections(sections)
+        # TODO(standardization): Delete the legacy DoS HTML branch below once all
+        # DoS report producers emit standardized envelopes only.
         if not self.dos_results:
             return ""
         s = []
@@ -2023,114 +1806,31 @@ class ReportGenerator:
         return "\n".join(s)
 
     def _build_pbap_html(self) -> str:
-        if not self.pbap_results:
-            return ""
-        s = []
-        s.append('<div class="section" id="sec-data-exfil">')
-        s.append('<h2>Data Exfiltration: PBAP (Phonebook)</h2>')
-        s.append('<p>Phone Book Access Profile (PBAP) data was extracted from the target '
-                 'IVI system. This data was accessible after connection impersonation '
-                 'without any user interaction or confirmation on the vehicle\'s head unit. '
-                 'The extracted data includes personal contacts, call history, and '
-                 'favorites — representing a significant privacy risk for the vehicle '
-                 'owner.</p>')
-        s.append('<p>The following phonebook data was successfully extracted from the target device.</p>')
-        s.append('<table><tr><th>Source</th><th>Entries</th><th>Size</th><th>Category</th></tr>')
-        for path, data in self.pbap_results.items():
-            entries = data.get("entries", "N/A") if isinstance(data, dict) else "N/A"
-            size = data.get("size", "N/A") if isinstance(data, dict) else "N/A"
-            # Derive category from filename
-            cat = "Contacts"
-            path_lower = path.lower()
-            if "ch" in path_lower:
-                cat = "Call History"
-            elif "fav" in path_lower:
-                cat = "Favorites"
-            elif "ich" in path_lower:
-                cat = "Incoming Calls"
-            elif "och" in path_lower:
-                cat = "Outgoing Calls"
-            elif "mch" in path_lower:
-                cat = "Missed Calls"
-            s.append(f'<tr><td><code>{_esc(path)}</code></td>'
-                     f'<td>{entries}</td><td>{size}</td><td>{_esc(cat)}</td></tr>')
-        s.append('</table></div>')
-        return "\n".join(s)
+        return ""
 
     def _build_map_html(self) -> str:
-        if not self.map_results:
+        return ""
+
+    def _build_data_ops_html(self) -> str:
+        adapter_state = self._module_report_state.get("data", {})
+        if not (adapter_state.get("runs") or adapter_state.get("data_runs")):
             return ""
-        s = []
-        s.append('<div class="section" id="sec-map">')
-        s.append('<h2>Data Exfiltration: MAP (Messages)</h2>')
-        s.append('<p>Message Access Profile (MAP) data was extracted from the target IVI '
-                 'system. SMS and MMS messages synced to the vehicle\'s head unit were '
-                 'accessible without authentication or user notification. Extracted '
-                 'messages may contain sensitive personal communications, two-factor '
-                 'authentication codes, financial notifications, and other private '
-                 'information — representing a severe privacy and security risk.</p>')
-        s.append(f'<p>{len(self.map_results)} message data set(s) collected.</p>')
-        for path, data in self.map_results.items():
-            s.append(f'<h3>{_esc(path)}</h3>')
-            if isinstance(data, dict):
-                listing = data.get("listing_file", "")
-                messages = data.get("messages", [])
-                if listing:
-                    s.append(f'<p>Listing file: <code>{_esc(listing)}</code></p>')
-                if messages:
-                    s.append(f'<p>Messages fetched: {len(messages)}</p>')
-                    s.append('<table><tr><th>Handle</th><th>File</th></tr>')
-                    for msg in messages[:50]:
-                        s.append(f'<tr><td>{_esc(msg.get("handle", ""))}</td>'
-                                 f'<td><code>{_esc(msg.get("file", ""))}</code></td></tr>')
-                    s.append('</table>')
-                    if len(messages) > 50:
-                        s.append(f'<p>... and {len(messages) - 50} more</p>')
-                elif not listing:
-                    s.append(f'<pre>{_esc(json.dumps(data, indent=2, default=str)[:2000])}</pre>')
-            else:
-                s.append(f'<pre>{_esc(json.dumps(data, indent=2, default=str)[:2000])}</pre>')
-        s.append('</div>')
-        return "\n".join(s)
+        return render_sections(_REPORT_ADAPTER_MAP["data"].build_sections(adapter_state))
 
     def _build_audio_html(self) -> str:
-        if not self.audio_captures:
-            return ""
-        s = []
-        s.append('<div class="section" id="sec-audio">')
-        s.append('<h2>Audio Captures</h2>')
-        s.append('<table><tr><th>File</th><th>Duration</th><th>Description</th></tr>')
-        for cap in self.audio_captures:
-            dur = f"{cap.get('duration', 0):.1f}s" if cap.get("duration") else "N/A"
-            s.append(f'<tr><td><code>{_esc(cap.get("file", ""))}</code></td>'
-                     f'<td>{dur}</td><td>{_esc(cap.get("description", ""))}</td></tr>')
-        s.append('</table></div>')
-        return "\n".join(s)
+        adapter_state = self._module_report_state.get("audio", {})
+        if adapter_state.get("runs") or adapter_state.get("audio_runs"):
+            sections = _REPORT_ADAPTER_MAP["audio"].build_sections(adapter_state)
+            return render_sections(sections)
+        return ""
 
     def _build_appendix_html(self) -> str:
-        parts = []
-
-        if self.other_data:
-            parts.append('<div class="section" id="sec-appendix">')
-            parts.append('<h2>Appendix: Additional Data</h2>')
-            for path, data in self.other_data.items():
-                parts.append(f'<h3>{_esc(path)}</h3>')
-                parts.append(f'<pre>{_esc(json.dumps(data, indent=2, default=str)[:2000])}</pre>')
-            parts.append('</div>')
-
-        if self.notes:
-            if not parts:
-                parts.append('<div class="section" id="sec-appendix">')
-                parts.append('<h2>Appendix</h2>')
-            else:
-                # Already in an appendix section
-                pass
-            parts.append('<h3>Analyst Notes</h3>')
-            for note in self.notes:
-                parts.append(f'<p>{_esc(note)}</p>')
-            if not self.other_data:
-                parts.append('</div>')
-
+        if not self.notes:
+            return ""
+        parts = ['<div class="section" id="sec-appendix">', '<h2>Appendix</h2>', '<h3>Analyst Notes</h3>']
+        for note in self.notes:
+            parts.append(f'<p>{_esc(note)}</p>')
+        parts.append('</div>')
         return "\n".join(parts)
 
     # ===================================================================
@@ -2148,14 +1848,14 @@ class ReportGenerator:
             if self._session_metadata.get("commands"):
                 toc_entries.append(("sec-timeline", "Assessment Timeline"))
 
-        if self.fingerprint_results:
-            toc_entries.append(("sec-fingerprint", "Device Fingerprint"))
         if self.scan_results:
             toc_entries.append(("sec-devices", "Discovered Devices"))
         if self.vuln_findings:
             toc_entries.append(("sec-vulnerabilities", "Vulnerability Findings"))
-        if self.attack_results:
-            toc_entries.append(("sec-attack", "Attack Chain Results"))
+        if self._module_report_state.get("attack", {}).get("runs") or self._module_report_state.get("attack", {}).get("attack_runs"):
+            toc_entries.append(("sec-attack-ops", "Attack Operation Runs"))
+        if self._module_report_state.get("fuzz", {}).get("fuzz_runs"):
+            toc_entries.append(("sec-fuzz-runs", "Ad Hoc Fuzz Command Runs"))
         if self._fuzz_campaign_stats or self._fuzz_crashes or self.fuzz_results:
             toc_entries.append(("sec-fuzzing", "Fuzzing Campaign Results"))
         has_fuzz_intel = any([self._fuzz_state_coverage, self._fuzz_field_weights,
@@ -2164,17 +1864,15 @@ class ReportGenerator:
             toc_entries.append(("sec-fuzz-intel", "Fuzzing Intelligence Analysis"))
         if self._lmp_captures:
             toc_entries.append(("sec-lmp", "LMP Capture Analysis"))
-        if self.recon_results:
+        if self.recon_results or self._module_report_state.get("recon", {}).get("recon_runs"):
             toc_entries.append(("sec-recon", "Reconnaissance Results"))
         if self.dos_results:
             toc_entries.append(("sec-dos", "Denial of Service Tests"))
-        if self.pbap_results:
-            toc_entries.append(("sec-data-exfil", "Data Exfiltration: PBAP"))
-        if self.map_results:
-            toc_entries.append(("sec-map", "Data Exfiltration: MAP"))
-        if self.audio_captures:
-            toc_entries.append(("sec-audio", "Audio Captures"))
-        if self.other_data or self.notes:
+        if self._module_report_state.get("data", {}).get("runs") or self._module_report_state.get("data", {}).get("data_runs"):
+            toc_entries.append(("sec-data-ops", "Data Extraction Operations"))
+        if self._module_report_state.get("audio", {}).get("runs") or self._module_report_state.get("audio", {}).get("audio_runs"):
+            toc_entries.append(("sec-audio-ops", "Audio Operations"))
+        if self.notes:
             toc_entries.append(("sec-appendix", "Appendix"))
 
         # Build all sections
@@ -2184,7 +1882,6 @@ class ReportGenerator:
             self._build_executive_summary_html(),
             self._build_scope_html(),
             self._build_timeline_html(),
-            self._build_fingerprint_html(),
             self._build_scan_html(),
             self._build_vuln_html(),
             self._build_attack_html(),
@@ -2195,6 +1892,7 @@ class ReportGenerator:
         body_parts.extend([
             self._build_recon_html(),
             self._build_dos_html(),
+            self._build_data_ops_html(),
             self._build_pbap_html(),
             self._build_map_html(),
             self._build_audio_html(),
@@ -2289,18 +1987,27 @@ class ReportGenerator:
                 "high_severity": vuln_summary["high_or_critical"],
                 "fuzz_test_cases": self._fuzz_campaign_stats.get("packets_sent", 0),
                 "fuzz_crashes": len(self._fuzz_crashes),
-                "data_exfiltration": len(self.pbap_results) + len(self.map_results),
+                "data_exfiltration": len(self._data_operations("pbap")) + len(self._data_operations("map")),
             },
             "timeline": timeline,
-            "fingerprint": self.fingerprint_results,
+            "modules": {
+                "scan": self._module_json_section("scan"),
+                "vulnscan": self._module_json_section("vulnscan"),
+                "attack": self._module_json_section("attack"),
+                "data": self._module_json_section("data"),
+                "audio": self._module_json_section("audio"),
+                "dos": self._module_json_section("dos"),
+                "fuzz": self._module_json_section("fuzz"),
+                "recon": self._module_json_section("recon"),
+            },
+            "executions": self._all_module_executions(),
             "scan_results": self.scan_results,
+            "scan_runs": self.scan_runs,
             "vulnerabilities": self.vuln_findings,
             "vulnerability_scans": self.vuln_scan_runs,
-            "pbap_data": self.pbap_results,
-            "map_data": self.map_results,
-            "attack_results": self.attack_results,
             "recon_results": self.recon_results,
             "fuzzing": fuzz_data if fuzz_data else self.fuzz_results,
+            "fuzz_runs": self.fuzz_runs,
             "dos_runs": self.dos_runs,
             "fuzzing_intelligence": {
                 "state_coverage": self._fuzz_state_coverage,
@@ -2310,8 +2017,6 @@ class ReportGenerator:
             } if any([self._fuzz_state_coverage, self._fuzz_field_weights,
                       self._fuzz_health_events, self._fuzz_baselines]) else {},
             "dos_results": self.dos_results,
-            "audio_captures": self.audio_captures,
-            "other_data": self.other_data,
             "notes": self.notes,
         }
 
