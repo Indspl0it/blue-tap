@@ -22,10 +22,30 @@ import re
 import wave
 import datetime
 
-from blue_tap.utils.bt_helpers import run_cmd, check_tool
+from blue_tap.utils.bt_helpers import run_cmd, check_tool, normalize_mac
 from blue_tap.utils.output import info, success, error, warning, verbose, console
 
 _active_loopback_id: str | None = None
+
+
+def _list_short(kind: str) -> list[dict]:
+    """Parse `pactl list <kind> short` into row dictionaries."""
+    entries = []
+    result = run_cmd(["pactl", "list", kind, "short"])
+    if result.returncode != 0:
+        return entries
+    for line in result.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 2:
+            continue
+        entry = {
+            "id": parts[0],
+            "name": parts[1],
+            "driver": parts[2] if len(parts) > 2 else "",
+            "state": parts[4].strip() if len(parts) > 4 else "",
+        }
+        entries.append(entry)
+    return entries
 
 
 def mac_to_pa_id(mac: str) -> str:
@@ -60,6 +80,52 @@ def bt_card_name(mac: str) -> str:
     return f"bluez_card.{mac_to_pa_id(mac)}"
 
 
+def _find_matching_endpoint(mac: str, *, prefixes: tuple[str, ...]) -> dict | None:
+    """Find the best-matching PulseAudio endpoint for a Bluetooth MAC."""
+    mac_id = mac_to_pa_id(normalize_mac(mac))
+    kind = "sinks" if any(prefix.startswith("bluez_output") for prefix in prefixes) else "sources"
+    candidates = []
+    for entry in _list_short(kind):
+        name = entry.get("name", "")
+        if not any(name.startswith(prefix) for prefix in prefixes):
+            continue
+        if mac_id in name:
+            candidates.append(entry)
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (0 if item.get("state", "").upper() == "RUNNING" else 1, item.get("name", "")))
+    return candidates[0]
+
+
+def resolve_hfp_source(mac: str) -> str:
+    """Resolve the best HFP microphone source for a Bluetooth MAC."""
+    match = _find_matching_endpoint(mac, prefixes=("bluez_input.",))
+    return match["name"] if match else bt_source_name(mac)
+
+
+def resolve_a2dp_source(mac: str) -> str:
+    """Resolve the best A2DP media source for a Bluetooth MAC."""
+    match = _find_matching_endpoint(mac, prefixes=("bluez_source.",))
+    return match["name"] if match else bt_a2dp_source_name(mac)
+
+
+def resolve_bt_sink(mac: str) -> str:
+    """Resolve the best playback sink for a Bluetooth MAC."""
+    match = _find_matching_endpoint(mac, prefixes=("bluez_output.",))
+    return match["name"] if match else bt_sink_name(mac)
+
+
+def get_audio_device_snapshot(mac: str) -> dict:
+    """Return a snapshot of currently resolved Bluetooth audio endpoints."""
+    return {
+        "card": bt_card_name(mac),
+        "profile": get_active_profile(mac),
+        "hfp_source": resolve_hfp_source(mac),
+        "a2dp_source": resolve_a2dp_source(mac),
+        "sink": resolve_bt_sink(mac),
+    }
+
+
 # ============================================================================
 # Profile Management
 # ============================================================================
@@ -73,7 +139,7 @@ def set_profile_hfp(mac: str) -> bool:
     info(f"Setting {card} to HFP (headset-head-unit) profile...")
     for attempt in range(2):
         result = run_cmd(["pactl", "set-card-profile", card, "headset-head-unit"])
-        if result.returncode == 0:
+        if result.returncode == 0 and _wait_for_profile(mac, ("headset-head-unit", "handsfree_head_unit")):
             success("Profile set to HFP (headset-head-unit)")
             return True
         if attempt == 0:
@@ -92,7 +158,7 @@ def set_profile_a2dp(mac: str) -> bool:
     info(f"Setting {card} to A2DP (a2dp-sink) profile...")
     for attempt in range(2):
         result = run_cmd(["pactl", "set-card-profile", card, "a2dp-sink"])
-        if result.returncode == 0:
+        if result.returncode == 0 and _wait_for_profile(mac, ("a2dp-sink", "a2dp_sink")):
             success("Profile set to A2DP (a2dp-sink)")
             return True
         if attempt == 0:
@@ -118,6 +184,21 @@ def get_active_profile(mac: str) -> str:
         elif in_card and line.strip() == "":
             in_card = False
     return "unknown"
+
+
+def _wait_for_profile(mac: str, expected_profiles: tuple[str, ...], timeout: float = 3.0) -> bool:
+    """Poll the card until one of the expected profiles becomes active."""
+    deadline = time.time() + timeout
+    expected = tuple(item.lower() for item in expected_profiles)
+    while time.time() < deadline:
+        active = get_active_profile(mac).lower()
+        if any(profile in active for profile in expected):
+            return True
+        time.sleep(0.2)
+    warning(
+        f"Profile switch did not verify on host side; active profile is '{get_active_profile(mac)}'"
+    )
+    return False
 
 
 # ============================================================================
@@ -195,45 +276,24 @@ def set_sink_volume(sink: str, volume_pct: int = 80) -> bool:
 def list_bt_audio_sources() -> list[dict]:
     """List Bluetooth audio sources (microphones) in PulseAudio/PipeWire."""
     sources = []
-    result = run_cmd(["pactl", "list", "sources", "short"])
-    if result.returncode == 0:
-        for line in result.stdout.splitlines():
-            if "bluez" in line.lower():
-                parts = line.split("\t")
-                if len(parts) < 5:
-                    verbose(f"Skipping malformed pactl line: {line}")
-                    continue
-                sources.append({
-                    "id": parts[0],
-                    "name": parts[1],
-                    "driver": parts[2],
-                    "state": parts[4].strip(),
-                })
+    for entry in _list_short("sources"):
+        if "bluez" in entry["name"].lower():
+            sources.append(entry)
     return sources
 
 
 def list_bt_audio_sinks() -> list[dict]:
     """List Bluetooth audio sinks (speakers)."""
     sinks = []
-    result = run_cmd(["pactl", "list", "sinks", "short"])
-    if result.returncode == 0:
-        for line in result.stdout.splitlines():
-            if "bluez" in line.lower():
-                parts = line.split("\t")
-                if len(parts) < 3:
-                    verbose(f"Skipping malformed pactl line: {line}")
-                    continue
-                sinks.append({
-                    "id": parts[0],
-                    "name": parts[1],
-                    "driver": parts[2],
-                })
+    for entry in _list_short("sinks"):
+        if "bluez" in entry["name"].lower():
+            sinks.append(entry)
     return sinks
 
 
 def detect_mic_channels(mac: str) -> int:
     """Detect whether the car's mic supports mono (1) or stereo (2)."""
-    source = bt_source_name(mac)
+    source = resolve_hfp_source(mac)
     result = run_cmd(["pactl", "list", "sources"])
     if result.returncode != 0:
         return 1  # Default mono for HFP
@@ -271,11 +331,12 @@ def record_car_mic(mac: str, output_file: str = "car_mic.wav",
         duration: Recording duration in seconds (0 = until Ctrl+C)
         auto_setup: Automatically configure profiles and mics
     """
-    source = bt_source_name(mac)
+    source = resolve_hfp_source(mac)
 
     if auto_setup:
         # Step 1: Set HFP profile for mic access
-        set_profile_hfp(mac)
+        if not set_profile_hfp(mac):
+            return ""
         time.sleep(1)
 
         # Step 2: Mute laptop mic
@@ -342,24 +403,29 @@ def record_car_mic(mac: str, output_file: str = "car_mic.wav",
     if os.path.exists(output_file):
         size = os.path.getsize(output_file)
         success(f"Recorded {size} bytes -> {output_file}")
+        if size <= 44:
+            warning("Recording contains only a WAV header - no microphone audio captured")
+            return ""
         if size < 1000:
             warning("File is very small - check mic volume and mute status")
     else:
         error("Output file not created")
+        return ""
 
     return output_file
 
 
-def live_eavesdrop(mac: str, auto_setup: bool = True):
+def live_eavesdrop(mac: str, auto_setup: bool = True) -> bool:
     """Stream car's microphone live to laptop speakers.
 
     Real-time eavesdropping: parecord | aplay
     Press Ctrl+C to stop.
     """
-    source = bt_source_name(mac)
+    source = resolve_hfp_source(mac)
 
     if auto_setup:
-        set_profile_hfp(mac)
+        if not set_profile_hfp(mac):
+            return False
         time.sleep(1)
         mute_laptop_mic()
         unmute_source(source)
@@ -367,11 +433,16 @@ def live_eavesdrop(mac: str, auto_setup: bool = True):
     channels = detect_mic_channels(mac)
     rate = 16000 if channels == 1 else 44100
 
+    if not check_tool("parecord") or not check_tool("aplay"):
+        error("parecord/aplay not found. Install pulseaudio-utils and alsa-utils")
+        return False
+
     info(f"Live eavesdrop from {source} -> laptop speakers")
     info("Press Ctrl+C to stop")
 
     record = None
     play = None
+    ok = False
     try:
         record = subprocess.Popen(
             ["parecord", f"--device={source}", f"--rate={rate}",
@@ -382,9 +453,12 @@ def live_eavesdrop(mac: str, auto_setup: bool = True):
             ["aplay", "-r", str(rate), "-c", str(channels), "-f", "S16_LE"],
             stdin=record.stdout,
         )
-        play.wait()
+        ok = play.wait() == 0
     except KeyboardInterrupt:
-        pass
+        ok = True
+    except Exception as e:
+        error(f"Live eavesdrop failed: {e}")
+        ok = False
     finally:
         if record:
             try:
@@ -399,6 +473,7 @@ def live_eavesdrop(mac: str, auto_setup: bool = True):
         if auto_setup:
             unmute_laptop_mic()
         info("Live eavesdrop stopped")
+    return ok
 
 
 # ============================================================================
@@ -417,21 +492,29 @@ def play_to_car(mac: str, audio_file: str, volume_pct: int = 80) -> bool:
         error(f"File not found: {audio_file}")
         return False
 
-    sink = bt_sink_name(mac)
+    sink = resolve_bt_sink(mac)
 
     # Set A2DP profile for media playback
-    set_profile_a2dp(mac)
+    if not set_profile_a2dp(mac):
+        return False
     time.sleep(1)
 
     # Set volume
     set_sink_volume(sink, volume_pct)
 
     info(f"Playing {audio_file} -> {sink}")
-    result = subprocess.run(
-        ["paplay", f"--device={sink}", audio_file],
-        timeout=600,
-        capture_output=True,
-    )
+    try:
+        result = subprocess.run(
+            ["paplay", f"--device={sink}", audio_file],
+            timeout=600,
+            capture_output=True,
+        )
+    except subprocess.TimeoutExpired:
+        error("Playback timed out")
+        return False
+    except OSError as exc:
+        error(f"Playback failed to start: {exc}")
+        return False
 
     if result.returncode == 0:
         success("Playback complete")
@@ -445,7 +528,7 @@ def stream_mic_to_car(mac: str, mic_source: str | None = None) -> bool:
 
     This lets you speak through the car's speakers in real-time.
     """
-    sink = bt_sink_name(mac)
+    sink = resolve_bt_sink(mac)
 
     # Auto-detect laptop mic if not specified
     if mic_source is None:
@@ -460,7 +543,8 @@ def stream_mic_to_car(mac: str, mic_source: str | None = None) -> bool:
         error("No laptop microphone found")
         return False
 
-    set_profile_a2dp(mac)
+    if not set_profile_a2dp(mac):
+        return False
     time.sleep(1)
 
     global _active_loopback_id
@@ -609,10 +693,11 @@ def record_navigation_audio(mac: str, output_file: str = "nav_audio.wav",
     info(f"Recording IVI audio output for {duration}s...")
 
     # Use A2DP source (IVI -> us) not HFP mic
-    set_profile_a2dp(mac)
+    if not set_profile_a2dp(mac):
+        return ""
     time.sleep(1)
 
-    source = bt_a2dp_source_name(mac)
+    source = resolve_a2dp_source(mac)
     unmute_source(source)
 
     if not check_tool("parecord"):
@@ -660,11 +745,12 @@ def capture_a2dp(mac: str | None = None, output_file: str = "a2dp_capture.wav",
     """
     # Ensure A2DP profile is active for media audio capture
     if mac:
-        set_profile_a2dp(mac)
+        if not set_profile_a2dp(mac):
+            return ""
         time.sleep(1)
 
     if source is None and mac:
-        source = bt_a2dp_source_name(mac)
+        source = resolve_a2dp_source(mac)
     elif source is None:
         sources = list_bt_audio_sources()
         if sources:
@@ -696,8 +782,11 @@ def capture_a2dp(mac: str | None = None, output_file: str = "a2dp_capture.wav",
         time.sleep(duration)
         proc.terminate()
         proc.wait(timeout=5)
-        success(f"Captured A2DP audio -> {output_file}")
-        return output_file
+        if os.path.exists(output_file) and os.path.getsize(output_file) > 44:
+            success(f"Captured A2DP audio -> {output_file}")
+            return output_file
+        warning(f"Capture file is empty or missing: {output_file}")
+        return ""
     except subprocess.TimeoutExpired:
         try:
             proc.terminate()
@@ -736,7 +825,8 @@ def diagnose_bt_audio(mac: str):
     console.rule("[bold]Bluetooth Audio Diagnostics")
 
     # Card info
-    card = bt_card_name(mac)
+    snapshot = get_audio_device_snapshot(mac)
+    card = snapshot["card"]
     result = run_cmd(["pactl", "list", "cards"])
     if result.returncode == 0:
         in_card = False
@@ -754,7 +844,7 @@ def diagnose_bt_audio(mac: str):
             error(f"Card {card} not found in pactl output")
 
     # Sources
-    source = bt_source_name(mac)
+    source = snapshot["hfp_source"]
     console.print(f"\n[bold]Expected source:[/bold] {source}")
     result = run_cmd(["pactl", "list", "sources", "short"])
     if result.returncode == 0:
@@ -767,7 +857,7 @@ def diagnose_bt_audio(mac: str):
             warning("No bluez sources found")
 
     # Sinks
-    sink = bt_sink_name(mac)
+    sink = snapshot["sink"]
     console.print(f"\n[bold]Expected sink:[/bold] {sink}")
     result = run_cmd(["pactl", "list", "sinks", "short"])
     if result.returncode == 0:
@@ -781,7 +871,7 @@ def diagnose_bt_audio(mac: str):
     console.print(f"  {result.stdout.strip()}" if result.returncode == 0 else "  (unavailable)")
 
     # Active profile
-    profile = get_active_profile(mac)
+    profile = snapshot["profile"]
     console.print(f"\n[bold]Active profile:[/bold] {profile}")
     if "a2dp" in profile:
         info("Profile is A2DP - switch to headset-head-unit for mic access")
