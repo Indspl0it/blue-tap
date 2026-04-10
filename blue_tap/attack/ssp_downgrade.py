@@ -39,6 +39,11 @@ import time
 
 from blue_tap.utils.bt_helpers import normalize_mac, run_cmd
 from blue_tap.utils.output import info, success, error, warning
+from blue_tap.core.result_schema import (
+    EXECUTION_COMPLETED, EXECUTION_FAILED, EXECUTION_ERROR, EXECUTION_SKIPPED,
+    build_run_envelope, make_execution, make_evidence, make_run_id, now_iso,
+)
+from blue_tap.core.cli_events import emit_cli_event
 
 
 class SSPDowngradeAttack:
@@ -66,6 +71,18 @@ class SSPDowngradeAttack:
             "time_elapsed": 0.0,
             "notes": [],
         }
+        self.run_id = make_run_id("ssp-downgrade")
+        self._started_at = now_iso()
+        self._cli_events: list[dict] = []
+        self._executions: list[dict] = []
+
+    def _emit(self, event_type: str, message: str, **details):
+        evt = emit_cli_event(
+            event_type=event_type, module="attack", run_id=self.run_id,
+            target=self.target, adapter=self.hci, message=message,
+            details=details,
+        )
+        self._cli_events.append(evt)
 
     def probe(self) -> dict:
         """Check if the target supports SSP and what IO capabilities it advertises.
@@ -77,6 +94,8 @@ class SSPDowngradeAttack:
         Returns:
             Dict with keys: ssp_supported, io_capability, legacy_fallback_possible.
         """
+        phase_start = now_iso()
+        self._emit("phase_started", "SSP probe starting")
         result = {
             "ssp_supported": None,
             "io_capability": None,
@@ -169,6 +188,23 @@ class SSPDowngradeAttack:
             result["notes"].append("SSP status unknown — will attempt downgrade")
 
         self._results["probe"] = result
+        self._executions.append(make_execution(
+            kind="check", id="ssp_probe", title="SSP Downgrade Probe",
+            module="attack", protocol="BR/EDR",
+            execution_status=EXECUTION_COMPLETED,
+            module_outcome="confirmed" if result["legacy_fallback_possible"] else "not_applicable",
+            evidence=make_evidence(
+                summary=f"SSP={result['ssp_supported']}, legacy_fallback={'possible' if result['legacy_fallback_possible'] else 'unlikely'}",
+                confidence="medium",
+                observations=result["notes"],
+                module_evidence={"ssp_supported": result["ssp_supported"], "io_capability": result["io_capability"], "bt_version": result["bt_version"]},
+            ),
+            started_at=phase_start, completed_at=now_iso(),
+            tags=["ssp", "downgrade", "probe"],
+            module_data=result,
+        ))
+        self._emit("execution_result", f"SSP probe: legacy_fallback={'possible' if result['legacy_fallback_possible'] else 'unlikely'}")
+        self._emit("run_completed", "SSP probe completed")
         return result
 
     def downgrade(self) -> bool:
@@ -182,6 +218,8 @@ class SSPDowngradeAttack:
         Returns:
             True if legacy PIN mode was forced, False otherwise.
         """
+        phase_start = now_iso()
+        self._emit("phase_started", "SSP downgrade starting")
         info(f"Attempting SSP downgrade on {self.target}...")
         hci_index = self.hci.replace("hci", "")
 
@@ -220,6 +258,21 @@ class SSPDowngradeAttack:
             if fallback.returncode != 0:
                 error("Failed to disable SSP via both btmgmt and hciconfig")
                 self._results["notes"].append("SSP disable failed")
+                self._executions.append(make_execution(
+                    kind="action", id="ssp_downgrade", title="SSP Downgrade",
+                    module="attack", protocol="BR/EDR",
+                    execution_status=EXECUTION_FAILED,
+                    module_outcome="failed",
+                    evidence=make_evidence(
+                        summary="SSP disable failed via btmgmt and hciconfig",
+                        confidence="high",
+                        observations=["btmgmt ssp off failed", "hciconfig sspmode 0 failed"],
+                        module_evidence={},
+                    ),
+                    started_at=phase_start, completed_at=now_iso(),
+                    tags=["ssp", "downgrade"],
+                    module_data={"downgrade_success": False},
+                ))
                 return False
 
         info("SSP disabled — adapter will negotiate legacy pairing")
@@ -305,6 +358,21 @@ class SSPDowngradeAttack:
         except Exception as exc:
             error(f"Downgrade attempt error: {exc}")
             self._results["notes"].append(f"Exception during downgrade: {exc}")
+            self._executions.append(make_execution(
+                kind="action", id="ssp_downgrade", title="SSP Downgrade",
+                module="attack", protocol="BR/EDR",
+                execution_status=EXECUTION_ERROR,
+                module_outcome="failed",
+                evidence=make_evidence(
+                    summary=f"Exception during downgrade: {exc}",
+                    confidence="high",
+                    observations=[str(exc)],
+                    module_evidence={},
+                ),
+                started_at=phase_start, completed_at=now_iso(),
+                tags=["ssp", "downgrade"],
+                module_data={"exception": str(exc)},
+            ))
             return False
 
         self._results["downgrade_success"] = legacy_mode
@@ -315,6 +383,21 @@ class SSPDowngradeAttack:
                 "SSP downgrade failed — target may enforce SSP-Only"
             )
 
+        self._executions.append(make_execution(
+            kind="action", id="ssp_downgrade", title="SSP Downgrade",
+            module="attack", protocol="BR/EDR",
+            execution_status=EXECUTION_COMPLETED,
+            module_outcome="success" if legacy_mode else "failed",
+            evidence=make_evidence(
+                summary="Legacy PIN mode forced" if legacy_mode else "Downgrade did not succeed",
+                confidence="high",
+                observations=self._results["notes"],
+                module_evidence={"legacy_mode": legacy_mode},
+            ),
+            started_at=phase_start, completed_at=now_iso(),
+            tags=["ssp", "downgrade"],
+            module_data={"downgrade_success": legacy_mode},
+        ))
         return legacy_mode
 
     def downgrade_and_brute(
@@ -340,6 +423,8 @@ class SSPDowngradeAttack:
         Returns:
             Dict with: success, pin_found, attempts, time_elapsed, notes.
         """
+        phase_start = now_iso()
+        self._emit("run_started", "SSP downgrade and brute force starting")
         result = {
             "success": False,
             "pin_found": None,
@@ -353,6 +438,22 @@ class SSPDowngradeAttack:
         if pin_start > pin_end:
             error(f"Invalid PIN range: start ({pin_start}) > end ({pin_end})")
             result["notes"].append(f"Invalid range: {pin_start}-{pin_end}")
+            self._executions.append(make_execution(
+                kind="action", id="ssp_downgrade_brute", title="SSP Downgrade + PIN Brute Force",
+                module="attack", protocol="BR/EDR",
+                execution_status=EXECUTION_SKIPPED,
+                module_outcome="not_applicable",
+                evidence=make_evidence(
+                    summary=f"Invalid PIN range: {pin_start}-{pin_end}",
+                    confidence="high",
+                    observations=[f"Invalid range: {pin_start}-{pin_end}"],
+                    module_evidence={},
+                ),
+                started_at=phase_start, completed_at=now_iso(),
+                tags=["ssp", "downgrade", "brute"],
+                module_data=result,
+            ))
+            self._emit("run_completed", "SSP downgrade skipped: invalid PIN range")
             return result
 
         start_time = time.time()
@@ -400,6 +501,22 @@ class SSPDowngradeAttack:
                 self._results["pin_found"] = pin
                 self._results["attempts"] = result["attempts"]
                 self._results["time_elapsed"] = result["time_elapsed"]
+                self._executions.append(make_execution(
+                    kind="action", id="ssp_downgrade_brute", title="SSP Downgrade + PIN Brute Force",
+                    module="attack", protocol="BR/EDR",
+                    execution_status=EXECUTION_COMPLETED,
+                    module_outcome="success",
+                    evidence=make_evidence(
+                        summary=f"PIN found: {pin} after {result['attempts']} attempts",
+                        confidence="high",
+                        observations=result["notes"],
+                        module_evidence={"pin_found": pin, "attempts": result["attempts"]},
+                    ),
+                    started_at=phase_start, completed_at=now_iso(),
+                    tags=["ssp", "downgrade", "brute"],
+                    module_data=result,
+                ))
+                self._emit("run_completed", f"SSP brute force succeeded: PIN={pin}")
                 return result
 
             # Lockout detection: 3+ consecutive timeouts
@@ -439,6 +556,23 @@ class SSPDowngradeAttack:
                 f"({result['attempts']} attempts in {result['time_elapsed']:.1f}s)"
             )
 
+        _brute_outcome = "lockout" if result["lockout_detected"] else "failed"
+        self._executions.append(make_execution(
+            kind="action", id="ssp_downgrade_brute", title="SSP Downgrade + PIN Brute Force",
+            module="attack", protocol="BR/EDR",
+            execution_status=EXECUTION_COMPLETED,
+            module_outcome=_brute_outcome,
+            evidence=make_evidence(
+                summary=f"PIN not found after {result['attempts']} attempts; lockout={result['lockout_detected']}",
+                confidence="high",
+                observations=result["notes"],
+                module_evidence={"attempts": result["attempts"], "lockout_detected": result["lockout_detected"]},
+            ),
+            started_at=phase_start, completed_at=now_iso(),
+            tags=["ssp", "downgrade", "brute"],
+            module_data=result,
+        ))
+        self._emit("run_completed", f"SSP brute force completed: outcome={_brute_outcome}")
         return result
 
     def _try_pin(self, pin: str) -> tuple[bool, float]:
@@ -537,6 +671,27 @@ class SSPDowngradeAttack:
             return True, elapsed
 
         return False, elapsed
+
+    def build_envelope(self) -> dict:
+        return build_run_envelope(
+            schema="blue_tap.attack.result",
+            module="attack",
+            target=self.target,
+            adapter=self.hci,
+            operator_context={"command": "ssp-downgrade"},
+            summary={
+                "operation": "ssp_downgrade",
+                "pin_found": self._results.get("pin_found"),
+                "attempts": self._results.get("attempts", 0),
+                "lockout_detected": any(
+                    e.get("module_data", {}).get("lockout_detected") for e in self._executions
+                ),
+            },
+            executions=self._executions,
+            module_data={"cli_events": self._cli_events, **self._results},
+            started_at=self._started_at,
+            run_id=self.run_id,
+        )
 
     def get_results(self) -> dict:
         """Return complete attack results for reporting.
