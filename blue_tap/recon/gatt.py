@@ -100,8 +100,15 @@ async def enumerate_services_detailed(address: str, adapter: str | None = None) 
             "observations": ["collector=bleak", "status=collector_unavailable"],
         }
 
+    # BleakDeviceNotFoundError was added in bleak 0.19; gracefully fall back for older installs
+    try:
+        from bleak import BleakDeviceNotFoundError as _BleakNotFound
+    except ImportError:
+        _BleakNotFound = None  # type: ignore[assignment,misc]
+
     info(f"Connecting to {address} for GATT enumeration...")
 
+    _rescan_done = False
     max_retries = 2
     for attempt in range(max_retries + 1):
         try:
@@ -209,8 +216,36 @@ async def enumerate_services_detailed(address: str, adapter: str | None = None) 
 
         except Exception as e:
             err_str = str(e).lower()
-            if "not found" in err_str or "not discovered" in err_str:
-                error(f"Device {address} not found. Run a BLE scan first.")
+            is_not_found = (
+                (_BleakNotFound is not None and isinstance(e, _BleakNotFound))
+                or "not found" in err_str
+                or "not discovered" in err_str
+            )
+            if is_not_found and not _rescan_done:
+                # BlueZ device cache expires between CLI invocations.
+                # Run a brief passive scan to re-populate the cache, then retry once.
+                _rescan_done = True
+                warning(
+                    f"Device {address} not in BlueZ cache — running 5s re-scan to re-discover..."
+                )
+                try:
+                    from bleak import BleakScanner
+                    scanner_kwargs: dict = {}
+                    if adapter:
+                        scanner_kwargs["adapter"] = adapter
+                    discovered = await BleakScanner.discover(timeout=5.0, **scanner_kwargs)
+                    if any(d.address.upper() == address.upper() for d in discovered):
+                        info(f"Device {address} re-discovered — retrying GATT connection")
+                        continue  # retry with fresh BlueZ cache entry
+                    else:
+                        error(f"Device {address} not found after re-scan. Device may be out of range.")
+                        return _gatt_error_result("not_found", str(e))
+                except Exception as scan_exc:
+                    warning(f"Re-scan failed: {scan_exc}")
+                    error(f"Device {address} not found. Ensure it is advertising and in range.")
+                    return _gatt_error_result("not_found", str(e))
+            if is_not_found:
+                error(f"Device {address} not found after re-scan. Device may be out of range.")
                 return _gatt_error_result("not_found", str(e))
             if attempt < max_retries:
                 wait = (attempt + 1) * 2

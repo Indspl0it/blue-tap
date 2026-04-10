@@ -66,7 +66,7 @@ def build_attack_result(
         summary={"operation": operation, **dict(summary_data or {})},
         executions=[execution],
         artifacts=list(artifacts or []),
-        module_data={"operation": operation, **dict(module_data)},
+        module_data={"operation": operation, "artifacts": list(artifacts or []), **dict(module_data)},
         started_at=started,
         completed_at=finished,
     )

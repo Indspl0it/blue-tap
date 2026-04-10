@@ -431,7 +431,8 @@ class DarkFirmwareSniffer:
             from blue_tap.core.firmware import DarkFirmwareManager
             fw = DarkFirmwareManager()
             return fw.is_darkfirmware_loaded(f"hci{self.hci_dev}")
-        except Exception:
+        except Exception as exc:
+            warning(f"DarkFirmware availability check failed on hci{self.hci_dev}: {exc}")
             return False
 
     def start_capture(

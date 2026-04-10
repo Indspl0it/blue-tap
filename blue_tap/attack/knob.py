@@ -91,7 +91,8 @@ class KNOBAttack:
             from blue_tap.core.firmware import DarkFirmwareManager
             fw = DarkFirmwareManager()
             self._darkfirmware_available = fw.is_darkfirmware_loaded(self.hci)
-        except Exception:
+        except Exception as exc:
+            warning(f"DarkFirmware check failed on {self.hci}: {exc}")
             self._darkfirmware_available = False
         return self._darkfirmware_available
 

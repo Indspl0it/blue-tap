@@ -38,7 +38,11 @@ def browse_services_detailed(address: str, hci: str = "hci0",
     info(f"Browsing SDP services on {address}...")
 
     for attempt in range(retries + 1):
-        result = run_cmd(["sdptool", "browse", "--bdaddr", hci, address], timeout=30)
+        cmd = ["sdptool"]
+        if hci:
+            cmd += ["-i", hci]
+        cmd += ["browse", address]
+        result = run_cmd(cmd, timeout=30)
 
         if result.returncode == 0:
             services = parse_sdp_output(result.stdout)
@@ -372,7 +376,11 @@ def check_ssp(address: str, hci: str = "hci0") -> bool | None:
 
 def get_raw_sdp(address: str, hci: str = "hci0") -> str:
     """Get raw SDP output for analysis."""
-    result = run_cmd(["sdptool", "browse", "--bdaddr", hci, address], timeout=30)
+    cmd = ["sdptool"]
+    if hci:
+        cmd += ["-i", hci]
+    cmd += ["browse", address]
+    result = run_cmd(cmd, timeout=30)
     return result.stdout if result.returncode == 0 else ""
 
 

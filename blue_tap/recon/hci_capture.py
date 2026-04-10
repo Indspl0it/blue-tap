@@ -109,7 +109,7 @@ class HCICapture:
             info(f"btmon capture started -> {output_file}"
                  f"{' (btsnoop/pcap)' if pcap else ''}")
             return True
-        except OSError as exc:
+        except Exception as exc:
             if self._fh is not None:
                 self._fh.close()
                 self._fh = None

@@ -749,8 +749,8 @@ class HijackSession:
                 try:
                     from blue_tap.core.spoofer import restore_original_mac
                     restore_original_mac(self.hci)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    warning(f"MAC restore failed during impersonation failure cleanup: {exc}")
                 self._emit("run_completed", "Hijack run ended early: impersonation failed")
                 return self.build_envelope()
         except Exception as e:
@@ -760,8 +760,8 @@ class HijackSession:
             try:
                 from blue_tap.core.spoofer import restore_original_mac
                 restore_original_mac(self.hci)
-            except Exception:
-                pass
+            except Exception as restore_exc:
+                warning(f"MAC restore failed during impersonation error cleanup: {restore_exc}")
             self._emit("run_completed", f"Hijack run ended early: impersonation error ({e})")
             return self.build_envelope()
 
@@ -791,8 +791,8 @@ class HijackSession:
             try:
                 from blue_tap.core.spoofer import restore_original_mac
                 restore_original_mac(self.hci)
-            except Exception:
-                pass
+            except Exception as exc:
+                warning(f"MAC restore failed during connection rollback: {exc}")
 
             console.rule("[bold]Attack Summary")
             for phase_name, result in results["phases"].items():
