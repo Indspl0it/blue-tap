@@ -1359,7 +1359,7 @@ def _crash_commands(fuzz_group):
 
         # Create transport
         try:
-            from blue_tap.fuzz.transport import L2CAPTransport, RFCOMMTransport, BLETransport
+            from blue_tap.fuzz.transport import L2CAPTransport, RFCOMMTransport, BLETransport, RawACLTransport
             ttype = spec["type"]
             if ttype == "l2cap":
                 transport = L2CAPTransport(target_addr, psm=spec["psm"])
@@ -1368,21 +1368,18 @@ def _crash_commands(fuzz_group):
             elif ttype == "ble":
                 transport = BLETransport(target_addr, cid=spec["cid"],
                                          address_type=BLETransport._detect_address_type(target_addr))
+            elif ttype == "raw-acl":
+                transport = RawACLTransport(target_addr, hci_dev=spec.get("hci_dev", 1))
             else:
                 error(f"Unsupported transport type: {ttype}")
                 _cleanup_capture(hci_capture)
                 db.close()
                 return
-        except ImportError:
-            # Fall back to stub transport from engine
-            from blue_tap.fuzz.engine import _StubTransport
-            transport = _StubTransport(
-                target_addr,
-                transport_type=spec["type"],
-                psm=spec.get("psm", 1),
-                channel=spec.get("channel", 1),
-                cid=spec.get("cid", 4),
-            )
+        except ImportError as exc:
+            error(f"Failed to import fuzz transport backend: {exc}")
+            _cleanup_capture(hci_capture)
+            db.close()
+            return
 
         # Replay
         reproduced = False

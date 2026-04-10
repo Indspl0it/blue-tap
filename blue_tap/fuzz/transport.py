@@ -736,7 +736,13 @@ class LMPTransport(BluetoothTransport):
         try:
             self.close()
 
+            from blue_tap.core.firmware import DarkFirmwareManager
             from blue_tap.core.hci_vsc import HCIVSCSocket
+
+            fw = DarkFirmwareManager()
+            if not fw.is_darkfirmware_loaded(f"hci{self.hci_dev}"):
+                error(f"DarkFirmware not loaded on hci{self.hci_dev} — LMP fuzzing requires RTL8761B firmware hooks")
+                return False
 
             self._hci_vsc = HCIVSCSocket(self.hci_dev)
             self._hci_vsc.open()
@@ -981,7 +987,16 @@ class RawACLTransport(BluetoothTransport):
 
     def connect(self) -> bool:
         """Open HCI VSC socket and find the ACL connection handle."""
+        from blue_tap.core.firmware import DarkFirmwareManager
         from blue_tap.core.hci_vsc import HCIVSCSocket
+
+        fw = DarkFirmwareManager()
+        if not fw.is_darkfirmware_loaded(f"hci{self.hci_dev}"):
+            error(
+                f"DarkFirmware not loaded on hci{self.hci_dev} — raw ACL injection "
+                "requires RTL8761B firmware hooks"
+            )
+            return False
 
         try:
             self._hci_vsc = HCIVSCSocket(hci_dev=self.hci_dev)

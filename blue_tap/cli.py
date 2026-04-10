@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import sys
 
 import rich_click as click
 from rich.table import Table
@@ -257,12 +258,28 @@ def main(verbose, session_name):
 
     # ---- Hardware detection, DarkFirmware auto-flash, hook init, watchdog ----
     try:
-        _startup_hardware_check()
+        _startup_hardware_check(invoked, sys.argv[1:])
     except Exception:
         pass  # Don't let hardware detection break CLI startup
 
 
-def _startup_hardware_check() -> None:
+def _command_needs_darkfirmware_bootstrap(invoked: str, argv: list[str]) -> bool:
+    """Return whether this invocation should auto-init DarkFirmware hooks."""
+    root = (invoked or "").strip().lower()
+    args = [str(item).strip().lower() for item in argv if str(item).strip()]
+
+    if root in {"adapter", "doctor", "report", "session", "scan"}:
+        return False
+    if root in {"auto", "bias", "bluffs", "ctkd", "encryption-downgrade", "knob", "ssp-downgrade", "vulnscan"}:
+        return True
+    if root == "fuzz":
+        return any(token in {"l2cap-sig", "lmp"} for token in args)
+    if root == "recon":
+        return any(token in {"combined-sniff", "lmp-monitor", "lmp-sniff"} for token in args)
+    return False
+
+
+def _startup_hardware_check(invoked: str, argv: list[str] | None = None) -> None:
     """Non-blocking hardware detection and DarkFirmware initialization.
 
     Sequence:
@@ -275,6 +292,7 @@ def _startup_hardware_check() -> None:
     from blue_tap.core.firmware import DarkFirmwareManager, DarkFirmwareWatchdog
     from blue_tap.utils.bt_helpers import run_cmd
 
+    argv = list(argv or [])
     fw = DarkFirmwareManager()
 
     # Step 1: Detect RTL8761B hardware — prefer sysfs/hciconfig detection
@@ -310,6 +328,9 @@ def _startup_hardware_check() -> None:
             )
         return
 
+    if not _command_needs_darkfirmware_bootstrap(invoked, argv):
+        return
+
     # Step 2: Check if DarkFirmware is loaded — prompt to install if not
     # (Don't auto-flash: user may have custom firmware or not want changes)
     if not fw.is_darkfirmware_loaded(dongle_hci):
@@ -331,8 +352,8 @@ def _startup_hardware_check() -> None:
     else:
         active = [k for k in ("hook1", "hook2", "hook3", "hook4") if hook_status.get(k)]
         failed = [k for k in ("hook1", "hook2", "hook3", "hook4") if not hook_status.get(k)]
-        info(
-            f"[green]DarkFirmware active on {dongle_hci}[/green] — "
+        warning(
+            f"DarkFirmware partially initialized on {dongle_hci} — "
             f"hooks: active=[{', '.join(active)}] failed=[{', '.join(failed)}]"
         )
 
