@@ -2089,6 +2089,9 @@ def spoof_mac(target_mac, hci, method):
         error(f"MAC spoof failed: {exc}")
 
     from blue_tap.utils.session import log_command
+    # TODO(standardization): Keep low-level spoofing operations as raw session
+    # events until we decide whether they belong in formal reports or remain
+    # operator-only actions under the attack module contract.
     log_command("spoof_mac", {"target_mac": target_mac, "hci": hci, "method": method, "success": ok}, category="attack")
 
 
