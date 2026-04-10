@@ -12,6 +12,8 @@ from blue_tap.core.fuzz_framework import (
     make_fuzz_run_id,
 )
 from blue_tap.core.result_schema import validate_run_envelope
+from blue_tap.fuzz.engine import FuzzCampaign, PROTOCOL_TRANSPORT_MAP
+from blue_tap.fuzz.protocols.l2cap_raw import generate_all_l2cap_sig_fuzz_cases
 
 
 def _assert_envelope_v2(envelope: dict, module: str = "fuzz"):
@@ -253,6 +255,56 @@ def test_campaign_envelope_validates():
     )
     errors = validate_run_envelope(envelope)
     assert errors == [], f"Validation errors: {errors}"
+
+
+def test_protocol_transport_map_includes_l2cap_sig_raw_acl():
+    assert PROTOCOL_TRANSPORT_MAP["l2cap-sig"]["type"] == "raw-acl"
+
+
+def test_fuzz_campaign_transport_override_is_applied():
+    campaign = FuzzCampaign(
+        target="AA:BB:CC:DD:EE:FF",
+        protocols=["l2cap-sig"],
+        session_dir="/tmp/fuzz-test",
+        transport_overrides={"l2cap-sig": {"hci_dev": 7}},
+    )
+    assert campaign.transport_overrides["l2cap-sig"]["hci_dev"] == 7
+
+
+def test_l2cap_sig_generator_returns_full_l2cap_frames():
+    cases = generate_all_l2cap_sig_fuzz_cases()
+    assert cases
+    assert any(len(case) >= 4 for case in cases)
+    for case in cases:
+        if len(case) >= 4:
+            declared_length = int.from_bytes(case[:2], "little")
+            cid = int.from_bytes(case[2:4], "little")
+            assert cid in {0x0000, 0x0001, 0x0002, 0x0006, 0xFFFF}
+            if declared_length != 0xFFFF:
+                assert declared_length >= 0
+
+
+def test_single_protocol_transport_connect_failure_is_finalized(tmp_path, monkeypatch):
+    class FakeTransport:
+        connected = False
+
+        def connect(self):
+            return False
+
+        def close(self):
+            return None
+
+    campaign = FuzzCampaign(
+        target="AA:BB:CC:DD:EE:FF",
+        protocols=["l2cap-sig"],
+        session_dir=str(tmp_path),
+    )
+
+    monkeypatch.setattr(campaign, "_setup_transports", lambda: campaign._transports.update({"l2cap-sig": FakeTransport()}))
+    envelope = campaign.run_single_protocol("l2cap-sig", [b"\x00\x00\x01\x00"])
+    assert envelope["summary"]["errors"] == 1
+    assert envelope["summary"]["sent"] == 0
+    assert envelope["executions"][0]["execution_status"] in {"failed", "error"}
 
 
 # ---------------------------------------------------------------------------

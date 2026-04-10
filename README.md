@@ -273,6 +273,7 @@ sudo blue-tap vulnscan <MAC>        # Run vulnerability checks
 ## Documentation
 
 - **[Features](docs/features.md)** — Every command, option, and example for all feature categories
+- **[Discovery Guide](docs/discovery-guide.md)** — Discovery architecture, structured scan JSON, merge model, and scan/report fields
 - **[Vulnscan CVE Matrix](docs/vulnscan-cve-matrix.md)** — Exact CVEs checked by `blue-tap vulnscan`
 - **[DoS Guide](docs/dos-guide.md)** — DoS workflow, recovery model, pairing constraints, and reporting format
 - **[DoS CVE Matrix](docs/dos-cve-matrix.md)** — Exact CVE-backed destructive checks registered in `blue-tap dos`

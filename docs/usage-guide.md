@@ -144,7 +144,8 @@ Step-by-step with full control over each phase.
 ```bash
 # 1. Discovery
 blue-tap -s pentest scan classic
-blue-tap -s pentest scan ble
+blue-tap -s pentest scan ble -i hci1
+blue-tap -s pentest scan all -i hci1
 
 # 2. Reconnaissance
 blue-tap -s pentest recon sdp AA:BB:CC:DD:EE:FF

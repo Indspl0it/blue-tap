@@ -4,24 +4,26 @@
 
 ### 1. Discovery and Scanning
 
-Passive and active discovery of Bluetooth Classic and BLE devices in range with full device class decoding and manufacturer identification.
+Passive and active discovery of Bluetooth Classic and BLE devices in range with full device class decoding, structured manufacturer parsing, and session/report logging.
 
 | Command | Description |
 |---------|-------------|
 | `blue-tap scan classic` | Bluetooth Classic inquiry scan — discovers BR/EDR devices, shows name, MAC, device class |
-| `blue-tap scan ble` | BLE scan using bleak — discovers LE advertisers, shows name, MAC, services, manufacturer data |
+| `blue-tap scan ble` | BLE scan using bleak — discovers LE advertisers, shows name, MAC, services, manufacturer data, and supports adapter selection |
 | `blue-tap scan ble --passive` | Passive BLE scan (no SCAN_REQ sent) — stealthier, only collects advertisement data |
-| `blue-tap scan all` | Combined Classic + BLE scan with automatic dual-mode device merging |
+| `blue-tap scan all` | Combined Classic + BLE scan with exact-address dual-mode merging and conservative correlation hints |
 
 **Key capabilities:**
 - Full device class decoding: Computer (Desktop/Laptop/Tablet), Phone (Cellular/Smartphone), Audio/Video (Car Audio, Headset, Headphones, Speaker), Peripheral (Remote/Gamepad), Wearable (Wristwatch/Glasses)
-- BLE manufacturer identification (30+ vendors: Apple, Samsung, Tesla, Bose, Harman, Continental, etc.)
+- BLE manufacturer identification and payload capture (company ID, vendor name, payload hex)
 - RSSI signal strength with distance estimation (log-distance path loss model)
-- Name resolution with retry logic for flaky Classic BT connections
-- JSON output (`-o results.json`) for scripted pipelines
+- Classic inquiry with bounded name resolution and explicit progress logging
+- Structured JSON output (`blue_tap.scan.result`) for scripted pipelines and report generation
 - Configurable scan duration (`-d 30` for 30 seconds)
 - Adapter selection (`-i hci1`) for multi-adapter setups
-- All scan results logged to session for report generation
+- All scan results logged to session with collector metadata for report generation
+
+**Detailed reference:** See [Discovery and Scanning Guide](discovery-guide.md) for the scan result schema, merge model, and reporting fields.
 
 ---
 
