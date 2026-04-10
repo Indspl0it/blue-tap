@@ -2,7 +2,9 @@
 
 import errno
 import socket
+import string
 
+from blue_tap.recon.spec_interpretation import interpret_rfcomm_probe
 from blue_tap.utils.output import info, success, error, warning, verbose
 
 
@@ -93,11 +95,19 @@ class RFCOMMScanner:
 
         Response types: at_modem, obex, raw_data, silent_open, refused, timeout.
         """
+        import time
+
         result = {
             "channel": channel,
             "status": "closed",
             "response_type": "refused",
             "raw_response_hex": "",
+            "banner_preview": "",
+            "protocol_hints": [],
+            "probe_bytes": [probe.hex() for probe in self.PROBE_BYTES],
+            "probe_results": [],
+            "connect_latency_ms": None,
+            "first_response_latency_ms": None,
         }
 
         sock = socket.socket(
@@ -108,7 +118,9 @@ class RFCOMMScanner:
             sock.bind((self._local_addr, 0))
 
         try:
+            connect_started = time.time()
             sock.connect((self.address, channel))
+            result["connect_latency_ms"] = round((time.time() - connect_started) * 1000, 1)
         except OSError as exc:
             sock.close()
             if exc.errno == errno.ECONNREFUSED:
@@ -130,33 +142,63 @@ class RFCOMMScanner:
         try:
             # Send probes one at a time, read response after each
             data = b""
-            for probe in self.PROBE_BYTES:
+            for index, probe in enumerate(self.PROBE_BYTES, 1):
                 try:
+                    probe_started = time.time()
                     sock.sendall(probe)
                     sock.settimeout(timeout)
                     chunk = sock.recv(1024)
+                    elapsed_ms = round((time.time() - probe_started) * 1000, 1)
                     if chunk:
                         data = chunk
+                        if result["first_response_latency_ms"] is None:
+                            result["first_response_latency_ms"] = elapsed_ms
+                        result["probe_results"].append({
+                            "index": index,
+                            "sent_hex": probe.hex(),
+                            "response_hex": chunk[:32].hex(),
+                            "response_len": len(chunk),
+                            "elapsed_ms": elapsed_ms,
+                        })
                         break
+                    result["probe_results"].append({
+                        "index": index,
+                        "sent_hex": probe.hex(),
+                        "response_hex": "",
+                        "response_len": 0,
+                        "elapsed_ms": elapsed_ms,
+                    })
                 except TimeoutError:
+                    result["probe_results"].append({
+                        "index": index,
+                        "sent_hex": probe.hex(),
+                        "response_hex": "",
+                        "response_len": 0,
+                        "elapsed_ms": timeout * 1000,
+                    })
                     continue
                 except OSError:
+                    result["probe_results"].append({
+                        "index": index,
+                        "sent_hex": probe.hex(),
+                        "response_hex": "",
+                        "response_len": 0,
+                        "elapsed_ms": None,
+                    })
                     break
 
             # Store as hex for JSON serialization
             result["raw_response_hex"] = data.hex() if data else ""
-
-            if not data:
-                result["response_type"] = "silent_open"
-            elif _is_obex(data):
-                result["response_type"] = "obex"
-            elif b"OK" in data or b"ERROR" in data or b"AT" in data.upper():
-                result["response_type"] = "at_modem"
-            else:
-                result["response_type"] = "raw_data"
+            result["banner_preview"] = _preview_ascii(data)
+            classification = classify_rfcomm_response(data)
+            result["response_type"] = classification["response_type"]
+            result["protocol_hints"] = classification["protocol_hints"]
+            result["evidence"] = classification["evidence"]
+            result["spec_interpretation"] = interpret_rfcomm_probe(result, advertised=False)
 
         except OSError:
             result["response_type"] = "silent_open"
+            result["spec_interpretation"] = interpret_rfcomm_probe(result, advertised=False)
         finally:
             sock.close()
 
@@ -221,3 +263,68 @@ def _is_obex(data: bytes) -> bool:
     if first == 0x00 and len(data) >= 4:
         return True
     return False
+
+
+def classify_rfcomm_response(data: bytes) -> dict:
+    if not data:
+        return {
+            "response_type": "silent_open",
+            "protocol_hints": ["open_channel_no_banner"],
+            "evidence": "channel accepted a connection but returned no immediate data",
+            "ascii_ratio": 0.0,
+            "line_count": 0,
+        }
+    if _is_obex(data):
+        return {
+            "response_type": "obex",
+            "protocol_hints": ["object_transfer", "obex_like"],
+            "evidence": f"obex-like leading bytes observed ({data[:4].hex()})",
+            "ascii_ratio": _ascii_ratio(data),
+            "line_count": _line_count(data),
+        }
+    upper = data.upper()
+    if b"OK" in upper or b"ERROR" in upper or b"AT" in upper:
+        return {
+            "response_type": "at_modem",
+            "protocol_hints": ["at_command_surface", "telephony_or_modem"],
+            "evidence": _preview_ascii(data),
+            "ascii_ratio": _ascii_ratio(data),
+            "line_count": _line_count(data),
+        }
+    preview = _preview_ascii(data)
+    if preview and any(ch in string.ascii_letters for ch in preview):
+        return {
+            "response_type": "text_banner",
+            "protocol_hints": ["textual_banner"],
+            "evidence": preview,
+            "ascii_ratio": _ascii_ratio(data),
+            "line_count": _line_count(data),
+        }
+    return {
+        "response_type": "raw_binary",
+        "protocol_hints": ["binary_protocol"],
+        "evidence": data[:16].hex(),
+        "ascii_ratio": _ascii_ratio(data),
+        "line_count": _line_count(data),
+    }
+
+
+def _preview_ascii(data: bytes, limit: int = 60) -> str:
+    if not data:
+        return ""
+    text = "".join(chr(byte) if 32 <= byte <= 126 else "." for byte in data[:limit])
+    return text.rstrip(".")
+
+
+def _ascii_ratio(data: bytes) -> float:
+    if not data:
+        return 0.0
+    printable = sum(1 for byte in data if 32 <= byte <= 126)
+    return round(printable / len(data), 3)
+
+
+def _line_count(data: bytes) -> int:
+    if not data:
+        return 0
+    preview = _preview_ascii(data, limit=max(len(data), 128))
+    return preview.count("\n") + 1 if preview else 0

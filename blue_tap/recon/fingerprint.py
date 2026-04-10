@@ -22,7 +22,7 @@ The `ivi_likely` field is a heuristic hint — never use it to gate workflows.
 
 import re
 
-from blue_tap.utils.bt_helpers import run_cmd
+from blue_tap.utils.bt_helpers import lookup_oui, run_cmd
 from blue_tap.recon.sdp import browse_services
 from blue_tap.utils.output import info, success
 
@@ -72,16 +72,27 @@ def fingerprint_device(address: str, hci: str = "hci0") -> dict:
         "address": address,
         "name": "",
         "manufacturer": "Unknown",  # Chipset vendor, not car OEM
+        "manufacturer_name": "Unknown",
+        "manufacturer_id": "",
+        "manufacturer_sources": [],
         "is_ivi": False,            # Kept for backward compat (= ivi_likely)
         "ivi_likely": False,        # Heuristic hint, never gate on this
         "device_class": None,
+        "device_class_raw": None,
         "device_class_info": {},
         "bt_version": None,
+        "hci_version_raw": None,
+        "hci_subversion": None,
         "lmp_version": None,
+        "lmp_version_raw": None,
+        "lmp_subversion": None,
+        "features": [],
+        "extended_features": [],
         "profiles": [],
         "attack_surface": [],
         "vuln_hints": [],
         "ivi_signals": [],          # Why we think it might be an IVI
+        "evidence_classes": {"observed": [], "inferred": [], "heuristic": []},
     }
 
     # Resolve name
@@ -98,6 +109,15 @@ def fingerprint_device(address: str, hci: str = "hci0") -> dict:
     if fp.get("device_class"):
         from blue_tap.core.scanner import parse_device_class
         fp["device_class_info"] = parse_device_class(fp["device_class"])
+        fp["evidence_classes"]["observed"].append("device_class")
+
+    oui_vendor = lookup_oui(address)
+    if oui_vendor:
+        fp["manufacturer_sources"].append({"source": "oui", "value": oui_vendor})
+        if fp["manufacturer"] == "Unknown":
+            fp["manufacturer"] = oui_vendor
+            fp["manufacturer_name"] = oui_vendor
+        fp["evidence_classes"]["inferred"].append("oui_vendor")
 
     # Enumerate services
     services = browse_services(address)
@@ -110,7 +130,10 @@ def fingerprint_device(address: str, hci: str = "hci0") -> dict:
             "protocol": svc.get("protocol"),
             "version": svc.get("profile_version"),
             "provider": svc.get("provider"),
+            "class_ids": svc.get("class_ids", []),
         })
+    if fp["profiles"]:
+        fp["evidence_classes"]["observed"].append("sdp_profiles")
 
     # Heuristic IVI detection (signals only — not definitive)
     _detect_ivi_signals(fp)
@@ -139,23 +162,49 @@ def _parse_hcitool_info(output: str, fp: dict):
     """
     for line in output.splitlines():
         if "Manufacturer:" in line:
-            fp["manufacturer"] = line.split(":", 1)[1].strip()
+            manufacturer = line.split(":", 1)[1].strip()
+            fp["manufacturer"] = manufacturer
+            fp["manufacturer_name"] = manufacturer
+            fp["manufacturer_sources"].append({"source": "hcitool_info", "value": manufacturer})
+            manufacturer_id_match = re.search(r"\((0x[0-9A-Fa-f]+|\d+)\)", line)
+            if manufacturer_id_match:
+                fp["manufacturer_id"] = manufacturer_id_match.group(1)
+            fp["evidence_classes"]["observed"].append("manufacturer")
         elif "LMP Version:" in line:
             m = re.search(r"LMP Version:\s*(.+)", line)
             if m:
-                fp["lmp_version"] = m.group(1).strip()
+                value = m.group(1).strip()
+                fp["lmp_version"] = value
+                fp["lmp_version_raw"] = value
+                fp["evidence_classes"]["observed"].append("lmp_version")
+            sub_m = re.search(r"Subversion:\s*(0x[0-9A-Fa-f]+|\d+)", line)
+            if sub_m:
+                fp["lmp_subversion"] = sub_m.group(1)
         elif "HCI Version:" in line:
             m = re.search(r"HCI Version:\s*(.+)", line)
             if m:
-                fp["bt_version"] = m.group(1).strip()
+                value = m.group(1).strip()
+                fp["bt_version"] = value
+                fp["hci_version_raw"] = value
+                fp["evidence_classes"]["observed"].append("hci_version")
+            sub_m = re.search(r"Subversion:\s*(0x[0-9A-Fa-f]+|\d+)", line)
+            if sub_m:
+                fp["hci_subversion"] = sub_m.group(1)
         elif "Class:" in line:
             m = re.search(r"Class:\s*(0x[0-9A-Fa-f]+)", line)
             if m:
                 fp["device_class"] = m.group(1)
+                fp["device_class_raw"] = m.group(1)
         elif "Device Class:" in line:
             m = re.search(r"Device Class:\s*(0x[0-9A-Fa-f]+)", line)
             if m:
                 fp["device_class"] = m.group(1)
+                fp["device_class_raw"] = m.group(1)
+        elif "Features:" in line:
+            features = re.findall(r"0x[0-9A-Fa-f]+", line)
+            if features:
+                fp["features"].extend(features)
+                fp["evidence_classes"]["observed"].append("features")
 
 
 def _detect_ivi_signals(fp: dict):
@@ -243,6 +292,8 @@ def _detect_ivi_signals(fp: dict):
     fp["ivi_confidence"] = min(len(signals) / 4.0, 1.0)  # 0.0 to 1.0
     fp["ivi_likely"] = len(signals) >= 2
     fp["is_ivi"] = fp["ivi_likely"]  # backward compat
+    if signals:
+        fp["evidence_classes"]["heuristic"].append("ivi_likely")
 
 
 def _map_attack_surface(fp: dict, services: list[dict]):

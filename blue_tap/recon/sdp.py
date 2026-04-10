@@ -1,6 +1,7 @@
 """SDP (Service Discovery Protocol) enumeration."""
 
 import re
+from typing import Any
 
 from blue_tap.utils.bt_helpers import run_cmd, PROFILE_UUIDS
 from blue_tap.utils.output import info, success, error, warning
@@ -8,6 +9,12 @@ from blue_tap.utils.output import info, success, error, warning
 
 def browse_services(address: str, hci: str = "hci0",
                     retries: int = 2) -> list[dict]:
+    detailed = browse_services_detailed(address, hci=hci, retries=retries)
+    return detailed.get("services", [])
+
+
+def browse_services_detailed(address: str, hci: str = "hci0",
+                             retries: int = 2) -> dict[str, Any]:
     """Browse all SDP services on a remote device.
 
     This reveals which Bluetooth profiles the IVI/phone supports:
@@ -17,15 +24,25 @@ def browse_services(address: str, hci: str = "hci0",
     """
     from blue_tap.utils.bt_helpers import ensure_adapter_ready
     if not ensure_adapter_ready(hci):
-        return []
+        return {
+            "services": [],
+            "service_count": 0,
+            "rfcomm_channels": [],
+            "l2cap_psms": [],
+            "raw_output": "",
+            "status": "adapter_not_ready",
+            "partially_parsed": False,
+            "vendor_specific_present": False,
+        }
 
     info(f"Browsing SDP services on {address}...")
 
     for attempt in range(retries + 1):
-        result = run_cmd(["sdptool", "browse", address], timeout=30)
+        result = run_cmd(["sdptool", "browse", "--bdaddr", hci, address], timeout=30)
 
         if result.returncode == 0:
-            return parse_sdp_output(result.stdout)
+            services = parse_sdp_output(result.stdout)
+            return _build_sdp_summary(result.stdout, services, status="completed")
 
         stderr = result.stderr.strip().lower()
         # Transient failures worth retrying
@@ -37,10 +54,30 @@ def browse_services(address: str, hci: str = "hci0",
                 continue
 
         error(f"SDP browse failed: {result.stderr.strip()}")
-        return []
+        return {
+            "services": [],
+            "service_count": 0,
+            "rfcomm_channels": [],
+            "l2cap_psms": [],
+            "raw_output": "",
+            "status": "error",
+            "error": result.stderr.strip(),
+            "partially_parsed": False,
+            "vendor_specific_present": False,
+        }
 
     error(f"SDP browse failed after {retries + 1} attempts")
-    return []
+    return {
+        "services": [],
+        "service_count": 0,
+        "rfcomm_channels": [],
+        "l2cap_psms": [],
+        "raw_output": "",
+        "status": "error",
+        "error": f"failed after {retries + 1} attempts",
+        "partially_parsed": False,
+        "vendor_specific_present": False,
+    }
 
 
 def parse_sdp_output(output: str) -> list[dict]:
@@ -52,21 +89,25 @@ def parse_sdp_output(output: str) -> list[dict]:
     services = []
     current = None
     last_protocol = None
+    section = ""
 
     for line in output.splitlines():
         line = line.strip()
 
         if line.startswith("Service Name:"):
             if current:
+                _finalize_service(current)
                 services.append(current)
-            current = {"name": line.split(":", 1)[1].strip()}
+            current = {"name": line.split(":", 1)[1].strip(), "protocols": [], "raw_attributes": [], "profile_descriptors": []}
             last_protocol = None
+            section = ""
 
         elif line.startswith("Service RecHandle:"):
             if current is None:
-                current = {"name": "Unknown"}
+                current = {"name": "Unknown", "protocols": [], "raw_attributes": [], "profile_descriptors": []}
             current["handle"] = line.split(":", 1)[1].strip()
             last_protocol = None
+            section = ""
 
         elif line.startswith("Service Description:"):
             if current:
@@ -78,22 +119,34 @@ def parse_sdp_output(output: str) -> list[dict]:
 
         elif line.startswith("Service Class ID List:"):
             last_protocol = None
+            section = "class_ids"
 
         elif line.startswith("Profile Descriptor List:"):
             last_protocol = None
+            section = "profiles"
 
         elif line.startswith("Protocol Descriptor List:"):
             last_protocol = None
+            section = "protocols"
 
         elif line.startswith('"') and current:
             m = re.match(r'"(.+?)"\s*\((0x[0-9A-Fa-f]+)\)', line)
             if m:
                 uuid_name = m.group(1)
                 uuid_hex = m.group(2).lower()
-                current.setdefault("class_ids", []).append(uuid_name)
-                current["profile"] = PROFILE_UUIDS.get(uuid_hex, uuid_name)
-
-                # Track protocol context
+                if section == "profiles":
+                    current.setdefault("profile_descriptors", []).append(
+                        {"name": uuid_name, "uuid": uuid_hex, "profile": PROFILE_UUIDS.get(uuid_hex, uuid_name)}
+                    )
+                    current["profile"] = PROFILE_UUIDS.get(uuid_hex, uuid_name)
+                else:
+                    current.setdefault("class_ids", []).append(uuid_name)
+                    current.setdefault("class_id_uuids", []).append(uuid_hex)
+                    if section != "protocols":
+                        current["profile"] = PROFILE_UUIDS.get(uuid_hex, uuid_name)
+                if section == "protocols":
+                    current.setdefault("protocol_stack", []).append({"name": uuid_name, "uuid": uuid_hex})
+                    current.setdefault("protocols", []).append(uuid_name)
                 if "RFCOMM" in uuid_name:
                     last_protocol = "RFCOMM"
                 elif "L2CAP" in uuid_name:
@@ -109,9 +162,12 @@ def parse_sdp_output(output: str) -> list[dict]:
                 current["profile_version"] = f"{major}.{minor}"
             except (ValueError, TypeError):
                 current["profile_version"] = version_str
+            if current.get("profile_descriptors"):
+                current["profile_descriptors"][-1]["version"] = current["profile_version"]
 
         elif "RFCOMM" in line and current:
             last_protocol = "RFCOMM"
+            current.setdefault("protocols", []).append("RFCOMM")
             m = re.search(r"Channel:\s*(\d+)", line)
             if m:
                 current["protocol"] = "RFCOMM"
@@ -119,11 +175,14 @@ def parse_sdp_output(output: str) -> list[dict]:
 
         elif "L2CAP" in line and current:
             last_protocol = "L2CAP"
+            current.setdefault("protocols", []).append("L2CAP")
             m = re.search(r"PSM:\s*(\S+)", line)
             if m:
                 current["protocol"] = "L2CAP"
                 try:
-                    current["channel"] = int(m.group(1), 0)
+                    psm = int(m.group(1), 0)
+                    current["channel"] = psm
+                    current["psm"] = psm
                 except (ValueError, TypeError):
                     current["channel"] = 0
 
@@ -138,7 +197,9 @@ def parse_sdp_output(output: str) -> list[dict]:
             if m:
                 current["protocol"] = "L2CAP"
                 try:
-                    current["channel"] = int(m.group(1), 0)
+                    psm = int(m.group(1), 0)
+                    current["channel"] = psm
+                    current["psm"] = psm
                 except (ValueError, TypeError):
                     current["channel"] = 0
 
@@ -150,14 +211,52 @@ def parse_sdp_output(output: str) -> list[dict]:
 
         # Handle bare attribute lines with hex values (sdptool format variance)
         elif line.startswith("Attribute") and current:
-            # e.g., "Attribute (0x0311) - uint16: 0x0001"
-            pass  # preserve current service, don't break state
+            current.setdefault("raw_attributes", []).append(line)
+            attr_match = re.match(r"Attribute\s+\((0x[0-9A-Fa-f]+)\)\s*-\s*(.+)", line)
+            if attr_match:
+                current.setdefault("attributes", []).append(
+                    {"attribute_id": attr_match.group(1).lower(), "raw": attr_match.group(2).strip()}
+                )
 
     if current:
+        _finalize_service(current)
         services.append(current)
 
     success(f"Found {len(services)} SDP service(s)")
     return services
+
+
+def _build_sdp_summary(raw_output: str, services: list[dict], status: str) -> dict[str, Any]:
+    rfcomm_channels = sorted(
+        {
+            int(service["channel"])
+            for service in services
+            if service.get("protocol") == "RFCOMM" and service.get("channel") is not None
+        }
+    )
+    l2cap_psms = sorted(
+        {
+            int(service["psm"])
+            for service in services
+            if service.get("psm") is not None
+        }
+    )
+    return {
+        "services": services,
+        "service_count": len(services),
+        "rfcomm_channels": rfcomm_channels,
+        "l2cap_psms": l2cap_psms,
+        "raw_output": raw_output,
+        "status": status,
+        "partially_parsed": any(service.get("raw_attributes") for service in services),
+        "vendor_specific_present": any(service.get("vendor_specific") for service in services),
+    }
+
+
+def _finalize_service(service: dict[str, Any]) -> None:
+    service["protocols"] = sorted(set(service.get("protocols", [])))
+    class_ids = service.get("class_ids", [])
+    service["vendor_specific"] = any("vendor" in class_id.lower() for class_id in class_ids)
 
 
 def find_service_channel(address: str, profile_keyword: str,
@@ -271,9 +370,9 @@ def check_ssp(address: str, hci: str = "hci0") -> bool | None:
     return False
 
 
-def get_raw_sdp(address: str) -> str:
+def get_raw_sdp(address: str, hci: str = "hci0") -> str:
     """Get raw SDP output for analysis."""
-    result = run_cmd(["sdptool", "browse", address], timeout=30)
+    result = run_cmd(["sdptool", "browse", "--bdaddr", hci, address], timeout=30)
     return result.stdout if result.returncode == 0 else ""
 
 

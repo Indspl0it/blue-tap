@@ -75,7 +75,12 @@ def classify_automotive_service(uuid: str, description: str) -> str | None:
     return None
 
 
-async def enumerate_services(address: str) -> list[dict]:
+async def enumerate_services(address: str, adapter: str | None = None) -> list[dict]:
+    result = await enumerate_services_detailed(address, adapter=adapter)
+    return result.get("services", [])
+
+
+async def enumerate_services_detailed(address: str, adapter: str | None = None) -> dict:
     """Enumerate all GATT services and characteristics on a BLE device.
 
     Enriches results with standard UUID lookups, security level hints,
@@ -85,17 +90,36 @@ async def enumerate_services(address: str) -> list[dict]:
         from bleak import BleakClient
     except ImportError:
         error("bleak not installed. Install: pip install bleak")
-        return []
+        return {
+            "connected": False,
+            "status": "collector_unavailable",
+            "error": "bleak not installed",
+            "services": [],
+            "service_count": 0,
+            "characteristic_count": 0,
+            "observations": ["collector=bleak", "status=collector_unavailable"],
+        }
 
     info(f"Connecting to {address} for GATT enumeration...")
 
     max_retries = 2
     for attempt in range(max_retries + 1):
         try:
-            async with BleakClient(address, timeout=15.0) as client:
+            client_kwargs = {"timeout": 15.0}
+            if adapter:
+                client_kwargs["adapter"] = adapter
+            async with BleakClient(address, **client_kwargs) as client:
                 if not client.is_connected:
                     error(f"Failed to connect to {address}")
-                    return []
+                    return {
+                        "connected": False,
+                        "status": "not_connectable",
+                        "error": "failed to connect",
+                        "services": [],
+                        "service_count": 0,
+                        "characteristic_count": 0,
+                        "observations": ["connected=false", "status=not_connectable"],
+                    }
 
                 success(f"Connected to {address}")
                 services_list = []
@@ -167,13 +191,27 @@ async def enumerate_services(address: str) -> list[dict]:
                 if auth_chars:
                     info(f"  {auth_chars} characteristic(s) require authentication")
 
-                return services_list
+                return {
+                    "connected": True,
+                    "status": "completed" if services_list else "no_services",
+                    "error": "",
+                    "services": services_list,
+                    "service_count": len(services_list),
+                    "characteristic_count": sum(len(service["characteristics"]) for service in services_list),
+                    "observations": [
+                        "connected=true",
+                        f"service_count={len(services_list)}",
+                        f"characteristic_count={sum(len(service['characteristics']) for service in services_list)}",
+                        f"auth_required_characteristics={auth_chars}",
+                    ],
+                    "security_summary": summarize_gatt_security(services_list),
+                }
 
         except Exception as e:
             err_str = str(e).lower()
             if "not found" in err_str or "not discovered" in err_str:
                 error(f"Device {address} not found. Run a BLE scan first.")
-                return []
+                return _gatt_error_result("not_found", str(e))
             if attempt < max_retries:
                 wait = (attempt + 1) * 2
                 warning(f"GATT enumeration failed ({e}), retrying in {wait}s...")
@@ -181,11 +219,14 @@ async def enumerate_services(address: str) -> list[dict]:
                 continue
             if "timeout" in err_str:
                 error(f"Connection to {address} timed out after {max_retries + 1} attempts.")
+                return _gatt_error_result("timeout", str(e))
+            if "auth" in err_str or "encrypt" in err_str or "security" in err_str:
+                return _gatt_error_result("auth_required", str(e))
             else:
                 error(f"GATT enumeration failed: {e}")
-            return []
+            return _gatt_error_result("error", str(e))
 
-    return []
+    return _gatt_error_result("error", "unexpected enumeration state")
 
 
 def _infer_security(properties: list[str]) -> str:
@@ -284,9 +325,79 @@ def _decode_value(data: bytes, uuid: str) -> str:
     return "".join(chr(b) if 32 <= b <= 126 else "." for b in data)
 
 
-def enumerate_services_sync(address: str) -> list[dict]:
+def enumerate_services_sync(address: str, adapter: str | None = None) -> list[dict]:
     """Synchronous wrapper for GATT enumeration."""
-    return asyncio.run(enumerate_services(address))
+    return asyncio.run(enumerate_services(address, adapter=adapter))
+
+
+def enumerate_services_detailed_sync(address: str, adapter: str | None = None) -> dict:
+    """Synchronous wrapper for detailed GATT enumeration."""
+    return asyncio.run(enumerate_services_detailed(address, adapter=adapter))
+
+
+def flatten_gatt_entries(services: list[dict]) -> list[dict]:
+    """Build summary rows for reports while preserving the full tree elsewhere."""
+    flat_entries = []
+    for service in services:
+        flat_entries.append(
+            {
+                "kind": "service",
+                "handle": service.get("handle"),
+                "uuid": service.get("uuid"),
+                "name": service.get("description"),
+                "properties": "",
+                "automotive_category": service.get("automotive_category"),
+            }
+        )
+        for char in service.get("characteristics", []):
+            flat_entries.append(
+                {
+                    "kind": "characteristic",
+                    "handle": char.get("handle"),
+                    "uuid": char.get("uuid"),
+                    "name": char.get("description"),
+                    "properties": ",".join(char.get("properties", [])),
+                    "security_hint": char.get("security_hint"),
+                    "value_preview": char.get("value_str") or char.get("value_hex"),
+                }
+            )
+    return flat_entries
+
+
+def summarize_gatt_security(services: list[dict]) -> dict:
+    writable = 0
+    notify = 0
+    protected = 0
+    readable = 0
+    for service in services:
+        for char in service.get("characteristics", []):
+            props = {prop.lower() for prop in char.get("properties", [])}
+            if "read" in props:
+                readable += 1
+            if "write" in props or "write-without-response" in props:
+                writable += 1
+            if "notify" in props or "indicate" in props:
+                notify += 1
+            if char.get("security_hint") in {"encrypted/authenticated", "access_denied", "likely_paired", "signed_write"}:
+                protected += 1
+    return {
+        "readable_characteristics": readable,
+        "writable_characteristics": writable,
+        "notify_characteristics": notify,
+        "protected_characteristics": protected,
+    }
+
+
+def _gatt_error_result(status: str, message: str) -> dict:
+    return {
+        "connected": False,
+        "status": status,
+        "error": message,
+        "services": [],
+        "service_count": 0,
+        "characteristic_count": 0,
+        "observations": [f"connected=false", f"status={status}", f"error={message}"],
+    }
 
 
 async def read_characteristic(address: str, uuid: str) -> bytes | None:
