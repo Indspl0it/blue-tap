@@ -10,7 +10,12 @@ OBEX Target: bb582b40-420c-11db-b0de-0800200c9a66 (MAP MAS)
 import os
 import socket
 import struct
+import re
+import textwrap
+import xml.etree.ElementTree as ET
 
+from blue_tap.core.obex_client import MAPSession, ObexError
+from blue_tap.utils.bt_helpers import normalize_mac
 from blue_tap.utils.output import info, success, error, warning
 
 
@@ -50,6 +55,15 @@ MAP_FOLDERS = [
     "telecom/msg/draft",
 ]
 
+MAP_FOLDER_ALIASES = {
+    "inbox": "telecom/msg/inbox",
+    "outbox": "telecom/msg/outbox",
+    "sent": "telecom/msg/sent",
+    "deleted": "telecom/msg/deleted",
+    "draft": "telecom/msg/draft",
+    "drafts": "telecom/msg/draft",
+}
+
 
 class MAPClient:
     """MAP client for downloading SMS/MMS messages from IVI/phone.
@@ -64,17 +78,30 @@ class MAPClient:
     """
 
     def __init__(self, address: str, channel: int | None = None):
-        self.address = address
+        self.address = normalize_mac(address)
         self.channel = channel
         self.sock = None
         self.connection_id = None
+        self._obex_session: MAPSession | None = None
+        self._current_folder_components: list[str] = []
+        self.last_capability_limitations: list[str] = []
 
     def connect(self) -> bool:
         """Establish OBEX connection to MAP MAS server."""
         try:
+            self._obex_session = MAPSession(self.address, channel=self.channel)
+            if self._obex_session.connect():
+                success("MAP OBEX D-Bus session established")
+                return True
+        except ObexError as exc:
+            warning(f"MAP D-Bus session unavailable, falling back to raw OBEX: {exc}")
+            self._obex_session = None
+
+        try:
             self.sock = socket.socket(
                 socket.AF_BLUETOOTH, socket.SOCK_STREAM, socket.BTPROTO_RFCOMM
             )
+            self.sock.settimeout(15.0)
             info(f"Connecting MAP to {self.address} channel {self.channel}...")
             self.sock.connect((self.address, self.channel))
             success("RFCOMM connected for MAP")
@@ -101,6 +128,13 @@ class MAPClient:
 
     def disconnect(self):
         """Disconnect MAP session cleanly with OBEX Disconnect."""
+        if self._obex_session is not None:
+            self._obex_session.disconnect()
+            self._obex_session = None
+            self._current_folder_components = []
+            info("MAP disconnected")
+            return
+
         if self.sock:
             try:
                 # Send OBEX Disconnect
@@ -123,6 +157,28 @@ class MAPClient:
 
     def set_folder(self, path: str) -> bool:
         """Navigate to a MAP folder using OBEX SetPath."""
+        path = self.normalize_folder(path)
+        if self._obex_session is not None:
+            try:
+                target_components = self._folder_components(path)
+                common_prefix = 0
+                while (
+                    common_prefix < len(self._current_folder_components)
+                    and common_prefix < len(target_components)
+                    and self._current_folder_components[common_prefix] == target_components[common_prefix]
+                ):
+                    common_prefix += 1
+
+                for _ in range(len(self._current_folder_components) - common_prefix):
+                    self._obex_session.set_folder("..")
+
+                for component in target_components[common_prefix:]:
+                    self._obex_session.set_folder(component)
+                self._current_folder_components = target_components
+                info(f"Current MAP folder: {path}")
+                return True
+            except ObexError as exc:
+                warning(f"MAP D-Bus set_folder failed, using raw OBEX fallback: {exc}")
         # Navigate to root first
         self._setpath_root()
 
@@ -135,13 +191,78 @@ class MAPClient:
         info(f"Current MAP folder: {path}")
         return True
 
-    def get_messages_listing(self, folder: str = "telecom/msg/inbox",
-                              max_count: int = 100) -> str:
+    def list_folders(self, folder: str = "telecom/msg", max_count: int = 100, offset: int = 0) -> list[dict]:
+        """List subfolders beneath a MAP folder."""
+        folder = self.normalize_folder(folder)
+        info(f"Listing MAP folders under {folder}")
+
+        if self._obex_session is not None:
+            try:
+                if folder not in {"telecom/msg", "telecom", ""}:
+                    self.set_folder(folder)
+                return self._obex_session.list_folders({"MaxCount": max_count, "Offset": offset})
+            except ObexError as exc:
+                warning(f"MAP D-Bus folder listing failed, using static fallback: {exc}")
+
+        # Raw fallback has no generic ListFolders implementation yet.
+        # Return static known folders when the caller requests the MAP root.
+        if folder in {"telecom/msg", "telecom", ""}:
+            return [{"Name": item.split("/")[-1]} for item in MAP_FOLDERS]
+        return []
+
+    def get_messages_listing(
+        self,
+        folder: str = "telecom/msg/inbox",
+        max_count: int = 100,
+        offset: int = 0,
+        subject_length: int = 256,
+        fields: list[str] | None = None,
+        msg_types: list[str] | None = None,
+        period_begin: str | None = None,
+        period_end: str | None = None,
+        read: bool | None = None,
+        recipient: str | None = None,
+        sender: str | None = None,
+        priority: bool | None = None,
+    ) -> str:
         """Get listing of messages in a folder.
 
         Returns XML listing with message handles, subjects, senders, timestamps.
         """
+        folder = self.normalize_folder(folder)
         info(f"Listing messages in {folder}")
+
+        if self._obex_session is not None:
+            try:
+                messages = self._obex_session.list_messages(
+                    folder,
+                    self._build_obex_filters(
+                        max_count=max_count,
+                        offset=offset,
+                        subject_length=subject_length,
+                        fields=fields,
+                        msg_types=msg_types,
+                        period_begin=period_begin,
+                        period_end=period_end,
+                        read=read,
+                        recipient=recipient,
+                        sender=sender,
+                        priority=priority,
+                    ),
+                )
+                xml = self._messages_to_listing_xml(messages)
+                if xml:
+                    success(f"Retrieved message listing ({len(xml)} bytes)")
+                return xml
+            except ObexError as exc:
+                warning(f"MAP D-Bus listing failed, using raw OBEX fallback: {exc}")
+
+        unsupported_filters = any(
+            value not in (None, [], "", 0, 256)
+            for value in [offset, fields or [], msg_types or [], period_begin, period_end, read, recipient, sender, priority]
+        )
+        if unsupported_filters:
+            warning("MAP raw OBEX fallback currently supports only MaxCount; additional filters were ignored")
 
         if not self.set_folder(folder):
             return ""
@@ -176,6 +297,22 @@ class MAPClient:
         """
         info(f"Fetching message: {handle}")
 
+        if self._obex_session is not None and str(handle).startswith("/org/bluez/obex/"):
+            try:
+                targetfile = self._obex_session.create_temp_file_path(
+                    prefix="blue_tap_map_",
+                    suffix=".bmsg",
+                )
+                transfer_path, transfer_props = self._obex_session.get_message(handle, targetfile, attachment=False)
+                filename, _ = self._obex_session.finalize_transfer_file(
+                    transfer_path,
+                    transfer_props,
+                    fallback_path=targetfile,
+                )
+                return self._obex_session.read_text_file(filename)
+            except (ObexError, OSError) as exc:
+                warning(f"MAP D-Bus message fetch failed, using raw OBEX fallback: {exc}")
+
         headers = b""
         if self.connection_id is not None:
             headers += struct.pack(">BI", OBEX_HEADER_CONNECTION_ID, self.connection_id)
@@ -199,9 +336,117 @@ class MAPClient:
         body = self._recv_body()
         return body.decode("utf-8", errors="replace")
 
+    def normalize_folder(self, folder: str) -> str:
+        """Resolve short folder aliases to full MAP paths."""
+        cleaned = (folder or "").strip().strip("/")
+        if cleaned.lower() in {"msg", "telecom/msg"}:
+            return "telecom/msg"
+        return MAP_FOLDER_ALIASES.get(cleaned.lower(), cleaned or "telecom/msg/inbox")
+
+    def _build_obex_filters(
+        self,
+        *,
+        max_count: int = 100,
+        offset: int = 0,
+        subject_length: int = 256,
+        fields: list[str] | None = None,
+        msg_types: list[str] | None = None,
+        period_begin: str | None = None,
+        period_end: str | None = None,
+        read: bool | None = None,
+        recipient: str | None = None,
+        sender: str | None = None,
+        priority: bool | None = None,
+    ) -> dict[str, object]:
+        filters: dict[str, object] = {"MaxCount": max_count}
+        if offset:
+            filters["Offset"] = offset
+        if subject_length != 256:
+            filters["SubjectLength"] = max(1, min(255, subject_length))
+        if fields:
+            filters["Fields"] = [str(item) for item in fields]
+        if msg_types:
+            filters["Types"] = [str(item) for item in msg_types]
+        if period_begin:
+            filters["PeriodBegin"] = period_begin
+        if period_end:
+            filters["PeriodEnd"] = period_end
+        if read is not None:
+            filters["Read"] = read
+        if recipient:
+            filters["Recipient"] = recipient
+        if sender:
+            filters["Sender"] = sender
+        if priority is not None:
+            filters["Priority"] = priority
+        return filters
+
+    def _folder_components(self, folder: str) -> list[str]:
+        normalized = self.normalize_folder(folder)
+        components = [part for part in normalized.split("/") if part]
+        if components[:2] == ["telecom", "msg"]:
+            return components[2:]
+        return components
+
+    def parse_message_listing(self, listing_xml: str) -> list[dict]:
+        """Parse MAP message listing XML into structured message summaries."""
+        listing_xml = (listing_xml or "").strip()
+        if not listing_xml:
+            return []
+
+        try:
+            root = ET.fromstring(listing_xml)
+        except ET.ParseError:
+            return self._parse_listing_fragments(listing_xml, "msg")
+
+        messages: list[dict] = []
+        for node in root.iter():
+            tag_name = str(node.tag).split("}", 1)[-1].lower()
+            if tag_name != "msg":
+                continue
+            item = {str(key): str(value) for key, value in node.attrib.items()}
+            messages.append(item)
+        return messages
+
+    def _messages_to_listing_xml(self, messages: list[dict]) -> str:
+        xml_lines = ['<?xml version="1.0"?>', '<MAP-msg-listing version="1.0">']
+        for item in messages:
+            attrs = []
+            for key, value in item.items():
+                attrs.append(f'{self._xml_escape(str(key))}="{self._xml_escape(str(value))}"')
+            xml_lines.append(f"  <msg {' '.join(attrs)}/>")
+        xml_lines.append("</MAP-msg-listing>")
+        return "\n".join(xml_lines)
+
+    @staticmethod
+    def _xml_escape(value: str) -> str:
+        return (
+            str(value)
+            .replace("&", "&amp;")
+            .replace('"', "&quot;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+        )
+
+    @staticmethod
+    def _parse_listing_fragments(payload: str, tag_name: str) -> list[dict]:
+        matches = re.findall(
+            rf'<(?:[A-Za-z0-9_.-]+:)?{tag_name}\b([^>]*)/?\s*>',
+            payload,
+            flags=re.IGNORECASE,
+        )
+        parsed = []
+        for attrs in matches:
+            item = {}
+            for key, value in re.findall(r'([A-Za-z0-9_.:-]+)\s*=\s*"([^"]*)"', attrs):
+                item[str(key)] = str(value)
+            if item:
+                parsed.append(item)
+        return parsed
+
     def dump_all_messages(self, output_dir: str = "map_dump") -> dict:
         """Dump all messages from all folders."""
-        import re as _re
+        import json
 
         os.makedirs(output_dir, exist_ok=True)
         results = {}
@@ -218,32 +463,61 @@ class MAPClient:
 
                 # Parse message handles from XML listing
                 # MAP listing XML uses <msg handle="XXXX" .../>
-                handles = _re.findall(r'handle\s*=\s*"([^"]+)"', listing)
-                if handles:
-                    info(f"Found {len(handles)} message handle(s) in {folder_name}")
+                parsed_listing = self.parse_message_listing(listing)
+                listing_json = os.path.join(output_dir, f"{folder_name}_listing.json")
+                with open(listing_json, "w") as f:
+                    json.dump(parsed_listing, f, indent=2, default=str)
+                results[folder]["listing_json"] = listing_json
+
+                message_ids = [
+                    item.get("handle") or item.get("path") or ""
+                    for item in parsed_listing
+                    if item.get("handle") or item.get("path")
+                ]
+                if message_ids:
+                    info(f"Found {len(message_ids)} message reference(s) in {folder_name}")
                     msg_dir = os.path.join(output_dir, folder_name)
                     os.makedirs(msg_dir, exist_ok=True)
 
-                    for handle in handles:
+                    for message_id in message_ids:
                         try:
-                            content = self.get_message(handle)
+                            content = self.get_message(message_id)
                             if content:
-                                safe_handle = os.path.basename(handle).replace("/", "_").replace("\\", "_")
+                                safe_handle = os.path.basename(message_id).replace("/", "_").replace("\\", "_")
                                 msg_file = os.path.join(msg_dir, f"{safe_handle}.bmsg")
                                 with open(msg_file, "w") as f:
                                     f.write(content)
+                                parsed = parse_bmessage(content)
+                                parsed_file = os.path.join(msg_dir, f"{safe_handle}.json")
+                                with open(parsed_file, "w") as f:
+                                    json.dump(parsed, f, indent=2, default=str)
                                 results[folder]["messages"].append({
-                                    "handle": handle,
+                                    "handle": message_id,
                                     "file": msg_file,
+                                    "parsed_file": parsed_file,
+                                    "parsed": parsed,
                                 })
                         except OSError as e:
-                            warning(f"Failed to fetch message {handle}: {e}")
+                            warning(f"Failed to fetch message {message_id}: {e}")
 
                     fetched = len(results[folder]["messages"])
                     if fetched:
-                        success(f"Fetched {fetched}/{len(handles)} messages from {folder_name}")
+                        success(f"Fetched {fetched}/{len(message_ids)} messages from {folder_name}")
 
         return results
+
+    def update_inbox(self) -> bool:
+        """Request inbox refresh from the remote MAP server."""
+        if self._obex_session is not None:
+            try:
+                self._obex_session.update_inbox()
+                success("MAP inbox update requested")
+                return True
+            except ObexError as exc:
+                warning(f"MAP D-Bus inbox update failed: {exc}")
+                return False
+        warning("MAP inbox update requires D-Bus/obexd path; raw fallback does not support it yet")
+        return False
 
     def _setpath_root(self):
         """Navigate to root folder."""
@@ -332,7 +606,8 @@ class MAPClient:
         return data
 
     def push_message(self, folder: str, recipient: str, body: str,
-                      msg_type: str = "SMS_GSM") -> bool:
+                      msg_type: str = "SMS_GSM", *, transparent: bool = False, retry: bool = True,
+                      charset: str = "UTF-8") -> bool:
         """Send an SMS/MMS through the IVI via MAP PushMessage.
 
         This sends a message FROM the paired phone via the IVI's connection.
@@ -345,10 +620,7 @@ class MAPClient:
             msg_type: Message type (SMS_GSM, SMS_CDMA, MMS, EMAIL)
         """
         info(f"Pushing {msg_type} to {recipient} via MAP...")
-
-        if not self.set_folder(folder):
-            error(f"Cannot navigate to {folder}")
-            return False
+        self.last_capability_limitations = []
 
         # Build bMessage format
         bmsg = (
@@ -363,7 +635,7 @@ class MAPClient:
             f"END:VCARD\r\n"
             f"BEGIN:BENV\r\n"
             f"BEGIN:BBODY\r\n"
-            f"CHARSET:UTF-8\r\n"
+            f"CHARSET:{charset}\r\n"
             f"LENGTH:{len(body)}\r\n"
             f"BEGIN:MSG\r\n"
             f"{body}\r\n"
@@ -372,6 +644,51 @@ class MAPClient:
             f"END:BENV\r\n"
             f"END:BMSG\r\n"
         )
+
+        if self._obex_session is not None:
+            try:
+                if not self.set_folder(folder):
+                    error(f"Cannot navigate to {folder}")
+                    return False
+                # TODO: Hardware-validate BlueZ PushMessage interoperability on
+                # at least one real MAP server for Transparent/Retry/Charset
+                # behavior before treating those args as broadly reliable.
+                sourcefile = self._obex_session.create_temp_file_path(
+                    prefix="blue_tap_map_push_",
+                    suffix=".bmsg",
+                )
+                with open(sourcefile, "wb") as tmp:
+                    tmp.write(bmsg.encode("utf-8"))
+                try:
+                    transfer_path, transfer_props = self._obex_session.push_message(
+                        sourcefile,
+                        "",
+                        {"Transparent": transparent, "Retry": retry, "Charset": charset},
+                    )
+                    _, transfer_final = self._obex_session.finalize_transfer_file(
+                        transfer_path,
+                        transfer_props,
+                        fallback_path=sourcefile,
+                    )
+                    if str(transfer_final.get("Status", "complete")).lower() == "complete":
+                        success(f"Message pushed to {recipient}")
+                        return True
+                    warning(f"MAP D-Bus push did not complete cleanly: {transfer_props}")
+                    return False
+                finally:
+                    try:
+                        os.unlink(sourcefile)
+                    except OSError:
+                        pass
+            except ObexError as exc:
+                self.last_capability_limitations = [
+                    "BlueZ obexd MAP PushMessage path unavailable or rejected; using raw OBEX fallback"
+                ]
+                warning(f"MAP D-Bus push failed, using raw OBEX fallback: {exc}")
+
+        if not self.set_folder(folder):
+            error(f"Cannot navigate to {folder}")
+            return False
 
         headers = b""
         if self.connection_id is not None:
@@ -422,6 +739,24 @@ class MAPClient:
             return False
 
         info(f"Setting message {handle} {indicator}={value}")
+        self.last_capability_limitations = []
+
+        if self._obex_session is not None and str(handle).startswith("/org/bluez/obex/"):
+            try:
+                # TODO: Hardware-validate Message1.Read/Deleted writes against a
+                # real target because BlueZ exposes the properties, but remote
+                # MAP servers vary in whether they actually honor the change.
+                if indicator == "read":
+                    self._obex_session.set_message_read(handle, value)
+                else:
+                    self._obex_session.set_message_deleted(handle, value)
+                success(f"Message {handle} {indicator} set to {value}")
+                return True
+            except ObexError as exc:
+                self.last_capability_limitations = [
+                    "BlueZ obexd MAP message-property write path unavailable or rejected; using raw OBEX fallback"
+                ]
+                warning(f"MAP D-Bus status update failed, using raw OBEX fallback: {exc}")
 
         headers = b""
         if self.connection_id is not None:
@@ -505,64 +840,148 @@ class MAPClient:
                 break
 
 
+def _unfold_rfc2425_lines(text: str) -> list[str]:
+    """Unfold folded vCard/bMessage lines without over-constraining payloads."""
+    text = textwrap.dedent(text)
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    unfolded: list[str] = []
+    for line in lines:
+        if not line:
+            unfolded.append("")
+            continue
+        stripped = line.lstrip(" \t")
+        if line[:1] in {" ", "\t"} and unfolded and not _looks_like_property_line(stripped):
+            unfolded[-1] += line[1:]
+        else:
+            unfolded.append(stripped if line[:1] in {" ", "\t"} else line)
+    return unfolded
+
+
+def _looks_like_property_line(line: str) -> bool:
+    """Return True when an indented line still looks like a fresh property/block line."""
+    if not line:
+        return False
+    return bool(re.match(r"^(BEGIN|END|[A-Za-z0-9-]+(?:;[^:]*)?):", line))
+
+
+def _parse_vcard_block(vcard_text: str) -> dict:
+    fields: dict[str, object] = {
+        "full_name": "",
+        "formatted_name": "",
+        "name": "",
+        "phones": [],
+        "emails": [],
+        "organization": "",
+    }
+    for raw_line in _unfold_rfc2425_lines(vcard_text):
+        line = raw_line.strip()
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        value = value.strip()
+        upper_key = key.upper()
+        if upper_key.startswith("FN"):
+            fields["formatted_name"] = value
+            if not fields["full_name"]:
+                fields["full_name"] = value
+        elif upper_key.startswith("N"):
+            fields["name"] = value
+            if not fields["full_name"]:
+                fields["full_name"] = value
+        elif upper_key.startswith("TEL"):
+            fields["phones"].append(value)
+        elif upper_key.startswith("EMAIL"):
+            fields["emails"].append(value)
+        elif upper_key.startswith("ORG"):
+            fields["organization"] = value
+    return fields
+
+
 def parse_bmessage(bmsg_text: str) -> dict:
-    """Parse a bMessage (MAP message format) into structured data.
-
-    bMessage format contains: status, type, folder, sender vCard,
-    recipient vCard, and message body.
-
-    Returns:
-        {"type": "SMS_GSM", "status": "READ", "folder": "...",
-         "sender": "+1234567890", "sender_name": "John",
-         "recipient": "+0987654321", "body": "Hello",
-         "timestamp": "20240101T120000"}
-    """
+    """Parse a bMessage payload into permissive structured data."""
     result = {
-        "type": "", "status": "", "folder": "",
-        "sender": "", "sender_name": "",
-        "recipient": "", "recipient_name": "",
-        "body": "", "charset": "",
+        "version": "",
+        "type": "",
+        "status": "",
+        "folder": "",
+        "charset": "",
+        "encoding": "",
+        "language": "",
+        "length": None,
+        "sender": "",
+        "sender_name": "",
+        "sender_email": "",
+        "recipient": "",
+        "recipient_name": "",
+        "recipient_email": "",
+        "body": "",
+        "body_parts": [],
+        "vcards": [],
+        "headers": {},
     }
 
-    import re
+    top_level_keys = {"VERSION", "TYPE", "STATUS", "FOLDER", "CHARSET", "ENCODING", "LANGUAGE", "LENGTH"}
+    for raw_line in _unfold_rfc2425_lines(bmsg_text):
+        line = raw_line.strip()
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        key = key.strip()
+        value = value.strip()
+        upper_key = key.upper()
+        if upper_key not in top_level_keys:
+            continue
+        result["headers"][upper_key.lower()] = value
+        if upper_key == "VERSION":
+            result["version"] = value
+        elif upper_key == "TYPE":
+            result["type"] = value
+        elif upper_key == "STATUS":
+            result["status"] = value
+        elif upper_key == "FOLDER":
+            result["folder"] = value
+        elif upper_key == "CHARSET":
+            result["charset"] = value
+        elif upper_key == "ENCODING":
+            result["encoding"] = value
+        elif upper_key == "LANGUAGE":
+            result["language"] = value
+        elif upper_key == "LENGTH":
+            try:
+                result["length"] = int(value)
+            except ValueError:
+                result["length"] = value
 
-    for line in bmsg_text.splitlines():
-        line = line.strip()
-        if line.startswith("TYPE:"):
-            result["type"] = line.split(":", 1)[1].strip()
-        elif line.startswith("STATUS:"):
-            result["status"] = line.split(":", 1)[1].strip()
-        elif line.startswith("FOLDER:"):
-            result["folder"] = line.split(":", 1)[1].strip()
-        elif line.startswith("CHARSET:"):
-            result["charset"] = line.split(":", 1)[1].strip()
+    vcard_blocks = re.findall(r"BEGIN:VCARD\r?\n(.*?)END:VCARD", bmsg_text, re.DOTALL | re.IGNORECASE)
+    parsed_vcards = [_parse_vcard_block(block) for block in vcard_blocks]
+    result["vcards"] = parsed_vcards
 
-    # Extract sender from first VCARD
-    vcard_blocks = re.findall(r"BEGIN:VCARD\r?\n(.+?)END:VCARD", bmsg_text, re.DOTALL)
-    if vcard_blocks:
-        sender_vc = vcard_blocks[0]
-        tel_m = re.search(r"TEL[^:]*:(.+)", sender_vc)
-        if tel_m:
-            result["sender"] = tel_m.group(1).strip()
-        fn_m = re.search(r"FN:(.+)", sender_vc)
-        if fn_m:
-            result["sender_name"] = fn_m.group(1).strip()
-        n_m = re.search(r"N:(.+)", sender_vc)
-        if n_m and not result["sender_name"]:
-            result["sender_name"] = n_m.group(1).strip()
+    if parsed_vcards:
+        sender_vcard = parsed_vcards[0]
+        sender_phones = sender_vcard.get("phones", [])
+        sender_emails = sender_vcard.get("emails", [])
+        if sender_phones:
+            result["sender"] = str(sender_phones[0])
+        if sender_emails:
+            result["sender_email"] = str(sender_emails[0])
+        result["sender_name"] = str(sender_vcard.get("full_name", "") or "")
 
-    if len(vcard_blocks) > 1:
-        recip_vc = vcard_blocks[1]
-        tel_m = re.search(r"TEL[^:]*:(.+)", recip_vc)
-        if tel_m:
-            result["recipient"] = tel_m.group(1).strip()
-        fn_m = re.search(r"FN:(.+)", recip_vc)
-        if fn_m:
-            result["recipient_name"] = fn_m.group(1).strip()
+    if len(parsed_vcards) > 1:
+        recipient_vcard = parsed_vcards[1]
+        recipient_phones = recipient_vcard.get("phones", [])
+        recipient_emails = recipient_vcard.get("emails", [])
+        if recipient_phones:
+            result["recipient"] = str(recipient_phones[0])
+        if recipient_emails:
+            result["recipient_email"] = str(recipient_emails[0])
+        result["recipient_name"] = str(recipient_vcard.get("full_name", "") or "")
 
-    # Extract message body
-    msg_m = re.search(r"BEGIN:MSG\r?\n(.+?)END:MSG", bmsg_text, re.DOTALL)
-    if msg_m:
-        result["body"] = msg_m.group(1).strip()
+    body_parts = [
+        match.strip()
+        for match in re.findall(r"BEGIN:MSG\r?\n(.*?)END:MSG", bmsg_text, re.DOTALL | re.IGNORECASE)
+        if match.strip()
+    ]
+    result["body_parts"] = body_parts
+    result["body"] = "\n\n".join(body_parts)
 
     return result
