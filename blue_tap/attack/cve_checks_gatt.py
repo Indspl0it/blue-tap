@@ -42,6 +42,7 @@ class _SockAddrL2(ctypes.Structure):
 def _connect_ble_fixed_cid(address: str, cid: int, timeout: float = 5.0):
     if _libc is None:
         return None
+    sock = None
     try:
         sock = socket.socket(AF_BLUETOOTH, socket.SOCK_SEQPACKET, BTPROTO_L2CAP)
         sock.settimeout(timeout)
@@ -59,6 +60,11 @@ def _connect_ble_fixed_cid(address: str, cid: int, timeout: float = 5.0):
             return None
         return sock
     except Exception:
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
         return None
 
 
