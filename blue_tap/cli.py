@@ -5087,8 +5087,16 @@ def avrcp_monitor(address, duration):
 
         ctrl.monitor_metadata(duration, callback=on_change)
         info("Metadata monitoring ended.")
-        from blue_tap.utils.session import log_command
-        log_command("avrcp_monitor", {"address": address, "action": "monitor", "duration": duration}, category="attack", target=address)
+        _log_standardized_operation(
+            module="attack",
+            command="avrcp_monitor",
+            title="AVRCP Metadata Monitor",
+            protocol="AVRCP",
+            target=address,
+            result={"address": address, "action": "monitor", "duration": duration},
+            category="attack",
+            observations=[f"duration={duration}"],
+        )
     finally:
         ctrl.disconnect()
 
