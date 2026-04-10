@@ -5736,6 +5736,9 @@ def fuzz_l2cap(address, psm, count, mode):
     address = resolve_address(address)
     if not address:
         return
+    run_id = make_run_id("fuzz")
+    emit_cli_event(event_type="run_started", module="fuzz", run_id=run_id, target=address,
+                   message=f"Starting L2CAP fuzz (mode={mode}, count={count})")
     from blue_tap.attack.fuzz import L2CAPFuzzer
     fuzzer = L2CAPFuzzer(address)
     if mode == "oversized":
@@ -5744,6 +5747,11 @@ def fuzz_l2cap(address, psm, count, mode):
         result = fuzzer.null_flood(psm, count)
     else:
         result = fuzzer.malformed_packets(psm, count)
+    emit_cli_event(event_type="execution_result", module="fuzz", run_id=run_id, target=address,
+                   message=f"L2CAP fuzz complete: {result}",
+                   details={"mode": mode, "psm": psm, "count": count})
+    emit_cli_event(event_type="run_completed", module="fuzz", run_id=run_id, target=address,
+                   message="L2CAP fuzz run completed")
     console.print(f"[bold]Fuzz results:[/bold] {result}")
 
 
@@ -5762,6 +5770,9 @@ def fuzz_rfcomm(address, channel, mode):
     address = resolve_address(address)
     if not address:
         return
+    run_id = make_run_id("fuzz")
+    emit_cli_event(event_type="run_started", module="fuzz", run_id=run_id, target=address,
+                   message=f"Starting RFCOMM fuzz (mode={mode}, channel={channel})")
     from blue_tap.attack.fuzz import RFCOMMFuzzer
     fuzzer = RFCOMMFuzzer(address)
     if mode == "exhaust":
@@ -5770,6 +5781,11 @@ def fuzz_rfcomm(address, channel, mode):
         result = fuzzer.large_payload(channel)
     else:
         result = fuzzer.at_fuzz(channel)
+    emit_cli_event(event_type="execution_result", module="fuzz", run_id=run_id, target=address,
+                   message=f"RFCOMM fuzz complete: {result}",
+                   details={"mode": mode, "channel": channel})
+    emit_cli_event(event_type="run_completed", module="fuzz", run_id=run_id, target=address,
+                   message="RFCOMM fuzz run completed")
     console.print(f"[bold]Fuzz results:[/bold] {result}")
 
 
@@ -5788,6 +5804,9 @@ def fuzz_at(address, channel, patterns):
     address = resolve_address(address)
     if not address:
         return
+    run_id = make_run_id("fuzz")
+    emit_cli_event(event_type="run_started", module="fuzz", run_id=run_id, target=address,
+                   message=f"Starting AT command fuzz (channel={channel}, patterns={patterns})")
     from blue_tap.attack.fuzz import RFCOMMFuzzer
 
     # Map keyword names to actual fuzz patterns
@@ -5808,6 +5827,11 @@ def fuzz_at(address, channel, patterns):
 
     fuzzer = RFCOMMFuzzer(address)
     result = fuzzer.at_fuzz(channel, pattern_list)
+    emit_cli_event(event_type="execution_result", module="fuzz", run_id=run_id, target=address,
+                   message=f"AT fuzz complete: {result}",
+                   details={"channel": channel, "patterns": patterns})
+    emit_cli_event(event_type="run_completed", module="fuzz", run_id=run_id, target=address,
+                   message="AT fuzz run completed")
     console.print(f"[bold]AT fuzz results:[/bold] {result}")
 
 
@@ -5823,11 +5847,19 @@ def fuzz_sdp(address):
     address = resolve_address(address)
     if not address:
         return
+    run_id = make_run_id("fuzz")
+    emit_cli_event(event_type="run_started", module="fuzz", run_id=run_id, target=address,
+                   message="Starting SDP continuation state probe")
     from blue_tap.attack.fuzz import SDPFuzzer
     fuzzer = SDPFuzzer(address)
     result = fuzzer.probe_continuation_state()
     if result.get("leak_suspected"):
         warning("Possible SDP info leak detected!")
+    emit_cli_event(event_type="execution_result", module="fuzz", run_id=run_id, target=address,
+                   message=f"SDP probe complete: {result}",
+                   details={"leak_suspected": result.get("leak_suspected", False)})
+    emit_cli_event(event_type="run_completed", module="fuzz", run_id=run_id, target=address,
+                   message="SDP fuzz run completed")
     console.print(f"[bold]SDP probe results:[/bold] {result}")
 
 
@@ -5843,9 +5875,14 @@ def fuzz_bss(address):
     address = resolve_address(address)
     if not address:
         return
+    run_id = make_run_id("fuzz")
+    emit_cli_event(event_type="run_started", module="fuzz", run_id=run_id, target=address,
+                   message="Starting BSS (Bluetooth Stack Smasher)")
     from blue_tap.attack.fuzz import bss_wrapper
     if not bss_wrapper(address):
         error("BSS not available or failed")
+    emit_cli_event(event_type="run_completed", module="fuzz", run_id=run_id, target=address,
+                   message="BSS fuzz run completed")
 
 
 @fuzz.command("lmp")
@@ -5893,6 +5930,10 @@ def fuzz_lmp(address, count, mode, hci):
     }
     gen_func = generators.get(mode, lmp_proto.generate_all_lmp_fuzz_cases)
 
+    run_id = make_run_id("fuzz")
+    emit_cli_event(event_type="run_started", module="fuzz", run_id=run_id, target=address or "",
+                   message=f"Starting LMP fuzz (mode={mode}, count={count})",
+                   details={"mode": mode, "count": count, "hci": hci})
     info(f"Starting LMP fuzzing (mode={mode}, count={count})")
 
     try:
@@ -5916,10 +5957,31 @@ def fuzz_lmp(address, count, mode, hci):
 
             result = {"mode": mode, "sent": sent, "errors": errors, "count": count}
             from blue_tap.utils.session import log_command
-            log_command("fuzz_lmp", result, category="fuzz", target=address or "")
+            from blue_tap.core.fuzz_framework import build_fuzz_operation_result
+            envelope = build_fuzz_operation_result(
+                target=address or "",
+                adapter=hci,
+                operation="fuzz_lmp",
+                title="LMP Ad Hoc Fuzz Run",
+                protocol="lmp",
+                summary_data={"mode": mode, "sent": sent, "errors": errors, "count": count},
+                observations=[
+                    f"mode={mode}",
+                    f"sent={sent}",
+                    f"errors={errors}",
+                    f"count={count}",
+                ],
+                module_data=result,
+            )
+            log_command("fuzz_lmp", envelope, category="fuzz", target=address or "")
+            emit_cli_event(event_type="execution_result", module="fuzz", run_id=run_id, target=address or "",
+                           message=f"LMP fuzz complete: {sent} sent, {errors} errors",
+                           details={"mode": mode, "sent": sent, "errors": errors, "count": count})
             success(f"LMP fuzzing complete: {sent} packets sent, {errors} errors")
     except Exception as exc:
         error(f"LMP fuzzing failed: {exc}")
+    emit_cli_event(event_type="run_completed", module="fuzz", run_id=run_id, target=address or "",
+                   message="LMP fuzz run completed")
 
 
 # Register new protocol-aware fuzz commands (campaign dashboard + crash management)
@@ -5963,55 +6025,56 @@ def report_cmd(dump_dir, fmt, output):
 
         # Feed session data into report
         for entry in session_data.get("scan", []):
-            data = entry.get("data", [])
-            if isinstance(data, list):
-                report.add_scan_results(data)
+            data = entry.get("data", {})
+            report.add_run_envelope(data)
 
         for entry in session_data.get("recon", []):
             data = entry.get("data", {})
-            if isinstance(data, dict) and data.get("address"):
-                report.add_fingerprint(data)
-            elif isinstance(data, list):
-                report.add_recon_results(data)
+            report.add_run_envelope(data)
 
         for entry in session_data.get("vuln", []):
-            data = entry.get("data", [])
-            if isinstance(data, list):
-                report.add_vuln_findings(data)
+            data = entry.get("data", {})
+            report.add_run_envelope(data)
 
         for entry in session_data.get("attack", []):
             data = entry.get("data", {})
-            cmd = entry.get("command", "")
-            if isinstance(data, dict):
-                # Namespace new attack types so they don't overwrite each other
-                if cmd in ("ssp_downgrade", "knob_attack"):
-                    report.attack_results[cmd] = data
-                elif "phases" in data:
-                    report.attack_results.update(data)
-                else:
-                    report.attack_results[cmd or "attack"] = data
+            if report.add_run_envelope(data):
+                continue
+            # TODO(standardization): Raw/operator-only attack commands are
+            # intentionally excluded from formal reports. Only standardized
+            # attack envelopes are ingested here.
 
         for entry in session_data.get("data", []):
             data = entry.get("data", {})
-            cmd = entry.get("command", "")
-            if "pbap" in cmd:
-                report.add_pbap_results(data)
-            elif "map" in cmd:
-                report.add_map_results(data)
+            if report.add_run_envelope(data):
+                continue
+            # TODO(standardization): Raw data extraction blobs are intentionally
+            # excluded from formal reports. Only standardized data envelopes
+            # are ingested here.
 
         for entry in session_data.get("fuzz", []):
-            report.add_fuzz_results(entry.get("data", {}))
+            data = entry.get("data", {})
+            if report.add_run_envelope(data):
+                continue
+            # TODO(standardization): Remove this legacy fuzz session fallback after
+            # fuzz-producing commands log standardized envelopes only.
+            report.add_fuzz_results(data)
 
         for entry in session_data.get("dos", []):
-            report.add_dos_results(entry.get("data", {}))
+            data = entry.get("data", {})
+            if report.add_run_envelope(data):
+                continue
+            # TODO(standardization): Remove this legacy DoS session fallback after
+            # all DoS-producing commands log standardized envelopes only.
+            report.add_dos_results(data)
 
         for entry in session_data.get("audio", []):
             data = entry.get("data", {})
-            report.add_audio_capture(
-                data.get("file", ""),
-                data.get("duration", 0),
-                data.get("description", ""),
-            )
+            if report.add_run_envelope(data):
+                continue
+            # TODO(standardization): Raw audio/operator session entries are
+            # intentionally excluded from formal reports. Only standardized
+            # audio envelopes are ingested here.
 
         # Add generic command execution evidence from all categories.
         for category_name, entries in session_data.items():
@@ -6029,6 +6092,10 @@ def report_cmd(dump_dir, fmt, output):
         # Pass full session metadata for timeline, scope, and methodology
         report.add_session_metadata(session.metadata)
 
+        # TODO(standardization): This is still an artifact hydration step. Once
+        # campaign and crash-management fuzz flows emit complete standardized
+        # envelopes with artifact refs, report generation should not depend on
+        # a parallel session-directory loader here.
         # Load structured fuzz data (crash DB, corpus stats, evidence files)
         report.load_fuzz_from_session(session.dir)
 
