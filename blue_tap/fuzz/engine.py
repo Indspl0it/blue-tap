@@ -136,6 +136,7 @@ PROTOCOL_TRANSPORT_MAP: dict[str, dict[str, Any]] = {
     "bnep":         {"type": "l2cap",  "psm": 15},
     "rfcomm":       {"type": "l2cap",  "psm": 3},
     "l2cap":        {"type": "l2cap",  "psm": 1},
+    "l2cap-sig":    {"type": "raw-acl", "hci_dev": 1},
     "at-hfp":       {"type": "rfcomm", "channel": 10},
     "at-phonebook": {"type": "rfcomm", "channel": 1},
     "at-sms":       {"type": "rfcomm", "channel": 1},
@@ -348,6 +349,7 @@ class FuzzCampaign:
         session_dir: str = "",
         cooldown: float = DEFAULT_COOLDOWN_SECONDS,
         run_id: str = "",
+        transport_overrides: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         self.target = target
         self.protocols = protocols
@@ -359,6 +361,10 @@ class FuzzCampaign:
         # Run identity
         from blue_tap.core.fuzz_framework import make_fuzz_run_id
         self.run_id = run_id or make_fuzz_run_id()
+        self.transport_overrides = {
+            proto: dict(values)
+            for proto, values in dict(transport_overrides or {}).items()
+        }
 
         # Fuzz artifact directory
         self._fuzz_dir = os.path.join(self.session_dir, "fuzz")
@@ -458,6 +464,7 @@ class FuzzCampaign:
             if spec is None:
                 warning(f"Skipping unknown protocol: {protocol}")
                 continue
+            spec = {**spec, **self.transport_overrides.get(protocol, {})}
 
             ttype = spec["type"]
 
@@ -1138,6 +1145,53 @@ class FuzzCampaign:
         crashes = 0
         errors = 0
 
+        def _finalize_single_run(*, message: str, error_text: str | None = None) -> dict[str, Any]:
+            completed_at = now_iso()
+            result = {
+                "sent": sent,
+                "crashes": crashes,
+                "errors": errors,
+                "elapsed": max(time.time() - start_epoch, 0.0),
+                "total_cases": len(cases),
+                "crash_db_path": os.path.join(self._fuzz_dir, "crashes.db"),
+                "started_at": started_at,
+                "completed_at": completed_at,
+            }
+            envelope = build_fuzz_result(
+                target=self.target,
+                adapter="session",
+                command=f"fuzz_{protocol}",
+                protocol=protocol,
+                result=result,
+                run_id=self.run_id,
+            )
+            validation_errors = validate_run_envelope(envelope)
+            if validation_errors:
+                logger.warning("Single-protocol envelope validation errors: %s", validation_errors)
+            log_command(f"fuzz_{protocol}", envelope, category="fuzz", target=self.target)
+            if error_text is not None:
+                emit_cli_event(
+                    event_type="run_error",
+                    module="fuzz",
+                    run_id=self.run_id,
+                    target=self.target,
+                    message=message,
+                    details={"error": error_text, "protocol": protocol, "total_cases": len(cases)},
+                    echo=False,
+                )
+            emit_cli_event(
+                event_type="run_completed",
+                module="fuzz",
+                run_id=self.run_id,
+                target=self.target,
+                message=message,
+                details={"sent": sent, "crashes": crashes, "errors": errors, "protocol": protocol},
+                echo=False,
+            )
+            return envelope
+
+        start_epoch = time.time()
+
         emit_cli_event(
             event_type="run_started",
             module="fuzz",
@@ -1152,40 +1206,28 @@ class FuzzCampaign:
             self._setup_transports()
         transport = self._transports.get(protocol)
         if transport is None:
-            emit_cli_event(
-                event_type="run_error",
-                module="fuzz",
-                run_id=self.run_id,
-                target=self.target,
-                message=f"No transport available for {protocol}",
-                echo=False,
-            )
-            return build_fuzz_result(
-                target=self.target,
-                adapter="session",
-                command=f"fuzz_{protocol}",
-                protocol=protocol,
-                result={"sent": 0, "crashes": 0, "errors": 1, "elapsed": 0.0,
-                        "total_cases": len(cases), "started_at": started_at, "completed_at": now_iso()},
-                run_id=self.run_id,
+            errors += 1
+            return _finalize_single_run(
+                message=f"Fuzz {protocol} failed: no transport available",
+                error_text=f"No transport available for {protocol}",
             )
 
         try:
-            if not transport.connected:
-                transport.connect()
+            if not transport.connected and not transport.connect():
+                errors += 1
+                return _finalize_single_run(
+                    message=f"Fuzz {protocol} failed: transport setup failed",
+                    error_text=f"Failed to connect transport for {protocol}",
+                )
         except OSError as exc:
             error(f"Connection failed: {exc}")
-            return build_fuzz_result(
-                target=self.target,
-                adapter="session",
-                command=f"fuzz_{protocol}",
-                protocol=protocol,
-                result={"sent": 0, "crashes": 0, "errors": 1, "elapsed": 0.0,
-                        "total_cases": len(cases), "started_at": started_at, "completed_at": now_iso()},
-                run_id=self.run_id,
+            errors += 1
+            return _finalize_single_run(
+                message=f"Fuzz {protocol} failed: connection error",
+                error_text=str(exc),
             )
 
-        t0 = time.time()
+        t0 = start_epoch
 
         for i, payload in enumerate(cases):
             try:
@@ -1236,46 +1278,10 @@ class FuzzCampaign:
             if delay > 0:
                 time.sleep(delay)
 
-        elapsed = time.time() - t0
         transport.close()
-
-        crash_db_path = os.path.join(self._fuzz_dir, "crashes.db")
-        completed_at = now_iso()
-
-        emit_cli_event(
-            event_type="run_completed",
-            module="fuzz",
-            run_id=self.run_id,
-            target=self.target,
+        return _finalize_single_run(
             message=f"Fuzz {protocol} complete: {sent}/{len(cases)} sent, {crashes} crashes",
-            details={"sent": sent, "crashes": crashes, "errors": errors},
-            echo=False,
         )
-
-        result = {
-            "sent": sent,
-            "crashes": crashes,
-            "errors": errors,
-            "elapsed": elapsed,
-            "total_cases": len(cases),
-            "crash_db_path": crash_db_path,
-            "started_at": started_at,
-            "completed_at": completed_at,
-        }
-
-        envelope = build_fuzz_result(
-            target=self.target,
-            adapter="session",
-            command=f"fuzz_{protocol}",
-            protocol=protocol,
-            result=result,
-            run_id=self.run_id,
-        )
-        validation_errors = validate_run_envelope(envelope)
-        if validation_errors:
-            logger.warning("Single-protocol envelope validation errors: %s", validation_errors)
-        log_command(f"fuzz_{protocol}", envelope, category="fuzz", target=self.target)
-        return envelope
 
     # ------------------------------------------------------------------
     # Seed generation
@@ -1315,6 +1321,17 @@ class FuzzCampaign:
             for cmd in [b"AT\r\n", b"AT+BRSF=0\r\n", b"AT+CIND=?\r\n",
                         b"AT+CPBS=\"ME\"\r\n", b"AT+CPBR=1,100\r\n"]:
                 seeds.append((cmd, f"at_{cmd[2:6].decode(errors='replace').strip()}"))
+        elif protocol == "at-sms":
+            for cmd in [b"AT\r\n", b"AT+CMGF=1\r\n", b"AT+CMGL=\"ALL\"\r\n", b"AT+CNMI=2,1,0,0,0\r\n"]:
+                seeds.append((cmd, f"at_{cmd[2:6].decode(errors='replace').strip()}"))
+        elif protocol == "at-injection":
+            for cmd in [
+                b"AT+BRSF=%n%n\r",
+                b"AT+CPBR=\x001,100\r",
+                b"AT+CMGL=\"ALL\"\r\nAT+CHUP\r\n",
+                b"AT" + (b"A" * 128) + b"\r",
+            ]:
+                seeds.append((cmd, "at_injection"))
         elif protocol == "bnep":
             # BNEP setup connection request
             seeds.append((
