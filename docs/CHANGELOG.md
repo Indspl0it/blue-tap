@@ -5,6 +5,217 @@ All notable changes to Blue-Tap are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.0] - 2026-04-11
+
+### Summary
+
+Blue-Tap 2.5.0 is the **Standardized Framework** release. Every module now produces structured `RunEnvelope` output with typed `ExecutionRecord` entries, evidence blocks, and artifact references. The report pipeline has been rewritten around module-owned `ReportAdapter` classes. The CLI emits structured lifecycle events throughout all operations. Session logging validates envelope shape. This release lays the groundwork for the upcoming modular framework architecture (Metasploit-style module families, registry, and plugin system).
+
+### Added — Standardized Result Schema
+
+#### Core Framework Contracts
+
+- **`RunEnvelope` schema** (`core/result_schema.py`) — canonical output container for every module invocation with required fields: `schema`, `schema_version`, `module`, `run_id`, `target`, `adapter`, `started_at`/`completed_at`, `operator_context`, `summary`, `executions`, `artifacts`, `module_data`
+- **`ExecutionRecord` model** — normalized unit of work within a run with two-layer status taxonomy: `execution_status` (lifecycle: completed/failed/error/skipped/timeout) and `module_outcome` (semantic: confirmed/inconclusive/recovered/observed/etc.)
+- **`EvidenceRecord` model** — structured observation container with `summary`, `confidence`, `observations`, `packets`, `state_changes`, `module_evidence`, and `capability_limitations`
+- **`ArtifactRef` model** — typed pointer to saved files (pcap, log, HTML, JSON) with `artifact_id`, `kind`, `label`, `path`, `execution_id`
+- **`validate_run_envelope()`** — schema shape validator for envelope integrity
+- **`looks_like_run_envelope()`** — fast heuristic check for session logging
+- **Envelope helper functions** — `build_run_envelope()`, `make_execution()`, `make_evidence()`, `make_artifact()`, `envelope_executions()`, `envelope_module_data()`
+
+#### Structured CLI Event System
+
+- **`emit_cli_event()`** (`core/cli_events.py`) — structured event emitter with required fields: `event_type`, `module`, `run_id`, `target`, `adapter`, `timestamp`, `message`, `details`
+- **13 defined event types** — `run_started`, `phase_started`, `execution_started`, `execution_result`, `execution_skipped`, `pairing_required`, `recovery_wait_started`, `recovery_wait_progress`, `recovery_wait_finished`, `artifact_saved`, `run_completed`, `run_aborted`, `run_error`
+- **Every CLI command** now emits lifecycle events — operators always know what started, what's running, and when it's done
+
+#### Report Adapter Architecture
+
+- **`ReportAdapter` ABC** (`core/report_contract.py`) — module-owned report interface with `accepts()`, `ingest()`, `build_sections()`, `build_json_section()`
+- **`SectionModel`/`SectionBlock`** data models — typed report section containers replacing raw HTML string generation
+- **12 report adapters** — one per module type:
+  - `DiscoveryReportAdapter` — scan result tables with device properties, risk indicators
+  - `VulnscanReportAdapter` — CVE/non-CVE finding cards with evidence, execution logs
+  - `AttackReportAdapter` — attack outcome cards with phase tracking, evidence
+  - `AutoReportAdapter` — 9-phase pentest summary with per-phase execution records
+  - `DataReportAdapter` — PBAP/MAP/OPP/AT extraction summaries with artifact links
+  - `AudioReportAdapter` — HFP/A2DP/AVRCP session summaries with capture artifacts
+  - `DosReportAdapter` — DoS check results with recovery probe outcomes
+  - `FirmwareReportAdapter` — DarkFirmware operations with KNOB detection cards
+  - `FuzzReportAdapter` — per-protocol campaign runs with crash details and corpus stats
+  - `LmpCaptureReportAdapter` — LMP sniff session summaries
+  - `ReconReportAdapter` — reconnaissance campaign results with correlation analysis
+  - `SpoofReportAdapter` — spoof operations with before/after MAC evidence
+- **Block renderer system** (`report/renderers/`) — `BlockRendererRegistry` with typed block renderers for tables, paragraphs, text, and custom block types
+- **`render_sections()`** — converts `SectionModel` lists into HTML via block renderers
+
+#### Report Generator Refactor
+
+- **Adapter-driven report generation** — `generator.py` now orchestrates via `REPORT_ADAPTERS` registry: dispatches envelopes to matching adapters, collects `SectionModel` output, renders HTML/JSON through shared renderers
+- **Generator no longer contains module-specific logic** — all CVE interpretation, evidence formatting, and finding classification moved to adapters
+- **Unified ingestion pipeline** — both HTML and JSON reports consume the same adapter output, preventing report format divergence
+
+### Added — Module Envelope Builders
+
+Each module family has a dedicated envelope builder in `core/`:
+
+- **`attack_framework.py`** — `build_attack_result()` for exploitation modules (BIAS, KNOB, BLUFFS, hijack, SSP/encryption downgrade, CTKD)
+- **`audio_framework.py`** — `build_audio_result()` for HFP/A2DP/AVRCP sessions
+- **`auto_framework.py`** — `build_auto_result()` with `build_auto_phase_execution()` for 9-phase auto pentest
+- **`data_framework.py`** — `build_data_result()` for PBAP/MAP/OPP/AT data extraction
+- **`firmware_framework.py`** — `build_firmware_status_result()`, `build_firmware_dump_result()`, `build_connection_inspect_result()`, `build_firmware_operation_result()` for DarkFirmware operations
+- **`fuzz_framework.py`** — `build_fuzz_result()` for fuzzing campaign runs
+- **`recon_framework.py`** — `build_recon_result()` for reconnaissance operations
+- **`scan_framework.py`** — `build_scan_result()` for discovery scans
+- **`spoof_framework.py`** — `build_spoof_result()` with MAC before/after evidence, method verification
+
+### Added — Module Standardization
+
+#### Discovery & Scan
+
+- **Scan commands produce `RunEnvelope`** — `scan classic`, `scan ble`, `scan combined`, `scan all`, `scan inquiry`, `scan watch` all log full envelopes to session
+- **Campaign correlation output** wrapped in scan envelopes with correlation evidence
+- **Fleet scan** logs actual scan envelope instead of raw device list
+
+#### Reconnaissance
+
+- **All 13 recon commands** produce envelopes via `build_recon_result()` — auto, sdp, gatt, fingerprint, ssp, rfcomm, l2cap, capture, capture-analyze, pairing-mode, ble-sniff, lmp-capture, lmp-intercept, combined-sniff, crackle, extract-keys, wireshark-keys
+- **Recon CLI helpers** — `_recon_cli_context()`, `_recon_emit()`, `_recon_start()`, `_recon_result()`, `_recon_skip()` for consistent event emission
+- **Capture analysis** wrapped in recon correlation envelopes
+- **HCI capture** — improved parser, stale PID detection, capture analysis integration
+
+#### Vulnerability Assessment
+
+- **Vulnscan produces structured envelope** (`blue_tap.vulnscan.result`) with scanner metadata, per-check execution logs, finding summaries, and evidence
+- **CVE check execution tracking** — each check records execution_status + module_outcome + evidence
+- **Fleet assessment** builds reports from standardized scan and vuln envelopes
+
+#### Exploitation
+
+- **BIAS** — per-phase `ExecutionRecord` entries (spoof, connect, inject, verify) with structured evidence
+- **KNOB** — probe and brute-force phases produce typed execution records with key-size evidence
+- **BLUFFS** — per-variant (A1 LSC downgrade, A3 SC→LSC) execution records with DarkFirmware capability reporting
+- **SSP downgrade** — execution tracking across SSP probe, legacy force, PIN brute phases with lockout evidence
+- **Hijack** — 4-phase tracking (spoof, connect, monitor, exploit) with per-phase success/failure evidence
+- **CTKD** — probe result standardization with MAC normalization and cross-transport key evidence
+- **Encryption downgrade** — 3 method variants (disable, toggle, SC-reject) produce execution records with LMP evidence
+- **DoS** — all checks wrapped in `RunEnvelope` with recovery probe outcomes, timing evidence, and severity
+
+#### Post-Exploitation
+
+- **PBAP/MAP** — structured data envelopes with extraction counts, artifact refs, parsed entry metadata
+- **HFP** — all 8 subcommands (call, answer, hangup, volume, dtmf, sco, codec, diagnostics) log audio envelopes
+- **A2DP** — capture/record/eavesdrop/play/stream/loopback produce audio envelopes with duration, codec, sample rate evidence
+- **AVRCP** — all 10 subcommands (play, pause, next, prev, volume, info, shuffle, repeat, monitor, flood) log structured envelopes
+- **AT commands** — extraction responses parsed into structured device artifacts with field-level evidence
+- **OPP** — transfer diagnostics across dbus and raw fallback paths with artifact tracking
+- **Bluesnarfer** — extraction operations produce data envelopes
+
+#### Fuzzing
+
+- **Per-protocol `RunEnvelope`** — each protocol fuzz run produces its own envelope with crash/corpus/timing evidence
+- **Run IDs** — every fuzz campaign gets a stable run_id carried through all events and artifacts
+- **Crash lifecycle events** — `execution_result` emitted for each crash with severity and reproduction steps
+- **Utility commands** (list-crashes, replay, import-pcap) emit structured events
+- **Legacy fuzz commands removed** — all fuzzing routes through the standardized engine
+
+#### Adapter & Firmware
+
+- **Adapter commands** (up, down, reset, set-name, set-class) log general envelopes to session
+- **Firmware status/install/init/dump** emit lifecycle events and log envelopes
+- **Connection inspect** builds envelope with per-slot KNOB detection findings
+- **Spoof commands** produce spoof envelopes with before/after MAC proof and method verification
+
+#### Auto Pentest
+
+- **9-phase `RunEnvelope`** with per-phase `ExecutionRecord` entries (discover, fingerprint, recon, vulnscan, pair, exploit, fuzz, dos, report)
+- **Phase skip tracking** — skipped phases produce execution records with skip reason evidence
+- **Summary counters** — per-phase success/fail/skip counts in envelope summary
+
+#### Playbook / Run Mode
+
+- **Playbook execution** produces `RunEnvelope` with per-step execution records
+- **Lifecycle events** emitted per playbook step (run_started, execution_started, execution_result, run_completed)
+
+### Added — Shared OBEX Client
+
+- **`core/obex_client.py`** — unified dbus-fast OBEX client for PBAP, MAP, and OPP with shared session management, error handling, and transfer tracking
+- **`PBAPSession`** — PBAP phonebook access with folder navigation, vCard pull, property filtering
+- **`MAPSession`** — MAP message access with folder listing, message pull, notification registration
+- **`OPPSession`** — OPP file push with progress tracking and transfer validation
+- **Shared OBEX error hierarchy** — `ObexError`, transport-level vs protocol-level error distinction
+
+### Added — DoS Expansion
+
+- **Modular CVE-backed DoS probes** for BLE, AVRCP, and AVDTP paths
+- **Recovery probe validation** — real ATT request validation instead of simple ping
+- **DoS guide** (`docs/dos-guide.md`) — workflow documentation
+- **DoS CVE matrix** (`docs/dos-cve-matrix.md`) — coverage mapping
+- **Structured DoS metadata** in report generation
+
+### Added — Profile Environment Doctor
+
+- **`env-doctor` command** — prerequisite checker for BlueZ, OBEX, PulseAudio, and audio subsystem readiness
+- **OBEX capability detection** — validates dbus-fast OBEX transport availability
+- **Audio prerequisites** — PulseAudio module availability, Bluetooth source/sink detection
+
+### Added — Framework Architecture Plan
+
+- **Modular framework architecture plan** (`thoughts/plans/2026-04-11-blue-tap-framework-architecture-plan.md`) — 13-phase migration plan to Metasploit-style module families with registry, contracts, and plugin system
+- **Framework architecture rules** (`.claude/rules/blue-tap-architecture.md`) — enforced development rules for all agents: import paths, family classification, registry requirements, schema rules, migration protocol
+
+### Added — Testing
+
+- **36 new envelope tests** across 3 test files:
+  - `test_spoof_envelope.py` (11 tests) — envelope shape, validation, success/failure/restore outcomes, MAC evidence, adapter round-trip
+  - `test_firmware_envelope.py` (17 tests) — status/dump/inspect/operation builders, KNOB detection, partial hooks, artifact refs
+  - `test_auto_envelope.py` (8 tests) — per-phase executions, skip/fail evidence, summary counters, validation
+- **Fuzz envelope tests** — l2cap-sig transport map, transport overrides, raw frame format, connect failure finalization
+- **Report adapter regression tests** — standardized rendering validation
+- **Attack envelope regression tests** — BIAS/KNOB/BLUFFS/hijack/SSP/CTKD/encryption downgrade envelope validation
+- **Discovery regression tests** — scan envelope shape validation
+- **Media/data regression tests** — HFP/A2DP/AVRCP/PBAP/MAP envelope validation
+- **PBAP/MAP/media regression fixtures** — structured test data
+
+### Changed
+
+- **Report generator** completely refactored — adapter-driven architecture replaces monolithic parsing; generator orchestrates layout and dispatch only
+- **Session logging** now validates envelope shape — non-envelope data logged at debug level for audit traceability
+- **`clone_device_identity()` return type** changed from `bool` to `dict` with `success`, `method`, `original_mac`, `target_mac`, `verified`, `error` fields
+- **`spoof_address()`/`bdaddr()`/`spooftooph()`/`btmgmt()`/`rtl8761b()` return types** changed from `bool` to structured dicts with per-operation evidence
+- **`restore_original_mac()` return type** changed from `bool` to dict with `restored_mac` and `method`
+- **Adapter input validation** — `device_class` hex format/range validation (0x000000-0xFFFFFF), `device_name` length validation (max 248 bytes UTF-8)
+- **DarkFirmware detection** — failures logged instead of silenced; adapter power recovery when stuck DOWN after SSP toggle
+- **DarkFirmware CLI bootstrap** — smart skip for non-hardware commands (scan/report/session); partial hook status downgraded from info to warning
+- **Fuzz engine** — `transport_overrides` parameter for per-protocol channel/hci_dev override; extracted `_finalize_single_run()` for consistent envelope construction on error paths
+- **Crash replay** — removed `_StubTransport` fallback, added `RawACLTransport` support
+- **L2CAP-sig fuzzing** — rewired to raw ACL via DarkFirmware instead of standard L2CAP socket
+- **AT deep fuzzing** — context-aware injection corpus with RFCOMM surface autodiscovery, batch runner across hfp/phonebook/sms/injection channels
+- **Transport hardening** — DarkFirmware presence check in LMP and RawACL `connect()` returns False instead of crashing
+- **DoS probe timeouts** — hardened timeout handling for unresponsive targets
+- **Attack cleanup** — improved cleanup paths in attack modules and recon transport retries
+- **Fleet reports** — built from standardized scan and vuln envelopes instead of ad hoc data
+- **Demo report data** — standardized around run envelopes
+
+### Fixed
+
+- **`clone_device_identity` callers** — `bias.py` and `hijack.py` used `if not clone_device_identity(...)` which always evaluated False after the bool→dict migration (non-empty dicts are truthy); fixed to check `result.get("success", False)`
+- **Recon capture-stop** — `HCICapture.stop()` returns a string path, not a dict; two stray copy-paste blocks called `result.get("success")` on the string, raising `AttributeError`
+- **Recon lmp-sniff** — `artifacts` variable referenced in `build_recon_result()` but never initialized, causing `NameError` on every execution
+- **Recon nrf-sniff** — same `NameError` — `artifacts` undefined before `build_recon_result()`
+- **RAM BDADDR patching** — corrected controller spoofing memory write for RTL8761B
+- **HFP reconnect socket leak** — fixed socket resource leak in HFP reconnection path
+- **DoS result/report normalization** — aligned DoS result keys with report adapter expectations
+- **Report merge conflict marker** — removed leftover `<<<<<<< HEAD` marker from `generator.py`
+- **btmgmt public-addr errors** — `btmgmt public-addr` call errors now handled safely instead of crashing
+
+### Removed
+
+- **Legacy fuzz commands** — all standalone fuzz protocol commands removed; all fuzzing routes through the unified engine
+- **`_StubTransport` fallback** in crash replay — replaced with proper transport selection
+
+---
+
 ## [2.3.2] - 2026-04-09
 
 ### Added — Structured Vulnerability Scanner Framework
@@ -79,50 +290,39 @@ This release turns `vulnscan` into the single end-to-end vulnerability assessmen
 #### Reporting and Documentation
 
 - **Dedicated vulnscan matrix** (`docs/vulnscan-cve-matrix.md`) listing the CVEs actually checked by `blue-tap vulnscan` plus the modular non-CVE checks that are part of the same scan path
-- **HTML report enhancement** — report generator now renders:
-  - `Non-CVE Check Execution` table
-  - `CVE Check Execution` table
-  - richer finding metadata from the structured vulnscan envelope
-- **JSON report enhancement** — exported vulnerability report data now preserves structured vulnscan runs instead of flattening everything into findings only
+- **HTML report enhancement** — report generator now renders Non-CVE and CVE check execution tables with richer finding metadata
+- **JSON report enhancement** — exported vulnerability report data now preserves structured vulnscan runs
 
 ### Changed
 
-- **`vulnscan` command model** — `blue-tap vulnscan` now runs the full scanner in one invocation; `--active` is no longer required to enable the main vulnerability-scan path
-- **BIAS input handling** — `--phone` remains available as optional paired-phone context for the BIAS auto-reconnect probe instead of serving as a gate for the entire scanner
-- **Non-CVE finding semantics** — exposure and posture checks now distinguish:
-  - reachable transport vs actual unauthenticated data access
-  - protocol capability vs security weakness
-  - naming hints vs confirmed diagnostic / control responders
-- **Writable GATT analysis** — scanner now separates generic writable characteristics from sensitive writable surfaces such as control, DFU, debug, pairing, or HID report paths
-- **EATT reporting** — EATT is now treated as protocol capability / posture instead of being implicitly framed as a weakness
-- **PIN lockout analysis** — lockout logic now uses stronger retry sampling and timing interpretation instead of a minimal fast/slow split
-- **Device class and LMP feature reporting** — these checks now serve as scanner posture/context signals rather than overstating every capability bit as a vulnerability finding
-- **Public docs** — README, features guide, usage guide, and playbooks now describe `vulnscan` as the primary assessment path and document the current structured report model
+- **`vulnscan` command model** — runs the full scanner in one invocation; `--active` no longer required
+- **BIAS input handling** — `--phone` remains available as optional paired-phone context
+- **Non-CVE finding semantics** — exposure and posture checks now distinguish reachable transport vs actual unauthenticated access
+- **Writable GATT analysis** — separates generic writable characteristics from sensitive writable surfaces
+- **EATT reporting** — treated as protocol capability / posture instead of implicit weakness
+- **PIN lockout analysis** — stronger retry sampling and timing interpretation
+- **Device class and LMP feature reporting** — serve as scanner posture/context signals
 
 ### Fixed
 
-- **Airoha false positives** — GATT RACE detection no longer treats a writable characteristic alone as `CVE-2025-20700` confirmation; detection now requires a valid unauthenticated RACE response
-- **Airoha RFCOMM overclaim** — BR/EDR RACE detection no longer guesses RFCOMM channel 1 or treats generic HFP openness as confirmed `CVE-2025-20701`
-- **Airoha link-key confirmation** — `CVE-2025-20702` now chains from confirmed RACE transport and structured response parsing instead of standalone assumptions
-- **L2CAP patched-response handling** — `CVE-2022-20345` now accepts documented patched reject outcomes instead of flagging them as vulnerable
-- **L2CAP duplicate-identifier logic** — `CVE-2026-23395` now evaluates the second duplicate response instead of treating any two responses as a hit
-- **LE credit-based response parsing** — corrected response-field parsing in both `CVE-2022-42896` and `CVE-2023-35681` checks
-- **Off-by-one L2CAP response guard** — corrected the length guard in `cve_checks_l2cap.py` so result-code parsing requires a full 12-byte buffer
-- **Pairing CVE overclaims** — `CVE-2019-2225` and `CVE-2022-25837` no longer overclaim confirmation from weak evidence paths
-- **BlueFrag confirmation heuristic** — raw ACL BlueFrag probe no longer confirms from arbitrary response bytes; it now stays conservative unless the boundary probe produces defensible evidence
-- **Android GATT CVE overclaims** — removed incomplete scanner coverage for:
-  - `CVE-2023-40129`
-  - `CVE-2024-0039`
-  - `CVE-2024-49748`
-  because the required target-specific trigger construction was not robust enough for scanner-grade confirmation
-- **Parallel active-probe nondeterminism** — L2CAP/CVE active probes are no longer treated as loosely parallelized behavior; the scanner executes transport-mutating checks in a more deterministic sequence
-- **Report/rendering mismatch** — report generation now understands the structured vulnscan envelope and newer finding statuses instead of assuming a legacy flat findings list
+- **Airoha false positives** — GATT RACE detection requires valid unauthenticated RACE response
+- **Airoha RFCOMM overclaim** — BR/EDR RACE detection no longer guesses RFCOMM channel 1
+- **Airoha link-key confirmation** — chains from confirmed RACE transport
+- **L2CAP patched-response handling** — `CVE-2022-20345` accepts documented patched reject outcomes
+- **L2CAP duplicate-identifier logic** — `CVE-2026-23395` evaluates second duplicate response
+- **LE credit-based response parsing** — corrected in `CVE-2022-42896` and `CVE-2023-35681`
+- **Off-by-one L2CAP response guard** — requires full 12-byte buffer
+- **Pairing CVE overclaims** — `CVE-2019-2225` and `CVE-2022-25837` no longer overclaim from weak evidence
+- **BlueFrag confirmation heuristic** — stays conservative unless boundary probe produces defensible evidence
+- **Android GATT CVE overclaims** — removed incomplete coverage for `CVE-2023-40129`, `CVE-2024-0039`, `CVE-2024-49748`
+- **Parallel active-probe nondeterminism** — transport-mutating checks executed in deterministic sequence
+- **Report/rendering mismatch** — understands structured vulnscan envelope instead of assuming legacy flat findings
 
 ### Removed
 
-- **Top-level `assess` command** — removed the redundant “assessment without exploitation” wrapper; `vulnscan` is now the single CLI entry point for vulnerability scanning
-- **`vulnscan --active` public workflow** — documentation and CLI help no longer advertise a split scanner mode
-- **Stale assess-based playbooks and docs** — playbooks, README, and feature docs no longer route users through a separate `assess` workflow for vulnerability scanning
+- **Top-level `assess` command** — `vulnscan` is now the single CLI entry point
+- **`vulnscan --active` public workflow** — no longer advertised
+- **Stale assess-based playbooks and docs**
 
 ## [2.3.1] - 2026-04-08
 
@@ -151,7 +351,7 @@ This release completes the DarkFirmware integration with full bidirectional LMP 
 
 - **CTKD attack** (`attack/ctkd.py`) — CVE-2020-15802 cross-transport key derivation probe: snapshots key material before/after Classic attack, detects shared keys across slots
 - **KNOB RAM verification** — ConnectionInspector confirms actual key_size in controller memory after KNOB negotiation injection
-- **20 LMP state confusion tests** — BrakTooth-style test cases (enc_before_auth, switch_during_enc, knob_min_key, etc.) as vulnerability scanner seeds
+- **20 LMP state confusion tests** — BrakTooth-style test cases as vulnerability scanner seeds
 - **Raw L2CAP builders** (`fuzz/protocols/l2cap_raw.py`) — Frame builders + 15 malformed fuzz tests for below-stack injection
 
 #### Fuzzing Transports
@@ -202,222 +402,139 @@ This release extends Blue-Tap below the HCI boundary with a custom firmware plat
 
 #### LMP Protocol Support
 
-- **LMP protocol builder** (`fuzz/protocols/lmp.py`, 2,020 lines) — Full LMP PDU construction for 30+ opcodes: key negotiation, encryption setup, feature exchange, role switch, version exchange, pairing, power control
+- **LMP protocol builder** (`fuzz/protocols/lmp.py`, 2,020 lines) — Full LMP PDU construction for 30+ opcodes
 - **LMP fuzzing** — 12th protocol added to campaign engine via HCI VSC injection
-- **LMP sniffing** — `recon lmp-sniff`, `lmp-monitor` (with live dashboard), `combined-sniff` (HCI + LMP)
+- **LMP sniffing** — `recon lmp-sniff`, `lmp-monitor`, `combined-sniff`
 - **LMP DoS** — `dos lmp` with configurable method, count, and delay
 
 #### Other New Features
 
-- **Assess command** — Non-destructive 5-phase security assessment (fingerprint → services → vulnscan → DarkFirmware probe → summary with next-step commands)
-- **TargetedStrategy wired into engine** — `--strategy targeted` now works in fuzz campaigns via adapter wrapper that bridges the CVE-pattern generator API to the engine's generate/feedback interface
-- **Session adapter tracking** — `set_adapter()` auto-records which HCI adapter is used; populated automatically from `--hci` parameter
+- **TargetedStrategy wired into engine** — `--strategy targeted` now works in fuzz campaigns
+- **Session adapter tracking** — `set_adapter()` auto-records which HCI adapter is used
 - **Protocol DoS expansion** — LMP-level DoS attacks via DarkFirmware
 - **BIAS LMP injection mode** — BIAS attack can now use DarkFirmware for LMP-level role-switch manipulation
 - **KNOB LMP negotiation** — KNOB attack uses DarkFirmware for direct LMP key-size manipulation
-- **Sniffer rewrite** — Replaced USRP B210 SDR integration with DarkFirmware LMP capture; nRF52840 BLE sniffing retained
+- **Sniffer rewrite** — Replaced USRP B210 SDR integration with DarkFirmware LMP capture
 - **Playbooks module** — `blue_tap/playbooks/` for reusable assessment sequences
 - **UI dashboard** — `blue_tap/ui/dashboard.py` for live attack monitoring
-- **Fuzzing strategy base class** — `fuzz/strategies/base.py` formal strategy interface
 
 ### Improved
 
-- **README overhauled** — Added BLUFFS, encryption downgrade, assess, DarkFirmware sections; RTL8761B as primary recommended adapter; DarkFirmware setup in Quick Start; Credits & References section with research paper citations; 9 workflows; removed CSR8510 from hardware table (BT 4.x)
-- **Hardware recommendations** — RTL8761B (TP-Link UB500) promoted to primary adapter; dual-adapter setup no longer needed; USRP B210 kept only as research-grade option
-- **Fuzz engine** — Baseline learning uses explicit `recv_timeout=5.0`; field weight tracker logs exceptions instead of silently swallowing; `_StubCorpus` now implements `get_all_seeds()` for proper baseline learning
-- **Report generator** — Crash DB load errors use `warning()` instead of silent `info()`
-- **SDP parser** — PSM channel fallback returns `0` (int) instead of raw string for type consistency
-- **CLI command grouping** — Added bluffs, encryption-downgrade, assess to Rich-Click command groups; `_infer_category` covers all attack types
-- **Vuln scanner** — Extended with DarkFirmware-aware checks
-- **Transport layer** — LMP transport added alongside L2CAP/RFCOMM/BLE
-- **Coverage-guided strategy** — Enhanced with protocol-aware seed selection
-- **State machine strategy** — Extended with LMP state transitions
+- **README overhauled** — BLUFFS, encryption downgrade, DarkFirmware sections; RTL8761B as primary adapter
+- **Hardware recommendations** — RTL8761B (TP-Link UB500) promoted to primary adapter
+- **Fuzz engine** — Baseline learning with explicit `recv_timeout=5.0`; field weight tracker logs exceptions
+- **SDP parser** — PSM channel fallback returns `0` (int) for type consistency
+- **CLI command grouping** — Added bluffs, encryption-downgrade to Rich-Click groups
 
 ### Fixed
 
-- **fleet_assess NameError** (HIGH) — `risk_color` undefined when `results` is empty, causing crash
-- **_StubCorpus missing `get_all_seeds()`** — Baseline learning silently skipped when Corpus import failed
-- **Dead `_SESSION_SKIP_COMMANDS`** — Removed unused module-level variable
-- **Unnecessary `hasattr()` guard** — Removed defensive check on `add_session_metadata()` that always exists
-- **Silent field tracker exceptions** — `except: pass` in field weight tracker now logs warnings
-- **Baseline recv timeout** — Baseline learning now passes explicit timeout instead of relying on transport default
+- **fleet_assess NameError** — `risk_color` undefined when `results` is empty
+- **_StubCorpus missing `get_all_seeds()`** — Baseline learning silently skipped
+- **Silent field tracker exceptions** — `except: pass` now logs warnings
+- **Baseline recv timeout** — Passes explicit timeout instead of relying on transport default
 
 ### Removed
 
-- **USRP B210 SDR integration** — Replaced by DarkFirmware LMP capture (simpler, cheaper, more reliable)
-- **CSR8510 from recommended hardware** — BT 4.x adapter superseded by RTL8761B (BT 5.0 + DarkFirmware)
+- **USRP B210 SDR integration** — Replaced by DarkFirmware LMP capture
+- **CSR8510 from recommended hardware** — Superseded by RTL8761B
 - **All mock-based test files** (26 files, 21K lines) — Replaced with real hardware validation workflows
 
 ## [2.2.0] - 2026-04-04
 
 ### Added
 
-- **Active BIAS vulnerability probe** in vulnscan with `--active --phone` flags — spoofs as paired phone to test auto-reconnect
-- **Parallel vulnerability analysis** — version/feature checks run in ThreadPoolExecutor (cuts scan time ~60%)
-- **KNOB real brute-force** — XOR decryption against captured ACL data with L2CAP header validation (replaces fake enumeration)
-- **ACL traffic capture** for KNOB — 60-second capture windows via hcidump with user-prompted extensions (up to 5 min)
-- **IVI confidence scoring** in fingerprint — normalized profile matching with 0.0-1.0 confidence float
-- **Codec auto-detection** in HFP — detects CVSD (8kHz) vs mSBC (16kHz) from SLC negotiation
-- **Sample rate auto-detection** in A2DP — queries PulseAudio source info instead of hardcoded 44100
-- **PulseAudio loopback tracking** — module ID stored for reliable cleanup via `stop_loopback`
-- **Session logging** added to RFCOMM scan, L2CAP scan, GATT enum, all HFP/A2DP/AVRCP/spoof/hijack/BIAS CLI commands
-- **Adapter management** in README — `adapter list/info/up/down/reset/set-name/set-class` documented
-- **OPP** in README — `opp push` and `opp vcard` documented under Data Extraction
+- **Active BIAS vulnerability probe** in vulnscan with `--active --phone` flags
+- **Parallel vulnerability analysis** — ThreadPoolExecutor cuts scan time ~60%
+- **KNOB real brute-force** — XOR decryption against captured ACL data with L2CAP header validation
+- **ACL traffic capture** for KNOB — 60-second capture windows via hcidump
+- **IVI confidence scoring** in fingerprint — normalized 0.0-1.0 confidence float
+- **Codec auto-detection** in HFP — detects CVSD (8kHz) vs mSBC (16kHz)
+- **Sample rate auto-detection** in A2DP — queries PulseAudio source info
+- **PulseAudio loopback tracking** — module ID stored for reliable cleanup
+- **Session logging** added to all CLI commands
 - **2,109 unit tests** across 13 new test files (66% line coverage)
 
 ### Improved
 
-- **Scanner**: complete device class tables (Computer, Peripheral, Wearable), BLE manufacturer DB expanded to 32 vendors, name resolution retry
-- **SDP**: retry on transient failures, batch UUID search, robust parser for sdptool format variants
-- **GATT**: connection retry with backoff, security inference (likely_paired/read_only/notify_only), expanded value decoders
-- **RFCOMM/L2CAP**: retry logic, consecutive-unreachable threshold, parallel dynamic scan (`--workers`), progress via verbose logging
-- **HCI Capture**: stale PID detection, atomic PID writes, `status()` method
-- **Fingerprint**: profile density signal, structured attack surface via profile ID dict, BrakTooth/SweynTooth/SPP/PBAP vuln hints
-- **Vuln Scanner**: timeout constants consolidated, hcitool retry wrapper, BlueZ version via bluetoothd, OBEX response codes expanded, BrakTooth word-boundary matching with all CVEs reported
-- **Hijack**: phase gate (MAC verification before connect), abort on impersonate failure, connect retry, per-step cleanup isolation
-- **SSP Downgrade**: `lockout_detected` flag, PIN range validation, process cleanup in finally blocks
-- **BIAS**: try/finally for adapter reset, TimeoutExpired handling in subprocess calls
-- **HFP**: SLC BRSF/indicator parsing crash guards, silent_call timing fix, SCO socket leak fix, empty WAV detection
-- **A2DP**: pactl parsing guards, capture validation on timeout, profile switch retry, mic restore safety
-- **AVRCP**: D-Bus disconnect in all CLI finally blocks, volume ramp works both directions, skip flood 10ms minimum, connection retry, get_player_settings warns on error
-- **MAC Spoofing**: CLI checks return values, btmgmt power commands return-code checked, sleep between adapter reset/down/up, atomic MAC save with corruption recovery
-- **Auto Pentest**: skipped phases tracked with reason, proper DoS module imports, timestamped reports, duration validation
-- **Fleet**: `--all-devices` on fleet report, narrowed exception handling, CoD parse warning
-- **CLI**: migrated to rich-click — full descriptions without truncation, commands grouped by pentest phase, `max_width=120`
-- **README**: features reordered by pentest flow (14 sections), workflows rewritten (8 workflows), command reference in collapsible block
+- Scanner, SDP, GATT, RFCOMM/L2CAP, HCI Capture, Fingerprint, Vuln Scanner, Hijack, SSP Downgrade, BIAS, HFP, A2DP, AVRCP, MAC Spoofing, Auto Pentest, Fleet, CLI (rich-click migration), README
 
 ### Fixed
 
-- `scan_classic` double error message on adapter failure
-- `clone_device_identity` returned True on partial failure — now returns False
-- `run_full_attack` continued after impersonate failure — now aborts
-- `connect_ivi` subprocess TimeoutExpired unhandled — now caught with pairing cleanup
-- `brute_force_key` returned fabricated "found" key — now performs real decryption
-- `probe_vulnerability` (BIAS) left adapter spoofed on crash — now try/finally
-- `setup_audio` SCO socket leaked on final retry failure — now closed
-- Encryption enforcement socket leaked on setsockopt failure — now closed
-- BrakTooth `break` after first chipset match — now reports all matching families
-- `negotiate_codec` parsing crash on truncated +BCS response — now guarded
-- RFCOMM `connect()` socket leaked on retry — now closed before retry
-- Fleet report missing `log_command` — now logged
+- 12 specific bug fixes across scanner, spoofer, hijack, BIAS, HFP, A2DP, RFCOMM, fleet, encryption enforcement
 
 ### Removed
 
-- **Link Key Harvest** feature (`key_harvest.py`, `keys` CLI group, report narrative)
+- **Link Key Harvest** feature
 
 ## [2.1.1] - 2026-03-31
 
 ### Added
 
 - **10 protocol-level DoS attacks** targeting L2CAP, SDP, RFCOMM, OBEX, and HFP
-- **Link key harvest and persistent access** (`keys` command group)
-- **SSP downgrade attack** (`ssp-downgrade` command group)
-- **KNOB attack execution** (`knob` command group, CVE-2019-9506)
-- **Fleet-wide assessment** (`fleet` command group)
-- **Full 9-phase automated pentest** (`auto` command): discovery, fingerprinting, recon, vuln assessment, pairing attacks, exploitation, coverage-guided fuzzing (1hr default), DoS testing, report generation
-- **Comprehensive CLI logging** across all 100+ commands: every operation now logs start, progress, result, and errors with context
-- Changelog file (`docs/CHANGELOG.md`)
+- **Link key harvest and persistent access**
+- **SSP downgrade attack**
+- **KNOB attack execution** (CVE-2019-9506)
+- **Fleet-wide assessment**
+- **Full 9-phase automated pentest** (`auto` command)
+- Changelog file
 
 ### Changed
 
-- **Report overhaul**: modern UI with Inter/JetBrains Mono fonts, Tailwind-inspired color palette, rounded cards, soft severity badges, pentest narrative text in every section, support for v2.1.1 findings (key harvest, SSP downgrade, KNOB, fleet, protocol DoS)
-- **Auto command** rewritten from 4-phase (discover, vulnscan, hijack, report) to 9-phase pentest methodology with coverage-guided fuzzing and DoS testing. New options: `--fuzz-duration`, `--skip-fuzz`, `--skip-dos`, `--skip-exploit`
+- **Report overhaul**: modern UI, pentest narrative
+- **Auto command** rewritten from 4-phase to 9-phase methodology
 
 ### Fixed
 
-- L2CAP DoS attacks use valid socket operations (not raw signaling)
-- DoS result dict key mismatch with CLI
-- KNOB probe missing `internalblue_available` field
-- Fleet assess crash on invalid MAC address
-- Report collector namespaces new attack types (key_harvest, ssp_downgrade, knob_attack)
-- DoS grouping keywords cover all protocol-level attacks
+- L2CAP DoS socket operations, DoS result dict key mismatch, KNOB probe missing fields, fleet assess crash, report collector namespaces, DoS grouping keywords
 
 ## [2.1.0] - 2026-03-31
 
 ### Added
 
-- **Response-guided intelligent fuzzing engine** with 6 layers of analysis:
-  - Phase 1: Protocol state inference adapted from AFLNet — state extractors for all 8 BT protocols (SDP, ATT, L2CAP, RFCOMM, SMP, OBEX, BNEP, AT), directed state graph with AFLNet scoring formula, state-aware seed selection
-  - Phase 2: Anomaly-guided field mutation weights inspired by BrakTooth — per-field anomaly/crash tracking, adaptive mutation probabilities, field-aware mutator using protocol field maps for all 13 protocol variants
-  - Phase 3: Structural response validation for all 13 protocols — PDU self-consistency checks (length fields, error codes, FCS), cross-protocol confusion detection, response code regression tracking, size oscillation detection
-  - Phase 4: Timing-based coverage proxy — per-opcode latency profiling (p50/p90/p99), online timing cluster detection as code path signal, latency spike/drop detection with consecutive spike escalation
-  - Phase 5: Entropy-based information leak detection — Shannon and Renyi entropy analysis, sliding window entropy for localized leak detection, heap pattern scanning (DEADBEEF, BAADF00D, etc.), request echo detection, per-protocol expected entropy baselines, composite leak scoring with confidence levels
-  - Phase 6: Watchdog reboot detection adapted from Defensics — target health monitoring, exponential backoff reconnection probing, reboot cycle detection, zombie state detection, latency degradation analysis, crash candidate ranking with confidence scores, adaptive cooldown
-- **Full engine integration** of all 6 phases into the campaign main loop with persistence and feedback
-- **Live dashboard intelligence panel** showing target health status, states discovered per protocol, timing clusters, anomaly counts by type, and hot mutation fields ranked by weight
-- **Fuzzing intelligence section in reports** — state coverage graph, field weight analysis with bar charts, target response baselines, health event timeline (HTML and JSON)
-- **Link key harvest and persistent access** (`keys` command group) — capture pairing exchanges, extract link keys via tshark, persistent key database (JSON), reconnect using stored keys without re-pairing, key verification
-- **SSP downgrade attack** (`ssp-downgrade` command group) — probe SSP capabilities, force legacy PIN mode via IO capability manipulation and SSP disable, automated PIN brute force (0000-9999) with lockout detection
-- **KNOB attack execution** (`knob` command group) — CVE-2019-9506 vulnerability probe, minimum encryption key negotiation (InternalBlue LMP injection or btmgmt fallback), demonstrative key brute force
-- **Fleet-wide assessment** (`fleet` command group) — discover and classify all nearby devices (IVI/phone/headset/computer/wearable), per-device vulnerability assessment, consolidated fleet report with overall risk rating
-- GPL v3 license
-- SVG banner for README
-- `requirements.txt` for fresh Kali/Ubuntu installs
-- 129 unit tests covering all new fuzzing modules (state inference, field weights, response analyzer, health monitor)
+- **Response-guided intelligent fuzzing engine** with 6 layers of analysis (state inference, anomaly-guided mutation, structural validation, timing coverage, entropy leak detection, watchdog reboot detection)
+- **Full engine integration** of all 6 phases into the campaign main loop
+- **Live dashboard intelligence panel**
+- **Fuzzing intelligence section in reports**
+- **Link key harvest and persistent access**
+- **SSP downgrade attack**
+- **KNOB attack execution**
+- **Fleet-wide assessment**
+- GPL v3 license, SVG banner, `requirements.txt`, 129 unit tests
 
 ### Changed
 
-- **Fuzzing engine** (`engine.py`): strategy dispatch now instantiates real strategy classes (RandomWalk, CoverageGuided, StateMachine) instead of ignoring the `--strategy` flag; coverage-guided feedback loop wired (calls `strategy.feedback()` after every send/recv); crash payloads automatically added back to corpus as seeds; adaptive protocol scheduling weights toward high-crash-rate protocols; multi-packet sequence support for state-machine strategy
-- **Response fingerprinting** improved from `sha256(response[:32])` to `sha256(len_bucket:opcode:err_byte:prefix)` — catches different error codes that share leading bytes
-- **AVRCP module** (`avrcp.py`): rewritten from `dbus-python`/`PyGObject` to `dbus-fast` (pure Python, pre-built wheels) — `pip install` now works without system C headers
-- **Dependencies**: replaced `dbus-python` and `PyGObject` (C extensions, no wheels on PyPI) with `dbus-fast` (pure Python); moved `scapy` and `pulsectl` from optional to hard dependencies; all deps now install via `pip` without `apt`
-- **Report generator** (`generator.py`): complete rewrite with professional dark-theme HTML, table of contents, executive summary with SVG donut/bar charts, overall risk rating badge, metric dashboard, assessment timeline, structured recon tables, finding cards with evidence blocks, crash reproduction steps, print-friendly CSS
-- **CLI version display**: now reads from single source `__version__` instead of hardcoded strings (CLI `--version`, banner, report footer)
-- **README**: comprehensive rewrite of Protocol Fuzzing section with architecture diagram, intelligence layer documentation, research citations; added sections for link key harvest, SSP downgrade, KNOB, fleet assessment; updated "What Blue-Tap Does" to reflect all current capabilities; streamlined installation instructions
+- Fuzzing engine strategy dispatch, response fingerprinting, AVRCP rewritten to `dbus-fast`, dependency overhaul, report generator complete rewrite
 
 ### Fixed
 
-- **Campaign duration reset on resume** — `prior_elapsed` field added to `CampaignStats` so resumed campaigns continue timing from where they left off instead of restarting the clock
-- **Stub API mismatches** — `_StubMutator.mutate()` return type aligned with `CorpusMutator` (returns `bytes` not `tuple`); `_StubTransport` changed from `.is_connected()` method to `.connected` property; `_StubCrashDB.log_crash()` returns `int`; `_StubCorpus.add_seed()` returns `None`
-- **`response_analyzer.py` monitor bug** — `props.on_properties_changed()` replaced with correct `dbus-fast` API (`bus.add_message_handler()` + `AddMatch` rule)
-- **Banner SVG spacing** — tightened gap between "BLUE" and "TAP" text
-- Missing system dependency documentation for `libcairo2-dev`, `libgirepository1.0-dev`, `gir1.2-glib-2.0`
+- Campaign duration reset on resume, stub API mismatches, response_analyzer monitor bug, banner SVG spacing
 
 ## [2.0.1] - 2026-03-30
 
 ### Fixed
 
 - Duration limit reset on campaign resume
-- Stub API mismatches (mutator, transport, crash_db, corpus return types)
-- Version display hardcoded in CLI and banner (now reads from `__version__`)
-
-### Changed
-
-- Moved `dbus-python` and `PyGObject` to optional dependencies (later reverted to hard deps, then replaced with `dbus-fast`)
+- Stub API mismatches
+- Version display hardcoded in CLI
 
 ## [2.0.0] - 2026-03-29
 
 ### Added
 
-- Initial public release
-- Bluetooth Classic and BLE device discovery
-- SDP, GATT, RFCOMM, L2CAP service enumeration
-- Device fingerprinting (BT version, chipset, manufacturer)
+- Initial public release with full Bluetooth Classic and BLE penetration testing toolkit
+- Device discovery, service enumeration, fingerprinting
 - Vulnerability scanner with 20+ CVE checks
-- PBAP phonebook extraction
-- MAP message extraction
-- AT command interface and data extraction
-- OBEX Object Push
-- Connection hijacking via MAC spoofing and identity cloning
-- BIAS attack (CVE-2020-10135)
-- HFP call control and audio interception
-- A2DP media stream capture
-- AVRCP media control and DoS
-- DoS attacks (pairing flood, name flood, L2ping flood, PIN brute force)
-- Multi-protocol fuzzing engine (SDP, L2CAP, ATT, RFCOMM, SMP, OBEX, AT, BNEP)
-- 4 fuzzing strategies (random walk, coverage-guided, state-machine, targeted)
-- Crash database with deduplication and reproduction
-- Crash minimization (binary search, delta debugging, field reducer)
-- btsnoop pcap replay with mutation
-- CVE reproduction patterns (CVE-2017-0785, CVE-2017-0781, SweynTooth, CVE-2018-5383, CVE-2024-24746)
-- Session management with auto-logging
-- HTML and JSON report generation
-- Automated attack chain (`auto` command)
-- Command sequencing (`run` command with playbook support)
-- Rich terminal UI with styled output, tables, panels
-- Live fuzzing dashboard with keyboard controls
+- PBAP, MAP, AT, OPP data extraction
+- Connection hijacking, BIAS, HFP, A2DP, AVRCP
+- DoS attacks, multi-protocol fuzzing engine
+- 4 fuzzing strategies, crash database, minimization
+- Session management, HTML/JSON reports, auto pentest, playbooks
 
-[2.2.0]: https://github.com/Indspl0it/blue-tap/compare/v2.1.1...HEAD
+[2.5.0]: https://github.com/Indspl0it/blue-tap/compare/v2.3.2...v2.5.0
+[2.3.2]: https://github.com/Indspl0it/blue-tap/compare/v2.3.1...v2.3.2
+[2.3.1]: https://github.com/Indspl0it/blue-tap/compare/v2.3.0...v2.3.1
+[2.3.0]: https://github.com/Indspl0it/blue-tap/compare/v2.2.0...v2.3.0
+[2.2.0]: https://github.com/Indspl0it/blue-tap/compare/v2.1.1...v2.2.0
 [2.1.1]: https://github.com/Indspl0it/blue-tap/compare/v2.1.0...v2.1.1
 [2.1.0]: https://github.com/Indspl0it/blue-tap/compare/v2.0.0...v2.1.0
 [2.0.1]: https://github.com/Indspl0it/blue-tap/compare/v2.0.0...v2.0.1
