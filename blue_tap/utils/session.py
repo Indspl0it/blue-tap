@@ -20,10 +20,13 @@ Session directory structure:
 """
 
 import json
+import logging
 import os
 from datetime import datetime
 
 from blue_tap.core.result_schema import looks_like_run_envelope, validate_run_envelope
+
+_logger = logging.getLogger(__name__)
 
 
 # Module-level active session (set by CLI --session flag)
@@ -171,6 +174,12 @@ class Session:
                 "valid": not errors,
                 "errors": errors,
             }
+        else:
+            _logger.debug(
+                "Non-envelope data logged for command %s (category=%s)",
+                command,
+                category,
+            )
         with open(filepath, "w") as f:
             json.dump(entry, f, indent=2, default=str)
 
