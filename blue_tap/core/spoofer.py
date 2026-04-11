@@ -54,15 +54,16 @@ def get_original_mac(hci: str) -> str | None:
         return None
 
 
-def restore_original_mac(hci: str, method: str = "auto") -> bool:
+def restore_original_mac(hci: str, method: str = "auto") -> dict:
     """Restore the adapter's original MAC address."""
     original = get_original_mac(hci)
     if not original:
         warning(f"No saved original MAC for {hci}. Reboot to restore.")
-        return False
+        return {"success": False, "restored_mac": "", "hci": hci, "method": method,
+                "error": f"no saved original MAC for {hci}"}
     info(f"Restoring {hci} to original MAC: {original}")
-    result = spoof_address(hci, original, method)
-    if result:
+    spoof_result = spoof_address(hci, original, method)
+    if spoof_result["success"]:
         # Remove saved entry
         try:
             with open(_ORIGINAL_MAC_FILE) as f:
@@ -72,21 +73,28 @@ def restore_original_mac(hci: str, method: str = "auto") -> bool:
                 json.dump(data, f)
         except (json.JSONDecodeError, OSError):
             pass
-    return result
+    return {"success": spoof_result["success"],
+            "restored_mac": original if spoof_result["success"] else "",
+            "hci": hci,
+            "method": spoof_result.get("method_used") or method,
+            "error": spoof_result.get("error", "")}
 
 
-def spoof_bdaddr(hci: str, target_mac: str) -> bool:
+def spoof_bdaddr(hci: str, target_mac: str) -> dict:
     """Spoof adapter MAC address using bdaddr (CSR chipset tool).
 
     Requirements: bdaddr tool (typically build from source, or use distro package if available)
     Works with: CSR-based USB Bluetooth adapters
     """
+    original = get_adapter_address(hci) or ""
+
     if not check_tool("bdaddr"):
         error("bdaddr not found. Install from your distro package if available, or build from BlueZ source")
-        return False
+        return {"success": False, "method": "bdaddr", "original_mac": original,
+                "target_mac": target_mac, "verified": False, "hci": hci,
+                "error": "bdaddr not found"}
 
     target_mac = normalize_mac(target_mac)
-    original = get_adapter_address(hci)
     info(f"Original address: {original}")
     info(f"Spoofing {hci} -> {target_mac}")
 
@@ -105,11 +113,16 @@ def spoof_bdaddr(hci: str, target_mac: str) -> bool:
     for pattern in rejection_patterns:
         if pattern in combined_output:
             error(f"bdaddr: hardware rejected change ({pattern})")
-            return False
+            return {"success": False, "method": "bdaddr", "original_mac": original,
+                    "target_mac": target_mac, "verified": False, "hci": hci,
+                    "error": f"hardware rejected change ({pattern})"}
 
     if result.returncode != 0:
-        error(f"bdaddr failed: {result.stderr.strip()}")
-        return False
+        err_msg = result.stderr.strip()
+        error(f"bdaddr failed: {err_msg}")
+        return {"success": False, "method": "bdaddr", "original_mac": original,
+                "target_mac": target_mac, "verified": False, "hci": hci,
+                "error": err_msg}
 
     # Reset adapter to apply
     import time
@@ -122,23 +135,31 @@ def spoof_bdaddr(hci: str, target_mac: str) -> bool:
 
     # Verify
     new_addr = get_adapter_address(hci)
-    if new_addr and new_addr.upper() == target_mac.upper():
+    verified = bool(new_addr and new_addr.upper() == target_mac.upper())
+    if verified:
         success(f"Spoofed successfully: {hci} = {new_addr}")
-        return True
+        return {"success": True, "method": "bdaddr", "original_mac": original,
+                "target_mac": target_mac, "verified": True, "hci": hci, "error": ""}
     else:
         warning(f"Address after reset: {new_addr} (expected {target_mac})")
         warning("Some adapters need physical replug to apply. Try spooftooph as alternative.")
-        return False
+        return {"success": False, "method": "bdaddr", "original_mac": original,
+                "target_mac": target_mac, "verified": False, "hci": hci,
+                "error": f"address after reset is {new_addr}, expected {target_mac}"}
 
 
-def spoof_spooftooph(hci: str, target_mac: str) -> bool:
+def spoof_spooftooph(hci: str, target_mac: str) -> dict:
     """Spoof using spooftooph (supports more chipsets).
 
     Requirements: spooftooph (apt install spooftooph on Kali)
     """
+    original = get_adapter_address(hci) or ""
+
     if not check_tool("spooftooph"):
         error("spooftooph not found. Install: apt install spooftooph")
-        return False
+        return {"success": False, "method": "spooftooph", "original_mac": original,
+                "target_mac": target_mac, "verified": False, "hci": hci,
+                "error": "spooftooph not found"}
 
     target_mac = normalize_mac(target_mac)
     info(f"Spoofing {hci} -> {target_mac} via spooftooph")
@@ -159,28 +180,38 @@ def spoof_spooftooph(hci: str, target_mac: str) -> bool:
     for pattern in rejection_patterns:
         if pattern in combined_output:
             error(f"spooftooph: hardware rejected change ({pattern})")
-            return False
+            return {"success": False, "method": "spooftooph", "original_mac": original,
+                    "target_mac": target_mac, "verified": False, "hci": hci,
+                    "error": f"hardware rejected change ({pattern})"}
 
     if result.returncode != 0:
-        error(f"spooftooph failed: {result.stderr.strip()}")
-        return False
+        err_msg = result.stderr.strip()
+        error(f"spooftooph failed: {err_msg}")
+        return {"success": False, "method": "spooftooph", "original_mac": original,
+                "target_mac": target_mac, "verified": False, "hci": hci,
+                "error": err_msg}
 
     # Verify the address actually changed (return code alone is unreliable)
     new_addr = get_adapter_address(hci)
-    if new_addr and new_addr.upper() == target_mac.upper():
+    verified = bool(new_addr and new_addr.upper() == target_mac.upper())
+    if verified:
         success(f"Spoofed {hci} to {target_mac} (verified)")
-        return True
+        return {"success": True, "method": "spooftooph", "original_mac": original,
+                "target_mac": target_mac, "verified": True, "hci": hci, "error": ""}
     else:
         warning(f"spooftooph returned success but address is still {new_addr} (expected {target_mac})")
         warning("Hardware likely does not support MAC spoofing via this method.")
-        return False
+        return {"success": False, "method": "spooftooph", "original_mac": original,
+                "target_mac": target_mac, "verified": False, "hci": hci,
+                "error": f"address still {new_addr} after spoof, expected {target_mac}"}
 
 
-def spoof_btmgmt(hci: str, target_mac: str) -> bool:
+def spoof_btmgmt(hci: str, target_mac: str) -> dict:
     """Spoof using btmgmt (BlueZ management interface).
 
     This method works on many modern adapters without extra tools.
     """
+    original = get_adapter_address(hci) or ""
     target_mac = normalize_mac(target_mac)
     idx = hci.replace("hci", "")
     info(f"Spoofing via btmgmt index {idx} -> {target_mac}")
@@ -197,8 +228,11 @@ def spoof_btmgmt(hci: str, target_mac: str) -> bool:
     # Power down first
     power_off = run_cmd(["sudo", "btmgmt", "--index", idx, "power", "off"])
     if power_off.returncode != 0:
-        error(f"btmgmt power off failed: {power_off.stderr.strip()}")
-        return False
+        err_msg = power_off.stderr.strip()
+        error(f"btmgmt power off failed: {err_msg}")
+        return {"success": False, "method": "btmgmt", "original_mac": original,
+                "target_mac": target_mac, "verified": False, "hci": hci,
+                "error": f"power off failed: {err_msg}"}
 
     # Try public-addr first (changes BD_ADDR for BR/EDR + BLE public)
     public_failed = True
@@ -228,20 +262,26 @@ def spoof_btmgmt(hci: str, target_mac: str) -> bool:
 
     if public_failed:
         warning("btmgmt method not supported on this adapter")
-        return False
+        return {"success": False, "method": "btmgmt", "original_mac": original,
+                "target_mac": target_mac, "verified": False, "hci": hci,
+                "error": "btmgmt public-addr not supported on this adapter"}
 
     # Verify address actually changed
     new_addr = get_adapter_address(hci)
-    if new_addr and new_addr.upper() == target_mac.upper():
+    verified = bool(new_addr and new_addr.upper() == target_mac.upper())
+    if verified:
         success(f"Spoofed via btmgmt: {hci} = {new_addr}")
-        return True
+        return {"success": True, "method": "btmgmt", "original_mac": original,
+                "target_mac": target_mac, "verified": True, "hci": hci, "error": ""}
     else:
         warning(f"btmgmt returned success but address is still {new_addr} (expected {target_mac})")
         warning("Hardware accepted command but did not change address.")
-        return False
+        return {"success": False, "method": "btmgmt", "original_mac": original,
+                "target_mac": target_mac, "verified": False, "hci": hci,
+                "error": f"address still {new_addr} after btmgmt, expected {target_mac}"}
 
 
-def spoof_rtl8761b(hci: str, target_mac: str) -> bool:
+def spoof_rtl8761b(hci: str, target_mac: str) -> dict:
     """Spoof BDADDR on RTL8761B via DarkFirmware.
 
     Preferred method: RAM-only live patch (instant, no USB reset, volatile).
@@ -252,58 +292,100 @@ def spoof_rtl8761b(hci: str, target_mac: str) -> bool:
     shows the old address after RAM patching (host stack cache stale),
     falls back to the firmware file method with USB reset.
     """
+    original = get_adapter_address(hci) or ""
     try:
         from blue_tap.core.firmware import DarkFirmwareManager
         fw = DarkFirmwareManager()
         if not fw.detect_rtl8761b(hci):
-            return False
+            return {"success": False, "method": "rtl8761b", "original_mac": original,
+                    "target_mac": target_mac, "verified": False, "hci": hci,
+                    "error": "RTL8761B not detected on this adapter"}
 
         # Preferred: RAM-only live patch (no file modification, instant)
         if fw.is_darkfirmware_loaded(hci):
             info("Attempting RAM-only BDADDR patch (preferred, no USB reset)...")
             if fw.patch_bdaddr_ram(target_mac, hci):
-                return True
+                new_addr = get_adapter_address(hci) or ""
+                verified = new_addr.upper() == target_mac.upper()
+                return {"success": True, "method": "rtl8761b", "original_mac": original,
+                        "target_mac": target_mac, "verified": verified, "hci": hci, "error": ""}
             warning("RAM patch did not verify — falling back to firmware file patch")
 
         # Fallback: firmware file patch + USB reset (persistent, slower)
         info("Using firmware file BDADDR patch (USB reset required)...")
-        return fw.patch_bdaddr(target_mac, hci)
+        ok = fw.patch_bdaddr(target_mac, hci)
+        if ok:
+            new_addr = get_adapter_address(hci) or ""
+            verified = new_addr.upper() == target_mac.upper()
+            return {"success": True, "method": "rtl8761b", "original_mac": original,
+                    "target_mac": target_mac, "verified": verified, "hci": hci, "error": ""}
+        return {"success": False, "method": "rtl8761b", "original_mac": original,
+                "target_mac": target_mac, "verified": False, "hci": hci,
+                "error": "firmware file BDADDR patch failed"}
     except Exception as exc:
         error(f"RTL8761B BDADDR spoofing failed: {exc}")
-        return False
+        return {"success": False, "method": "rtl8761b", "original_mac": original,
+                "target_mac": target_mac, "verified": False, "hci": hci, "error": str(exc)}
 
 
-def spoof_address(hci: str, target_mac: str, method: str = "auto") -> bool:
+def spoof_address(hci: str, target_mac: str, method: str = "auto") -> dict:
     """Spoof MAC address using the best available method.
 
     Methods: auto, bdaddr, spooftooph, btmgmt
     """
     from blue_tap.utils.bt_helpers import ensure_adapter_ready
     if not ensure_adapter_ready(hci):
-        return False
+        original = get_adapter_address(hci) or ""
+        return {"success": False, "method_used": "", "methods_tried": [],
+                "original_mac": original, "target_mac": target_mac,
+                "verified": False, "hci": hci, "error": "adapter not ready"}
 
+    original = get_adapter_address(hci) or ""
     target_mac = normalize_mac(target_mac)
 
     # Save original MAC before any spoofing attempt
     save_original_mac(hci)
 
     if method == "bdaddr":
-        return spoof_bdaddr(hci, target_mac)
+        sub = spoof_bdaddr(hci, target_mac)
+        return {"success": sub["success"], "method_used": "bdaddr" if sub["success"] else "",
+                "methods_tried": ["bdaddr"], "original_mac": original,
+                "target_mac": target_mac, "verified": sub["verified"],
+                "hci": hci, "error": sub["error"]}
     elif method == "spooftooph":
-        return spoof_spooftooph(hci, target_mac)
+        sub = spoof_spooftooph(hci, target_mac)
+        return {"success": sub["success"], "method_used": "spooftooph" if sub["success"] else "",
+                "methods_tried": ["spooftooph"], "original_mac": original,
+                "target_mac": target_mac, "verified": sub["verified"],
+                "hci": hci, "error": sub["error"]}
     elif method == "btmgmt":
-        return spoof_btmgmt(hci, target_mac)
+        sub = spoof_btmgmt(hci, target_mac)
+        return {"success": sub["success"], "method_used": "btmgmt" if sub["success"] else "",
+                "methods_tried": ["btmgmt"], "original_mac": original,
+                "target_mac": target_mac, "verified": sub["verified"],
+                "hci": hci, "error": sub["error"]}
     elif method == "rtl8761b":
-        return spoof_rtl8761b(hci, target_mac)
+        sub = spoof_rtl8761b(hci, target_mac)
+        return {"success": sub["success"], "method_used": "rtl8761b" if sub["success"] else "",
+                "methods_tried": ["rtl8761b"], "original_mac": original,
+                "target_mac": target_mac, "verified": sub["verified"],
+                "hci": hci, "error": sub["error"]}
     else:
+        methods_tried: list[str] = []
+
         # Try RTL8761B firmware patching first (only method that works on Realtek)
         try:
             from blue_tap.core.firmware import DarkFirmwareManager
             fw = DarkFirmwareManager()
             if fw.detect_rtl8761b(hci):
                 info("Detected RTL8761B — using firmware BDADDR patching")
-                if spoof_rtl8761b(hci, target_mac):
-                    return True
+                methods_tried.append("rtl8761b")
+                sub = spoof_rtl8761b(hci, target_mac)
+                if sub["success"]:
+                    return {"success": True, "method_used": "rtl8761b",
+                            "methods_tried": methods_tried, "original_mac": original,
+                            "target_mac": target_mac, "verified": sub["verified"],
+                            "hci": hci, "error": ""}
                 warning("RTL8761B firmware patching failed, trying other methods...")
         except ImportError:
             pass
@@ -315,32 +397,48 @@ def spoof_address(hci: str, target_mac: str, method: str = "auto") -> bool:
             ("btmgmt", spoof_btmgmt),
         ]:
             info(f"Trying method: {name}")
-            if fn(hci, target_mac):
-                return True
+            methods_tried.append(name)
+            sub = fn(hci, target_mac)
+            if sub["success"]:
+                return {"success": True, "method_used": name,
+                        "methods_tried": methods_tried, "original_mac": original,
+                        "target_mac": target_mac, "verified": sub["verified"],
+                        "hci": hci, "error": ""}
             warning(f"{name} did not work, trying next...")
+
         error("All spoofing methods failed")
-        return False
+        return {"success": False, "method_used": "", "methods_tried": methods_tried,
+                "original_mac": original, "target_mac": target_mac,
+                "verified": False, "hci": hci, "error": "all spoofing methods failed"}
 
 
 def clone_device_identity(hci: str, target_mac: str, target_name: str,
-                          device_class: str = "0x5a020c") -> bool:
+                          device_class: str = "0x5a020c") -> dict:
     """Full device identity clone: MAC + name + device class.
 
     This is the key step for impersonating a paired phone to an IVI.
     """
     from blue_tap.core.adapter import set_device_name, set_device_class
 
+    original = get_adapter_address(hci) or ""
     info(f"Cloning device identity: {target_mac} '{target_name}'")
 
-    if not spoof_address(hci, target_mac):
-        return False
+    spoof_result = spoof_address(hci, target_mac)
+    if not spoof_result["success"]:
+        return {"success": False, "mac_spoofed": False, "name_set": False, "class_set": False,
+                "original_mac": original, "target_mac": target_mac,
+                "target_name": target_name, "device_class": device_class,
+                "hci": hci, "error": spoof_result.get("error", "MAC spoof failed")}
 
     try:
         name_ok = set_device_name(hci, target_name)
         class_ok = set_device_class(hci, device_class)
         if name_ok and class_ok:
             success(f"Full identity clone complete on {hci}")
-            return True
+            return {"success": True, "mac_spoofed": True, "name_set": True, "class_set": True,
+                    "original_mac": original, "target_mac": target_mac,
+                    "target_name": target_name, "device_class": device_class,
+                    "hci": hci, "error": ""}
         else:
             failed = []
             if not name_ok:
@@ -348,7 +446,14 @@ def clone_device_identity(hci: str, target_mac: str, target_name: str,
             if not class_ok:
                 failed.append("class")
             error(f"Identity clone incomplete: MAC spoofed but {', '.join(failed)} failed — IVI may reject connection")
-            return False
+            return {"success": False, "mac_spoofed": True,
+                    "name_set": bool(name_ok), "class_set": bool(class_ok),
+                    "original_mac": original, "target_mac": target_mac,
+                    "target_name": target_name, "device_class": device_class,
+                    "hci": hci, "error": f"{', '.join(failed)} failed"}
     except Exception as e:
         error(f"Identity clone partial failure: {e}")
-        return False
+        return {"success": False, "mac_spoofed": True, "name_set": False, "class_set": False,
+                "original_mac": original, "target_mac": target_mac,
+                "target_name": target_name, "device_class": device_class,
+                "hci": hci, "error": str(e)}
