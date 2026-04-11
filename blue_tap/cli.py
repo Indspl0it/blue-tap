@@ -437,9 +437,23 @@ def adapter_info(hci):
 def up(hci):
     """Bring adapter up."""
     from blue_tap.core.adapter import adapter_up
+    from blue_tap.core.result_schema import build_run_envelope, make_run_id, now_iso
     from blue_tap.utils.session import log_command
+    started = now_iso()
     ok = adapter_up(hci)
-    log_command("adapter_up", {"hci": hci, "success": ok}, category="general")
+    envelope = build_run_envelope(
+        schema="blue_tap.general.result",
+        module="general",
+        target=hci,
+        adapter=hci,
+        operator_context={"operation": "adapter_up"},
+        summary={"success": ok},
+        executions=[],
+        module_data={"operation": "adapter_up", "hci": hci, "success": ok},
+        started_at=started,
+        run_id=make_run_id("general"),
+    )
+    log_command("adapter_up", envelope, category="general")
 
 
 @adapter.command()
@@ -447,9 +461,23 @@ def up(hci):
 def down(hci):
     """Bring adapter down."""
     from blue_tap.core.adapter import adapter_down
+    from blue_tap.core.result_schema import build_run_envelope, make_run_id, now_iso
     from blue_tap.utils.session import log_command
+    started = now_iso()
     ok = adapter_down(hci)
-    log_command("adapter_down", {"hci": hci, "success": ok}, category="general")
+    envelope = build_run_envelope(
+        schema="blue_tap.general.result",
+        module="general",
+        target=hci,
+        adapter=hci,
+        operator_context={"operation": "adapter_down"},
+        summary={"success": ok},
+        executions=[],
+        module_data={"operation": "adapter_down", "hci": hci, "success": ok},
+        started_at=started,
+        run_id=make_run_id("general"),
+    )
+    log_command("adapter_down", envelope, category="general")
 
 
 @adapter.command()
@@ -457,9 +485,23 @@ def down(hci):
 def reset(hci):
     """Reset adapter."""
     from blue_tap.core.adapter import adapter_reset
+    from blue_tap.core.result_schema import build_run_envelope, make_run_id, now_iso
     from blue_tap.utils.session import log_command
+    started = now_iso()
     ok = adapter_reset(hci)
-    log_command("adapter_reset", {"hci": hci, "success": ok}, category="general")
+    envelope = build_run_envelope(
+        schema="blue_tap.general.result",
+        module="general",
+        target=hci,
+        adapter=hci,
+        operator_context={"operation": "adapter_reset"},
+        summary={"success": ok},
+        executions=[],
+        module_data={"operation": "adapter_reset", "hci": hci, "success": ok},
+        started_at=started,
+        run_id=make_run_id("general"),
+    )
+    log_command("adapter_reset", envelope, category="general")
 
 
 @adapter.command("set-name")
@@ -468,9 +510,23 @@ def reset(hci):
 def set_name(hci, name):
     """Set adapter Bluetooth name (for impersonation)."""
     from blue_tap.core.adapter import set_device_name
+    from blue_tap.core.result_schema import build_run_envelope, make_run_id, now_iso
     from blue_tap.utils.session import log_command
+    started = now_iso()
     ok = set_device_name(hci, name)
-    log_command("adapter_set_name", {"hci": hci, "name": name, "success": ok}, category="general")
+    envelope = build_run_envelope(
+        schema="blue_tap.general.result",
+        module="general",
+        target=hci,
+        adapter=hci,
+        operator_context={"operation": "adapter_set_name", "name": name},
+        summary={"success": ok},
+        executions=[],
+        module_data={"operation": "adapter_set_name", "hci": hci, "name": name, "success": ok},
+        started_at=started,
+        run_id=make_run_id("general"),
+    )
+    log_command("adapter_set_name", envelope, category="general")
 
 
 @adapter.command("set-class")
@@ -479,9 +535,23 @@ def set_name(hci, name):
 def set_class(hci, device_class):
     """Set device class. Default 0x5a020c = smartphone."""
     from blue_tap.core.adapter import set_device_class
+    from blue_tap.core.result_schema import build_run_envelope, make_run_id, now_iso
     from blue_tap.utils.session import log_command
+    started = now_iso()
     ok = set_device_class(hci, device_class)
-    log_command("adapter_set_class", {"hci": hci, "device_class": device_class, "success": ok}, category="general")
+    envelope = build_run_envelope(
+        schema="blue_tap.general.result",
+        module="general",
+        target=hci,
+        adapter=hci,
+        operator_context={"operation": "adapter_set_class", "device_class": device_class},
+        summary={"success": ok},
+        executions=[],
+        module_data={"operation": "adapter_set_class", "hci": hci, "device_class": device_class, "success": ok},
+        started_at=started,
+        run_id=make_run_id("general"),
+    )
+    log_command("adapter_set_class", envelope, category="general")
 
 
 @adapter.command("firmware-status")
@@ -6572,11 +6642,33 @@ def run_cmd_seq(commands, playbook, list_playbooks_flag):
         # Only prompt for HCI if target wasn't already prompted
         pass  # Default hci0 is fine
 
+    from blue_tap.core.cli_events import emit_cli_event
+    from blue_tap.core.result_schema import (
+        now_iso,
+        make_run_id,
+        make_execution,
+        make_evidence,
+        build_run_envelope,
+    )
+
+    playbook_name = playbook or "inline"
+    run_id = make_run_id("playbook")
+    started_at = now_iso()
+
     console.rule("[bold cyan]Blue-Tap Workflow", style="cyan")
     info(f"Executing {len(commands)} command(s)")
     for i, cmd in enumerate(commands, 1):
         info(f"  {i}. {cmd}")
     console.print()
+
+    emit_cli_event(
+        event_type="run_started",
+        module="playbook",
+        run_id=run_id,
+        message=f"Playbook started: {len(commands)} step(s)",
+        details={"step_count": len(commands), "playbook": playbook_name},
+        echo=False,
+    )
 
     results = []
     active_session = get_session()
@@ -6595,51 +6687,192 @@ def run_cmd_seq(commands, playbook, list_playbooks_flag):
 
         console.rule(f"[bold]Step {i}/{len(commands)}: {cmd_str}", style="dim")
 
+        step_started_at = now_iso()
+        emit_cli_event(
+            event_type="execution_started",
+            module="playbook",
+            run_id=run_id,
+            message=f"Step {i}: {cmd_str}",
+            details={"step": i, "command": cmd_str},
+            echo=False,
+        )
+
         try:
             # Parse the command string and invoke via Click
             args = shlex.split(cmd_str)
             if args and args[0] == "run":
                 error("Nested 'run' command is not supported inside workflows")
+                step_completed_at = now_iso()
+                emit_cli_event(
+                    event_type="execution_result",
+                    module="playbook",
+                    run_id=run_id,
+                    message=f"Step {i} failed: {cmd_str}",
+                    details={"step": i, "status": "failed", "error": "nested_run_not_supported"},
+                    echo=False,
+                )
                 results.append({
                     "step": i,
                     "command": cmd_str,
                     "status": "error",
                     "error": "nested_run_not_supported",
+                    "started_at": step_started_at,
+                    "completed_at": step_completed_at,
                 })
                 continue
             ctx = main.make_context("blue-tap", session_prefix + list(args), parent=click.get_current_context())
             with ctx:
                 main.invoke(ctx)
-            results.append({"step": i, "command": cmd_str, "status": "success"})
+            step_completed_at = now_iso()
+            emit_cli_event(
+                event_type="execution_result",
+                module="playbook",
+                run_id=run_id,
+                message=f"Step {i} complete: {cmd_str}",
+                details={"step": i, "status": "success"},
+                echo=False,
+            )
+            results.append({
+                "step": i,
+                "command": cmd_str,
+                "status": "success",
+                "started_at": step_started_at,
+                "completed_at": step_completed_at,
+            })
         except KeyboardInterrupt:
+            step_completed_at = now_iso()
             warning("Workflow interrupted by user")
-            results.append({"step": i, "command": cmd_str, "status": "interrupted"})
+            emit_cli_event(
+                event_type="run_aborted",
+                module="playbook",
+                run_id=run_id,
+                message=f"Playbook interrupted at step {i}",
+                details={"step": i, "command": cmd_str},
+                echo=False,
+            )
+            results.append({
+                "step": i,
+                "command": cmd_str,
+                "status": "interrupted",
+                "started_at": step_started_at,
+                "completed_at": step_completed_at,
+            })
             break
         except SystemExit as e:
+            step_completed_at = now_iso()
             status = "success" if e.code in (None, 0) else "error"
-            results.append({"step": i, "command": cmd_str, "status": status})
+            emit_cli_event(
+                event_type="execution_result",
+                module="playbook",
+                run_id=run_id,
+                message=f"Step {i} {'complete' if status == 'success' else 'failed'}: {cmd_str}",
+                details={"step": i, "status": status, "exit_code": e.code},
+                echo=False,
+            )
+            results.append({
+                "step": i,
+                "command": cmd_str,
+                "status": status,
+                "started_at": step_started_at,
+                "completed_at": step_completed_at,
+            })
         except click.exceptions.UsageError as e:
+            step_completed_at = now_iso()
             error(f"Invalid command: {e}")
-            results.append({"step": i, "command": cmd_str, "status": "error", "error": str(e)})
+            emit_cli_event(
+                event_type="execution_result",
+                module="playbook",
+                run_id=run_id,
+                message=f"Step {i} failed: {cmd_str}",
+                details={"step": i, "status": "failed", "error": str(e)},
+                echo=False,
+            )
+            results.append({
+                "step": i,
+                "command": cmd_str,
+                "status": "error",
+                "error": str(e),
+                "started_at": step_started_at,
+                "completed_at": step_completed_at,
+            })
         except Exception as e:
+            step_completed_at = now_iso()
             error(f"Command failed: {e}")
-            results.append({"step": i, "command": cmd_str, "status": "error", "error": str(e)})
+            emit_cli_event(
+                event_type="execution_result",
+                module="playbook",
+                run_id=run_id,
+                message=f"Step {i} failed: {cmd_str}",
+                details={"step": i, "status": "failed", "error": str(e)},
+                echo=False,
+            )
+            results.append({
+                "step": i,
+                "command": cmd_str,
+                "status": "error",
+                "error": str(e),
+                "started_at": step_started_at,
+                "completed_at": step_completed_at,
+            })
 
     console.rule("[bold]Workflow Complete", style="cyan")
     succeeded = sum(1 for r in results if r["status"] == "success")
-    failed = sum(1 for r in results if r["status"] == "error")
+    failed = sum(1 for r in results if r["status"] in ("error", "interrupted"))
     info(f"Results: {succeeded} succeeded, {failed} failed out of {len(results)}")
-    from blue_tap.utils.session import log_command
-    log_command(
-        "workflow_run",
-        {
-            "commands": list(commands),
-            "results": results,
-            "succeeded": succeeded,
-            "failed": failed,
-        },
-        category="general",
+
+    emit_cli_event(
+        event_type="run_completed",
+        module="playbook",
+        run_id=run_id,
+        message=f"Playbook complete: {succeeded}/{len(results)} steps succeeded",
+        details={"passed": succeeded, "failed": failed, "total": len(results)},
+        echo=False,
     )
+
+    # Build structured RunEnvelope
+    executions = []
+    for step_result in results:
+        step_status = step_result["status"]
+        execution_status = "completed" if step_status == "success" else ("skipped" if step_status == "interrupted" else "failed")
+        module_outcome = "complete" if step_status == "success" else "partial"
+        obs = [f"status={step_status}"]
+        if step_result.get("error"):
+            obs.append(f"error={step_result['error']}")
+        executions.append(make_execution(
+            kind="phase",
+            id=f"step_{step_result['step']}",
+            title=step_result["command"],
+            module="playbook",
+            protocol="multi",
+            execution_status=execution_status,
+            module_outcome=module_outcome,
+            evidence=make_evidence(
+                summary=f"Step {step_result['step']}: {step_result['command']} — {step_status}",
+                confidence="high",
+                observations=obs,
+            ),
+            started_at=step_result.get("started_at", started_at),
+            completed_at=step_result.get("completed_at", now_iso()),
+            tags=["playbook"],
+            module_data=step_result,
+        ))
+
+    envelope = build_run_envelope(
+        schema="blue_tap.playbook.result",
+        module="playbook",
+        target=target_addr or "",
+        adapter=hci_adapter,
+        operator_context={"playbook": playbook_name, "step_count": len(commands)},
+        summary={"passed": succeeded, "failed": failed, "total": len(commands)},
+        executions=executions,
+        artifacts=[],
+        module_data={"steps": results},
+        started_at=started_at,
+        run_id=run_id,
+    )
+
+    from blue_tap.utils.session import log_command
+    log_command("playbook_run", envelope, category="general")
 
 
 # ============================================================================
@@ -7182,7 +7415,8 @@ def fleet_scan(duration, hci):
     info(f"Found: {ivi_count} IVI(s), {phone_count} phone(s), {len(devices) - ivi_count - phone_count} other(s)")
 
     from blue_tap.utils.session import log_command
-    log_command("fleet_scan", devices, category="scan")
+    # Log the underlying scan RunEnvelope (produced by FleetAssessment.scan())
+    log_command("fleet_scan", assessment._scan_envelope, category="scan")
 
 
 @fleet.command("vulnscan")
@@ -7235,8 +7469,27 @@ def fleet_assess(duration, hci, all_devices):
             console.print(f"  [dim]... and {len(findings) - 3} more[/dim]")
 
     report = assessment.report()
+    from blue_tap.core.result_schema import build_run_envelope, make_run_id, now_iso
     from blue_tap.utils.session import log_command
-    log_command("fleet_assess", report, category="vuln")
+    # Log the underlying scan envelope produced during fleet.scan()
+    log_command("fleet_scan", assessment._scan_envelope, category="scan")
+    # Wrap fleet assessment results in a RunEnvelope before logging
+    assess_envelope = build_run_envelope(
+        schema="blue_tap.vuln.result",
+        module="vuln",
+        target="fleet",
+        adapter=hci,
+        operator_context={"operation": "fleet_assess", "all_devices": all_devices},
+        summary={
+            "assessed": report.get("assessed", 0),
+            "overall_risk": report.get("overall_risk", "UNKNOWN"),
+            "total_devices": report.get("total_devices", 0),
+        },
+        executions=[],
+        module_data=report,
+        run_id=make_run_id("vuln"),
+    )
+    log_command("fleet_assess", assess_envelope, category="vuln")
 
     console.print()
     success(f"Fleet vulnscan complete: {report.get('assessed', 0)} devices scanned, "
@@ -7286,8 +7539,27 @@ def fleet_report(duration, hci, output, fmt, all_devices):
             rpt.add_run_envelope(vulnscan)
         rpt.generate_html(out_path)
 
+    from blue_tap.core.result_schema import build_run_envelope, make_run_id, now_iso
     from blue_tap.utils.session import log_command
-    log_command("fleet_report", report_data, category="vuln")
+    # Log the underlying scan envelope produced during fleet.scan()
+    log_command("fleet_scan", assessment._scan_envelope, category="scan")
+    # Wrap fleet report data in a RunEnvelope before logging
+    report_envelope = build_run_envelope(
+        schema="blue_tap.vuln.result",
+        module="vuln",
+        target="fleet",
+        adapter=hci,
+        operator_context={"operation": "fleet_report", "all_devices": all_devices, "fmt": fmt},
+        summary={
+            "assessed": report_data.get("assessed", 0),
+            "overall_risk": report_data.get("overall_risk", "UNKNOWN"),
+            "total_devices": report_data.get("total_devices", 0),
+        },
+        executions=[],
+        module_data=report_data,
+        run_id=make_run_id("vuln"),
+    )
+    log_command("fleet_report", report_envelope, category="vuln")
 
 
 # ============================================================================
