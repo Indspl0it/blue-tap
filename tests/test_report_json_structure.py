@@ -2,6 +2,8 @@ import json
 from pathlib import Path
 
 from blue_tap.demo import mock_data as M
+from blue_tap.core.auto_framework import build_auto_result
+from blue_tap.core.result_schema import build_run_envelope, make_evidence, make_execution
 from blue_tap.demo.report_data import (
     build_demo_dos_result,
     build_demo_fingerprint_result,
@@ -12,7 +14,6 @@ from blue_tap.demo.report_data import (
 )
 from blue_tap.report.generator import ReportGenerator
 from blue_tap.utils.session import Session
-from blue_tap.core.result_schema import build_run_envelope, make_evidence, make_execution
 
 
 def test_generate_json_includes_module_and_global_executions(tmp_path):
@@ -145,3 +146,95 @@ def test_session_log_validates_standardized_envelope_at_write_time(tmp_path):
     assert payload["validation"]["checked_at_write_time"] is True
     assert payload["validation"]["valid"] is True
     assert payload["validation"]["errors"] == []
+
+
+def test_generate_json_includes_auto_and_lmp_capture_modules(tmp_path):
+    report = ReportGenerator()
+    report.add_run_envelope(
+        build_auto_result(
+            target="AA:BB:CC:DD:EE:FF",
+            adapter="hci0",
+            results={
+                "target": "AA:BB:CC:DD:EE:FF",
+                "status": "complete",
+                "phases": {"discovery": {"status": "success", "_elapsed_seconds": 1.0}},
+                "total_time_seconds": 1.0,
+            },
+        )
+    )
+    report.add_run_envelope(
+        {
+            "schema": "blue_tap.lmp_capture.result",
+            "module": "lmp_capture",
+            "module_data": {
+                "captures": [
+                    {
+                        "bdaddr": "AA:BB:CC:DD:EE:FF",
+                        "LMPArray": [{"opcode": 8, "timestamp": 0, "direction": "tx", "decoded": {"opcode_name": "LMP_AU_RAND"}}],
+                    }
+                ]
+            },
+        }
+    )
+
+    output = tmp_path / "report-modules.json"
+    report.generate_json(str(output))
+    payload = json.loads(output.read_text())
+
+    assert "auto" in payload["modules"]
+    assert payload["modules"]["auto"]["runs"]
+    assert "lmp_capture" in payload["modules"]
+    assert payload["modules"]["lmp_capture"]["captures"]
+
+
+def test_generate_html_renders_auto_section(tmp_path):
+    report = ReportGenerator()
+    report.add_run_envelope(
+        build_auto_result(
+            target="AA:BB:CC:DD:EE:FF",
+            adapter="hci0",
+            results={
+                "target": "AA:BB:CC:DD:EE:FF",
+                "status": "complete",
+                "phases": {
+                    "discovery": {"status": "success", "_elapsed_seconds": 1.0},
+                    "report": {"status": "success", "_elapsed_seconds": 1.0},
+                },
+                "total_time_seconds": 2.0,
+            },
+        )
+    )
+
+    output = tmp_path / "report.html"
+    report.generate_html(str(output))
+    html = output.read_text()
+
+    assert 'id="sec-auto-pentest"' in html
+    assert "Automated Pentest Workflow" in html
+
+
+def test_generate_json_keeps_top_level_fuzzing_for_single_protocol_runs(tmp_path):
+    report = ReportGenerator()
+    envelope = build_run_envelope(
+        schema="blue_tap.fuzz.result",
+        module="fuzz",
+        target="AA:BB:CC:DD:EE:FF",
+        adapter="hci0",
+        operator_context={"command": "fuzz sdp"},
+        summary={"command": "fuzz sdp", "protocol": "sdp", "packets_sent": 10, "crashes": 0, "errors": 0},
+        executions=[],
+        module_data={
+            "run_type": "single_protocol_run",
+            "command": "fuzz sdp",
+            "protocol": "sdp",
+            "result": {"packets_sent": 10, "crashes": 0, "errors": 0},
+        },
+    )
+    report.add_run_envelope(envelope)
+
+    output = tmp_path / "fuzz-single.json"
+    report.generate_json(str(output))
+    payload = json.loads(output.read_text())
+
+    assert payload["fuzzing"]
+    assert payload["fuzzing"][0]["protocol"] == "sdp"

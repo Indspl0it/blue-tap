@@ -254,7 +254,7 @@ class HijackSession:
             started_at=phase_start, completed_at=now_iso(),
             module_data={"phone_address": self.phone_address, "phone_name": self.phone_name, "device_class": device_class},
         ))
-        self._emit("execution_result" if result else "execution_error",
+        self._emit("execution_result" if result else "run_error",
                    f"Impersonation {'complete' if result else 'failed'}: {self.phone_name}")
 
         return result
@@ -318,7 +318,7 @@ class HijackSession:
                     evidence=make_evidence(summary="bluetoothctl timed out after 30s", confidence="high"),
                     started_at=phase_start, completed_at=now_iso(),
                 ))
-                self._emit("execution_error", "Connect to IVI timed out")
+                self._emit("run_error", "Connect to IVI timed out")
                 return False
             output = result.stdout + result.stderr
             verbose(f"bluetoothctl output:\n{output.strip()}")
@@ -358,7 +358,7 @@ class HijackSession:
                         evidence=make_evidence(summary="bluetoothctl retry timed out", confidence="high"),
                         started_at=phase_start, completed_at=now_iso(),
                     ))
-                    self._emit("execution_error", "Connect to IVI retry timed out")
+                    self._emit("run_error", "Connect to IVI retry timed out")
                     return False
 
                 time.sleep(3)
@@ -385,7 +385,7 @@ class HijackSession:
             started_at=phase_start, completed_at=now_iso(),
             module_data={"ivi_address": self.ivi_address, "connected": connected},
         ))
-        self._emit("execution_result" if connected else "execution_error",
+        self._emit("execution_result" if connected else "run_error",
                    f"IVI connection {'established' if connected else 'failed'}")
 
         return connected
@@ -437,7 +437,7 @@ class HijackSession:
             started_at=phase_start, completed_at=now_iso(),
             module_data={"ivi_address": self.ivi_address, "connected": connected, "notes": bias_notes},
         ))
-        self._emit("execution_result" if connected else "execution_error",
+        self._emit("execution_result" if connected else "run_error",
                    f"BIAS attack {'succeeded' if connected else 'failed'}")
 
         return connected
@@ -458,7 +458,7 @@ class HijackSession:
                     evidence=make_evidence(summary="No PBAP channel found; recon() not run or channel unavailable", confidence="high"),
                     started_at=phase_start, completed_at=now_iso(),
                 ))
-                self._emit("execution_error", "PBAP skipped: no channel found")
+                self._emit("run_error", "PBAP skipped: no channel found")
                 return {}
 
             out = output_dir or f"{self.output_dir}/pbap"
@@ -480,7 +480,7 @@ class HijackSession:
                     started_at=phase_start, completed_at=now_iso(),
                     module_data={"pbap_channel": self.pbap_channel, "output_dir": out},
                 ))
-                self._emit("execution_error", "PBAP connection failed")
+                self._emit("run_error", "PBAP connection failed")
                 return {}
 
             verbose("PBAP connected, starting phonebook dump...")
@@ -521,7 +521,7 @@ class HijackSession:
                     started_at=phase_start, completed_at=now_iso(),
                     module_data={"pbap_channel": self.pbap_channel, "error": str(exc)},
                 ))
-                self._emit("execution_error", f"PBAP dump failed: {exc}")
+                self._emit("run_error", f"PBAP dump failed: {exc}")
                 return {}
             finally:
                 self.pbap_client.disconnect()
@@ -542,7 +542,7 @@ class HijackSession:
                     evidence=make_evidence(summary="No MAP channel found; recon() not run or channel unavailable", confidence="high"),
                     started_at=phase_start, completed_at=now_iso(),
                 ))
-                self._emit("execution_error", "MAP skipped: no channel found")
+                self._emit("run_error", "MAP skipped: no channel found")
                 return {}
 
             out = output_dir or f"{self.output_dir}/map"
@@ -564,7 +564,7 @@ class HijackSession:
                     started_at=phase_start, completed_at=now_iso(),
                     module_data={"map_channel": self.map_channel, "output_dir": out},
                 ))
-                self._emit("execution_error", "MAP connection failed")
+                self._emit("run_error", "MAP connection failed")
                 return {}
 
             verbose("MAP connected, starting message dump...")
@@ -604,7 +604,7 @@ class HijackSession:
                     started_at=phase_start, completed_at=now_iso(),
                     module_data={"map_channel": self.map_channel, "error": str(exc)},
                 ))
-                self._emit("execution_error", f"MAP dump failed: {exc}")
+                self._emit("run_error", f"MAP dump failed: {exc}")
                 return {}
             finally:
                 self.map_client.disconnect()
@@ -625,7 +625,7 @@ class HijackSession:
                     evidence=make_evidence(summary="No HFP channel found during recon; audio unavailable", confidence="high"),
                     started_at=phase_start, completed_at=now_iso(),
                 ))
-                self._emit("execution_detail", "Audio setup skipped: no HFP channel")
+                self._emit("execution_skipped", "Audio setup skipped: no HFP channel")
                 return None
 
             self.hfp_client = HFPClient(self.ivi_address, channel=self.hfp_channel)
@@ -645,7 +645,7 @@ class HijackSession:
                     started_at=phase_start, completed_at=now_iso(),
                     module_data={"hfp_channel": self.hfp_channel},
                 ))
-                self._emit("execution_error", "HFP connection failed")
+                self._emit("run_error", "HFP connection failed")
                 return None
 
             if not self.hfp_client.setup_slc():
@@ -663,7 +663,7 @@ class HijackSession:
                     started_at=phase_start, completed_at=now_iso(),
                     module_data={"hfp_channel": self.hfp_channel},
                 ))
-                self._emit("execution_error", "HFP SLC setup failed")
+                self._emit("run_error", "HFP SLC setup failed")
                 return None
 
             success("HFP ready for audio operations")
@@ -772,7 +772,7 @@ class HijackSession:
         if current_mac and current_mac.upper() != self.phone_address.upper():
             warning(f"Adapter MAC {current_mac} does not match target phone {self.phone_address}")
             warning("Impersonation may not have taken effect — connection will likely fail")
-        self._emit("execution_detail", f"Phase gate: adapter MAC={current_mac}, expected={self.phone_address}")
+        self._emit("execution_result", f"Phase gate: adapter MAC={current_mac}, expected={self.phone_address}")
 
         # Phase 3: Connect
         connected = False

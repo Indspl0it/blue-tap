@@ -97,6 +97,9 @@ def get_default_block_renderer_registry() -> BlockRendererRegistry:
         def render_badge_group_block(block: SectionBlock) -> str:
             return render_badge_group(list(block.data.get("badges", [])))
 
+        def render_html_raw_block(block: SectionBlock) -> str:
+            return str(block.data.get("html", ""))
+
         registry.register("table", render_table_block)
         registry.register("paragraph", render_paragraph_block)
         registry.register("text", render_text_block)
@@ -105,5 +108,6 @@ def get_default_block_renderer_registry() -> BlockRendererRegistry:
         registry.register("timeline", render_timeline_block)
         registry.register("key_value", render_key_value_block)
         registry.register("badge_group", render_badge_group_block)
+        registry.register("html_raw", render_html_raw_block)
         _DEFAULT_BLOCK_RENDERER_REGISTRY = registry
     return _DEFAULT_BLOCK_RENDERER_REGISTRY

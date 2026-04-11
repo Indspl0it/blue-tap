@@ -562,7 +562,13 @@ def run_demo(output_dir: str = "demo_output"):
             )
         )
 
-        report.add_lmp_captures(M.LMP_CAPTURES)
+        report.add_run_envelope(
+            {
+                "schema": "blue_tap.lmp_capture.result",
+                "module": "lmp_capture",
+                "module_data": {"captures": M.LMP_CAPTURES},
+            }
+        )
 
         report.add_session_metadata({
             "name": f"demo-{M.IVI_ADDRESS.replace(':', '')}",

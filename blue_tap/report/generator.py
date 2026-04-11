@@ -9,12 +9,11 @@ import html as _html_mod
 import json
 import math
 import os
-import shutil
 from datetime import datetime
 
 from blue_tap.report.adapters import REPORT_ADAPTERS
 from blue_tap.report.renderers import render_sections
-from blue_tap.utils.output import info, success, error
+from blue_tap.utils.output import info, success, error, warning
 
 try:
     from blue_tap import __version__
@@ -141,29 +140,6 @@ def _svg_bar_chart(data: dict[str, int], color: str = "#2B579A",
         + "\n".join(bars)
         + "\n</svg>"
     )
-
-
-# ---------------------------------------------------------------------------
-# Hex dump formatter
-# ---------------------------------------------------------------------------
-
-def _format_hexdump(data_hex: str, bytes_per_line: int = 16) -> str:
-    """Format a hex string as a traditional hexdump with offset, hex, and ASCII."""
-    try:
-        raw = bytes.fromhex(data_hex)
-    except (ValueError, TypeError):
-        if not data_hex:
-            return "(no data)"
-        preview = data_hex[:60]
-        return f"(invalid hex data: {preview}{'...' if len(data_hex) > 60 else ''})"
-
-    lines = ["Offset  Hex                                              ASCII"]
-    for offset in range(0, len(raw), bytes_per_line):
-        chunk = raw[offset:offset + bytes_per_line]
-        hex_part = " ".join(f"{b:02x}" for b in chunk).ljust(bytes_per_line * 3 - 1)
-        ascii_part = "".join(chr(b) if 32 <= b < 127 else "." for b in chunk)
-        lines.append(f"{offset:04x}    {hex_part}  {ascii_part}")
-    return "\n".join(lines)
 
 
 def _esc(text: str) -> str:
@@ -364,26 +340,9 @@ class ReportGenerator:
         self.vuln_scan_runs: list[dict] = []
         self.recon_results: list[dict] = []
         self.fuzz_runs: list[dict] = []
-        self.fuzz_results: list = []
-        self.dos_results: list = []
-        self.dos_runs: list[dict] = []
         self.notes: list[str] = []
-        # Structured fuzz campaign data
-        self._fuzz_campaign_stats: dict = {}
-        self._fuzz_crashes: list[dict] = []
-        self._fuzz_evidence_dir: str = ""
-        self._fuzz_corpus_stats: dict = {}
-        self._fuzz_evidence_files: list[tuple] = []
         # Session metadata for timeline/scope
         self._session_metadata: dict = {}
-        # Fuzzing intelligence data (Phase 1-6)
-        self._fuzz_state_coverage: dict = {}
-        self._fuzz_field_weights: dict = {}
-        self._fuzz_health_events: list[dict] = []
-        self._fuzz_anomalies: list[dict] = []
-        self._fuzz_baselines: dict = {}
-        # LMP capture data (Phase 4 sniffer)
-        self._lmp_captures: list[dict] = []
         self._module_report_state: dict[str, dict] = {
             "scan": {"scan_runs": [], "scan_results": [], "scan_executions": []},
             "vulnscan": {"vuln_scan_runs": [], "vuln_findings": [], "vuln_executions": []},
@@ -392,6 +351,7 @@ class ReportGenerator:
             "audio": {"audio_runs": [], "audio_executions": [], "audio_operations": []},
             "dos": {"dos_runs": [], "dos_results": [], "dos_executions": []},
             "fuzz": {"fuzz_runs": [], "campaigns": [], "protocol_runs": [], "operations": [], "crashes": []},
+            "lmp_capture": {"lmp_captures": []},
             "recon": {"recon_runs": [], "recon_results": [], "fingerprints": [], "capture_results": [], "recon_executions": []},
         }
 
@@ -412,11 +372,60 @@ class ReportGenerator:
     def _module_json_section(self, module: str) -> dict:
         return _REPORT_ADAPTER_MAP[module].build_json_section(self._module_report_state.get(module, {}))
 
+    def _render_module_html(self, module: str, *, state_keys: tuple[str, ...]) -> str:
+        adapter_state = self._module_report_state.get(module, {})
+        if not any(adapter_state.get(key) for key in state_keys):
+            return ""
+        return render_sections(_REPORT_ADAPTER_MAP[module].build_sections(adapter_state))
+
     def _data_operations(self, family: str | None = None) -> list[dict]:
         operations = list(self._module_report_state.get("data", {}).get("data_operations", []))
         if family is None:
             return operations
         return [operation for operation in operations if operation.get("family") == family]
+
+    def _fuzz_adapter_state(self) -> dict:
+        """Return the fuzz adapter report state (single source of truth for fuzz data)."""
+        return self._module_report_state.get("fuzz", {})
+
+    @property
+    def _fuzz_crashes(self) -> list[dict]:
+        return self._fuzz_adapter_state().get("crashes", [])
+
+    @property
+    def _fuzz_campaign_stats(self) -> dict:
+        stats_list = self._fuzz_adapter_state().get("campaign_stats_list", [])
+        if stats_list:
+            return stats_list[-1]
+        return {}
+
+    @property
+    def _fuzz_state_coverage(self) -> dict:
+        return self._fuzz_adapter_state().get("campaign_state_coverage", {})
+
+    @property
+    def _fuzz_field_weights(self) -> dict:
+        return self._fuzz_adapter_state().get("campaign_field_weights", {})
+
+    @property
+    def _fuzz_health_events(self) -> list[dict]:
+        return self._fuzz_adapter_state().get("campaign_health_events", [])
+
+    @property
+    def _fuzz_baselines(self) -> dict:
+        return self._fuzz_adapter_state().get("campaign_baselines", {})
+
+    @property
+    def _fuzz_evidence_dir(self) -> str:
+        return self._fuzz_adapter_state().get("evidence_dir", "")
+
+    @property
+    def _fuzz_corpus_stats(self) -> dict:
+        return self._fuzz_adapter_state().get("corpus_stats", {})
+
+    @property
+    def _fuzz_evidence_files(self) -> list:
+        return self._fuzz_adapter_state().get("evidence_files", [])
 
     def _ingest_standardized_envelope(self, envelope: dict) -> bool:
         for adapter in REPORT_ADAPTERS:
@@ -440,44 +449,12 @@ class ReportGenerator:
         elif module == "vulnscan":
             self.vuln_scan_runs.append(envelope)
             self.vuln_findings.extend(envelope.get("module_data", {}).get("findings", []))
-        elif module == "attack":
-            pass
-        elif module == "data":
-            pass
-        elif module == "audio":
-            pass
-        elif module == "dos":
-            self.dos_runs.append(envelope)
-            self.dos_results.extend(envelope.get("module_data", {}).get("checks", []))
+        elif module in {"attack", "data", "audio", "dos", "spoof", "firmware", "auto", "playbook", "lmp_capture"}:
+            # Fully adapter-managed modules do not need legacy instance vars.
+            ...
         elif module == "fuzz":
             self.fuzz_runs.append(envelope)
-            module_data = envelope.get("module_data", {})
-            run_type = module_data.get("run_type")
-            if run_type == "campaign":
-                campaign_stats = module_data.get("campaign_stats", {})
-                if isinstance(campaign_stats, dict):
-                    self._fuzz_campaign_stats = campaign_stats
-                    self._fuzz_state_coverage = campaign_stats.get("state_coverage", {}) or {}
-                    self._fuzz_field_weights = campaign_stats.get("field_weights", {}) or {}
-                    self._fuzz_health_events = (campaign_stats.get("health_monitor", {}) or {}).get("events", []) or []
-                crashes = module_data.get("crashes", [])
-                if isinstance(crashes, list):
-                    self._fuzz_crashes = crashes
-                fuzz_dir = module_data.get("session_fuzz_dir")
-                if isinstance(fuzz_dir, str) and fuzz_dir:
-                    self._fuzz_evidence_dir = fuzz_dir
-            elif run_type == "single_protocol_run":
-                result = module_data.get("result", {})
-                if isinstance(result, dict):
-                    self.fuzz_results.append(
-                        {
-                            "command": module_data.get("command", ""),
-                            "protocol": module_data.get("protocol", ""),
-                            **result,
-                        }
-                    )
-            else:
-                self.fuzz_results.append(module_data or envelope)
+            # All fuzz data is handled by FuzzReportAdapter via _ingest_standardized_envelope below.
         elif module == "recon":
             module_data = envelope.get("module_data", {})
             entries = module_data.get("entries", [])
@@ -493,294 +470,12 @@ class ReportGenerator:
     # Data intake
     # ------------------------------------------------------------------
 
-    def add_fuzz_results(self, data: dict):
-        if isinstance(data, dict) and self.add_run_envelope(data):
-            return
-        # TODO(standardization): Remove this legacy fuzz dict intake after
-        # fuzz CLI commands log standardized run envelopes consistently.
-        self.fuzz_results.append(data)
-
-    def add_dos_results(self, data: dict):
-        if isinstance(data, dict) and self.add_run_envelope(data):
-            return
-        # TODO(standardization): Remove this legacy DoS intake once demo/auto and
-        # any remaining direct callers stop passing ad hoc DoS result dicts.
-        self.dos_results.append(data)
-
     def add_note(self, note: str):
         self.notes.append(note)
 
-    def add_lmp_captures(self, captures: list[dict]) -> None:
-        """Add LMP capture data from DarkFirmwareSniffer BTIDES export.
-
-        Args:
-            captures: List of LMP capture dicts, each containing an ``LMPArray``
-                      of packet entries with opcode, timestamp, direction, and
-                      optional decoded parameters.
-        """
-        self._lmp_captures.extend(captures)
-
     def add_session_metadata(self, metadata: dict) -> None:
         """Store session metadata for timeline, scope, and methodology sections."""
-        self._session_metadata = metadata
-
-    def add_fuzz_campaign_results(self, campaign_stats: dict, crashes: list[dict],
-                                   evidence_dir: str = "") -> None:
-        """Add detailed fuzzing campaign results with evidence."""
-        self._fuzz_campaign_stats = campaign_stats
-        self._fuzz_crashes = crashes
-        self._fuzz_evidence_dir = evidence_dir
-        # Extract intelligence data from campaign stats if present
-        if "state_coverage" in campaign_stats:
-            self._fuzz_state_coverage = campaign_stats["state_coverage"]
-        if "field_weights" in campaign_stats:
-            self._fuzz_field_weights = campaign_stats["field_weights"]
-        if "health_monitor" in campaign_stats:
-            self._fuzz_health_events = campaign_stats["health_monitor"].get("events", [])
-
-    # ------------------------------------------------------------------
-    # Session / fuzz data loaders
-    # ------------------------------------------------------------------
-
-    def load_fuzz_from_session(self, session_dir: str) -> None:
-        """Auto-load fuzzing data from a session's fuzz/ subdirectory."""
-        # TODO(standardization): Keep this as artifact hydration for standardized
-        # fuzz envelopes, not as the primary fuzz report model. Once campaign and
-        # crash-management commands emit complete fuzz envelopes, this loader
-        # should enrich those envelopes rather than acting as a parallel intake path.
-        fuzz_dir = os.path.join(session_dir, "fuzz")
-        if not os.path.isdir(fuzz_dir):
-            return
-
-        info(f"Loading fuzzing data from {fuzz_dir}")
-
-        # Load campaign stats (prefer final stats over state)
-        for stats_file in ("campaign_stats.json", "campaign_state.json"):
-            stats_path = os.path.join(fuzz_dir, stats_file)
-            if os.path.exists(stats_path):
-                try:
-                    with open(stats_path) as f:
-                        self._fuzz_campaign_stats = json.load(f)
-                    info(f"Loaded campaign stats from {stats_file}")
-                    break
-                except (json.JSONDecodeError, OSError) as exc:
-                    info(f"Could not load {stats_file}: {exc}")
-
-        # Load crashes from SQLite DB
-        crashes_db_path = os.path.join(fuzz_dir, "crashes.db")
-        if os.path.exists(crashes_db_path):
-            try:
-                from blue_tap.fuzz.crash_db import CrashDB
-                with CrashDB(crashes_db_path) as db:
-                    self._fuzz_crashes = db.get_crashes()
-                info(f"Loaded {len(self._fuzz_crashes)} crashes from crashes.db")
-            except ImportError:
-                error("blue_tap.fuzz.crash_db not available")
-            except (OSError, ValueError) as exc:
-                warning(f"Could not load crashes.db: {exc}")
-
-        # Also check per-protocol crash DBs
-        for fname in os.listdir(fuzz_dir):
-            if fname.endswith("_crashes.db") and fname != "crashes.db":
-                proto_db_path = os.path.join(fuzz_dir, fname)
-                try:
-                    from blue_tap.fuzz.crash_db import CrashDB
-                    with CrashDB(proto_db_path) as db:
-                        proto_crashes = db.get_crashes()
-                        existing_hashes = {c.get("payload_hash") for c in self._fuzz_crashes
-                                           if c.get("payload_hash") is not None}
-                        for crash in proto_crashes:
-                            h = crash.get("payload_hash")
-                            if h is None or h not in existing_hashes:
-                                self._fuzz_crashes.append(crash)
-                                if h is not None:
-                                    existing_hashes.add(h)
-                    info(f"Loaded additional crashes from {fname}")
-                except (ImportError, OSError, ValueError) as exc:
-                    info(f"Could not load {fname}: {exc}")
-
-        # Count corpus seeds per protocol
-        corpus_dir = os.path.join(fuzz_dir, "corpus")
-        if os.path.isdir(corpus_dir):
-            for entry in os.listdir(corpus_dir):
-                proto_corpus = os.path.join(corpus_dir, entry)
-                if os.path.isdir(proto_corpus):
-                    count = len([f for f in os.listdir(proto_corpus)
-                                 if os.path.isfile(os.path.join(proto_corpus, f))])
-                    self._fuzz_corpus_stats[entry] = count
-                elif os.path.isfile(proto_corpus):
-                    self._fuzz_corpus_stats.setdefault("_root", 0)
-                    self._fuzz_corpus_stats["_root"] += 1
-
-        # Note evidence files
-        self._fuzz_evidence_dir = fuzz_dir
-        evidence_files = []
-        capture_path = os.path.join(fuzz_dir, "capture.btsnoop")
-        if os.path.exists(capture_path):
-            evidence_files.append(("btsnoop capture", capture_path))
-
-        evidence_subdir = os.path.join(fuzz_dir, "evidence")
-        if os.path.isdir(evidence_subdir):
-            for fname in sorted(os.listdir(evidence_subdir)):
-                fpath = os.path.join(evidence_subdir, fname)
-                if os.path.isfile(fpath):
-                    evidence_files.append((fname, fpath))
-
-        self._fuzz_evidence_files = evidence_files
-
-        # Load fuzzing intelligence files (Phase 1-6)
-        for fname, attr in [
-            ("state_graph.json", "_fuzz_state_coverage"),
-            ("field_weights.json", "_fuzz_field_weights"),
-            ("baselines.json", "_fuzz_baselines"),
-        ]:
-            fpath = os.path.join(fuzz_dir, fname)
-            if os.path.exists(fpath):
-                try:
-                    with open(fpath) as f:
-                        setattr(self, attr, json.load(f))
-                    info(f"Loaded {fname}")
-                except (json.JSONDecodeError, OSError):
-                    pass
-
-        # Extract intelligence from campaign stats
-        if self._fuzz_campaign_stats:
-            if "state_coverage" in self._fuzz_campaign_stats:
-                self._fuzz_state_coverage = self._fuzz_campaign_stats["state_coverage"]
-            if "field_weights" in self._fuzz_campaign_stats:
-                self._fuzz_field_weights = self._fuzz_campaign_stats["field_weights"]
-            if "health_monitor" in self._fuzz_campaign_stats:
-                hm = self._fuzz_campaign_stats["health_monitor"]
-                if isinstance(hm, dict):
-                    self._fuzz_health_events = hm.get("events", [])
-
-    # ------------------------------------------------------------------
-    # Evidence package
-    # ------------------------------------------------------------------
-
-    def generate_evidence_package(self, session_dir: str, output_dir: str) -> str:
-        """Generate an evidence package directory with all fuzz artifacts."""
-        os.makedirs(output_dir, exist_ok=True)
-        crashes_dir = os.path.join(output_dir, "crashes")
-        pcaps_dir = os.path.join(output_dir, "pcaps")
-        corpus_dir = os.path.join(output_dir, "corpus")
-        stats_dir = os.path.join(output_dir, "stats")
-        for d in (crashes_dir, pcaps_dir, corpus_dir, stats_dir):
-            os.makedirs(d, exist_ok=True)
-
-        fuzz_dir = os.path.join(session_dir, "fuzz")
-        manifest_crashes = []
-
-        if not self._fuzz_crashes and not self._fuzz_campaign_stats:
-            self.load_fuzz_from_session(session_dir)
-
-        # Export crash payloads
-        for i, crash in enumerate(self._fuzz_crashes, 1):
-            protocol = crash.get("protocol", "unknown").replace("/", "-").replace(" ", "_")
-            bin_name = f"crash_{i:03d}_{protocol}.bin"
-            txt_name = f"crash_{i:03d}_{protocol}.txt"
-
-            payload_hex = crash.get("payload_hex", "")
-            if payload_hex:
-                try:
-                    with open(os.path.join(crashes_dir, bin_name), "wb") as f:
-                        f.write(bytes.fromhex(payload_hex))
-                except (ValueError, OSError) as exc:
-                    error(f"Crash #{i}: could not write {bin_name}: {exc}")
-
-            desc_lines = [
-                f"Crash #{i}",
-                f"Severity: {crash.get('severity', 'UNKNOWN')}",
-                f"Protocol: {crash.get('protocol', 'unknown')}",
-                f"Crash Type: {crash.get('crash_type', 'unknown')}",
-                f"Timestamp: {crash.get('timestamp', 'N/A')}",
-                f"Payload Size: {crash.get('payload_len', len(payload_hex) // 2)} bytes",
-                f"Reproduced: {'Yes' if crash.get('reproduced') else 'No'}",
-                f"Target: {crash.get('target_addr', 'N/A')}",
-                "", "Mutation Log:",
-                crash.get("mutation_log", "(none)") or "(none)",
-                "", "Payload Hexdump:", _format_hexdump(payload_hex),
-            ]
-            response_hex = crash.get("response_hex", "")
-            if response_hex:
-                desc_lines.extend(["", "Response Hexdump:", _format_hexdump(response_hex)])
-            notes = crash.get("notes", "")
-            if notes:
-                desc_lines.extend(["", "Notes:", notes])
-            try:
-                with open(os.path.join(crashes_dir, txt_name), "w") as f:
-                    f.write("\n".join(desc_lines))
-            except OSError:
-                pass
-
-            manifest_crashes.append({
-                "id": i, "severity": crash.get("severity", "UNKNOWN"),
-                "protocol": crash.get("protocol", "unknown"),
-                "crash_type": crash.get("crash_type", "unknown"),
-                "payload_file": f"crashes/{bin_name}",
-                "description_file": f"crashes/{txt_name}",
-                "reproduced": bool(crash.get("reproduced")),
-                "timestamp": crash.get("timestamp", ""),
-            })
-
-        # Copy pcap files
-        pcap_files = []
-        capture_src = os.path.join(fuzz_dir, "capture.btsnoop")
-        if os.path.exists(capture_src):
-            dst = os.path.join(pcaps_dir, "campaign_capture.btsnoop")
-            try:
-                shutil.copy2(capture_src, dst)
-                pcap_files.append("pcaps/campaign_capture.btsnoop")
-            except OSError:
-                pass
-
-        evidence_subdir = os.path.join(fuzz_dir, "evidence")
-        if os.path.isdir(evidence_subdir):
-            for fname in sorted(os.listdir(evidence_subdir)):
-                if fname.endswith(".btsnoop"):
-                    try:
-                        shutil.copy2(os.path.join(evidence_subdir, fname),
-                                     os.path.join(pcaps_dir, fname))
-                        pcap_files.append(f"pcaps/{fname}")
-                    except OSError:
-                        pass
-
-        # Corpus stats
-        corpus_stats = self._fuzz_corpus_stats or self._fuzz_campaign_stats.get("protocol_breakdown", {})
-        try:
-            with open(os.path.join(corpus_dir, "protocol_seed_counts.json"), "w") as f:
-                json.dump(corpus_stats, f, indent=2)
-        except OSError:
-            pass
-
-        if self._fuzz_campaign_stats:
-            try:
-                with open(os.path.join(stats_dir, "campaign_stats.json"), "w") as f:
-                    json.dump(self._fuzz_campaign_stats, f, indent=2, default=str)
-            except OSError:
-                pass
-
-        manifest = {
-            "generated": datetime.now().isoformat(),
-            "tool": f"Blue-Tap v{__version__}",
-            "target": self._fuzz_campaign_stats.get("target", ""),
-            "campaign": {
-                "duration_seconds": self._fuzz_campaign_stats.get("runtime_seconds", 0),
-                "test_cases": self._fuzz_campaign_stats.get("packets_sent", 0),
-                "strategy": self._fuzz_campaign_stats.get("strategy", "unknown"),
-                "protocols": self._fuzz_campaign_stats.get("protocols", []),
-            },
-            "crashes": manifest_crashes, "pcaps": pcap_files, "corpus_stats": corpus_stats,
-        }
-
-        manifest_path = os.path.join(output_dir, "evidence_manifest.json")
-        try:
-            with open(manifest_path, "w") as f:
-                json.dump(manifest, f, indent=2, default=str)
-            success(f"Evidence package generated: {output_dir}")
-        except OSError as exc:
-            error(f"Could not write evidence manifest: {exc}")
-        return manifest_path
+        self._session_metadata = metadata if isinstance(metadata, dict) else {}
 
     # ------------------------------------------------------------------
     # Load from directory (generic)
@@ -792,10 +487,6 @@ class ReportGenerator:
             error(f"Directory not found: {dump_dir}")
             return
         processed_json_paths: set[str] = set()
-
-        fuzz_dir = os.path.join(dump_dir, "fuzz")
-        if os.path.isdir(fuzz_dir):
-            self.load_fuzz_from_session(dump_dir)
 
         session_meta_path = os.path.join(dump_dir, "session.json")
         if os.path.exists(session_meta_path):
@@ -850,7 +541,7 @@ class ReportGenerator:
     # ===================================================================
 
     def _build_header_html(self) -> str:
-        meta = self._session_metadata
+        meta = self._session_metadata or {}
         created = meta.get("created", "")
         updated = meta.get("last_updated", "")
         period = ""
@@ -960,7 +651,7 @@ class ReportGenerator:
             (f"{crash_count}", "Fuzz Crashes"),
             (f"{packets:,}", "Fuzz Test Cases"),
             (f"{data_exfil}", "Data Sets Exfiltrated"),
-            (f"{len(self.dos_results)}", "DoS Tests"),
+            (f"{len(self._module_report_state.get('dos', {}).get('dos_executions', []))}", "DoS Tests"),
         ]:
             s.append(f'<div class="metric-card">'
                      f'<div class="value">{val}</div>'
@@ -1098,543 +789,7 @@ class ReportGenerator:
         return ""
 
     def _build_attack_html(self) -> str:
-        adapter_state = self._module_report_state.get("attack", {})
-        if adapter_state.get("runs") or adapter_state.get("attack_runs"):
-            sections = _REPORT_ADAPTER_MAP["attack"].build_sections(adapter_state)
-            return render_sections(sections)
-        return ""
-
-    def _build_fuzz_html(self) -> list[str]:
-        """Build the detailed fuzzing campaign HTML section.
-
-        TODO(standardization): Move the ~270 lines of campaign narrative,
-        severity breakdown, crash cards, and protocol coverage logic below
-        into FuzzReportAdapter.build_sections().  The adapter already handles
-        badge/table blocks; this method should delegate to it fully, matching
-        the pattern used by _build_vuln_html / _build_dos_html / _build_scan_html.
-        """
-        sections: list[str] = []
-        adapter_sections = _REPORT_ADAPTER_MAP["fuzz"].build_sections(self._module_report_state.get("fuzz", {}))
-        has_campaign = bool(self._fuzz_campaign_stats)
-        has_crashes = bool(self._fuzz_crashes)
-        has_standardized_runs = bool(adapter_sections)
-
-        if not has_campaign and not has_crashes and not self.fuzz_results and not has_standardized_runs:
-            return sections
-
-        if has_standardized_runs:
-            sections.append(render_sections(adapter_sections))
-
-        sections.append('<div class="section" id="sec-fuzzing">')
-        sections.append("<h2>Fuzzing Campaign Results</h2>")
-
-        # Campaign overview
-        if has_campaign:
-            stats = self._fuzz_campaign_stats
-            runtime = stats.get("runtime_seconds", 0)
-            packets = stats.get("packets_sent", 0)
-            pps = stats.get("packets_per_second", 0)
-            strategy = stats.get("strategy", "unknown")
-            protocols = stats.get("protocols", [])
-            total_crashes = stats.get("crashes", len(self._fuzz_crashes))
-            result_status = stats.get("result", "unknown")
-
-            hours = int(runtime // 3600)
-            minutes = int((runtime % 3600) // 60)
-            secs = int(runtime % 60)
-            runtime_str = f"{hours}h {minutes}m {secs}s" if hours else f"{minutes}m {secs}s"
-
-            sections.append('<h3>Campaign Overview</h3>')
-            sections.append('<div class="summary">')
-            for val, label in [
-                (runtime_str, "Duration"), (f"{packets:,}", "Test Cases"),
-                (f"{pps:.1f}/s", "Send Rate"), (str(total_crashes), "Crashes"),
-            ]:
-                sections.append(
-                    f'<div class="fuzz-stat"><span class="value">{val}</span>'
-                    f'<br><span class="label">{label}</span></div>'
-                )
-            sections.append("</div>")
-
-            sections.append(f"<p><strong>Strategy:</strong> {_esc(strategy)}</p>")
-            sections.append(
-                f"<p><strong>Protocols Tested:</strong> "
-                f"{_esc(', '.join(protocols) if protocols else 'N/A')}</p>"
-            )
-            sections.append(f"<p><strong>Campaign Result:</strong> {_esc(result_status)}</p>")
-
-            # Narrative interpretation
-            fuzz_narrative = (
-                f'<p>Protocol fuzzing sent {packets:,} test cases across '
-                f'{len(protocols)} protocol(s) over {runtime_str}. '
-            )
-            if total_crashes:
-                critical_count = sum(
-                    1 for c in self._fuzz_crashes
-                    if c.get("severity", "").upper() == "CRITICAL")
-                fuzz_narrative += (
-                    f'{total_crashes} crash{"es" if total_crashes != 1 else ""} '
-                    f'{"were" if total_crashes != 1 else "was"} detected'
-                )
-                if critical_count:
-                    fuzz_narrative += (
-                        f', including {critical_count} critical crash'
-                        f'{"es" if critical_count != 1 else ""} that caused the '
-                        f'target device to reboot — indicating exploitable memory '
-                        f'corruption vulnerabilities in the Bluetooth stack.'
-                    )
-                else:
-                    fuzz_narrative += (
-                        ', indicating input handling weaknesses in the target\'s '
-                        'Bluetooth stack implementation.'
-                    )
-            else:
-                fuzz_narrative += (
-                    'No crashes were detected during the fuzzing campaign, '
-                    'suggesting the target\'s Bluetooth stack handles malformed '
-                    'input gracefully for the tested protocols.'
-                )
-            fuzz_narrative += '</p>'
-            sections.append(fuzz_narrative)
-
-            # Severity breakdown with chart
-            if has_crashes:
-                sev_counts: dict[str, int] = {}
-                reproduced_count = 0
-                for crash in self._fuzz_crashes:
-                    sev = crash.get("severity", "UNKNOWN")
-                    sev_counts[sev] = sev_counts.get(sev, 0) + 1
-                    if crash.get("reproduced"):
-                        reproduced_count += 1
-
-                parts = []
-                for sl in ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"):
-                    c = sev_counts.get(sl, 0)
-                    if c:
-                        parts.append(f'<span class="severity-badge severity-{sl}">{c} {sl}</span>')
-                if parts:
-                    sections.append(f"<p><strong>Crash Breakdown:</strong> {' '.join(parts)}</p>")
-
-                total = len(self._fuzz_crashes)
-                repro_rate = (reproduced_count / total * 100) if total > 0 else 0
-                sections.append(
-                    f"<p><strong>Reproduction Rate:</strong> "
-                    f"{reproduced_count}/{total} ({repro_rate:.0f}%)</p>"
-                )
-
-        # Crash findings table
-        if has_crashes:
-            sections.append("<h3>Crash Findings</h3>")
-            sections.append(
-                "<table><tr><th>#</th><th>Severity</th><th>Protocol</th>"
-                "<th>Crash Type</th><th>Payload Size</th>"
-                "<th>Payload Preview</th><th>Mutation</th>"
-                "<th>Reproduced</th><th>Timestamp</th></tr>"
-            )
-            for i, crash in enumerate(self._fuzz_crashes, 1):
-                sev = crash.get("severity", "UNKNOWN")
-                protocol = crash.get("protocol", "unknown")
-                crash_type = crash.get("crash_type", "unknown")
-                payload_len = crash.get("payload_len", 0)
-                payload_hex = crash.get("payload_hex", "")
-                preview = payload_hex[:48] + ("..." if len(payload_hex) > 48 else "")
-                mutation = crash.get("mutation_log", "") or ""
-                if len(mutation) > 40:
-                    mutation = mutation[:37] + "..."
-                reproduced = crash.get("reproduced", 0)
-                repro = ('<span class="reproduced-yes">Yes</span>' if reproduced
-                         else '<span class="reproduced-no">No</span>')
-                timestamp = crash.get("timestamp", "")
-
-                sections.append(
-                    f"<tr><td>{i}</td>"
-                    f'<td><span class="severity-badge severity-{sev}">{_esc(sev)}</span></td>'
-                    f"<td>{_esc(protocol)}</td><td>{_esc(crash_type)}</td>"
-                    f"<td>{payload_len} bytes</td>"
-                    f'<td class="mono">{_esc(preview)}</td>'
-                    f"<td>{_esc(mutation)}</td><td>{repro}</td>"
-                    f"<td>{_esc(timestamp)}</td></tr>"
-                )
-            sections.append("</table>")
-
-            # Crash detail cards (CRITICAL and HIGH)
-            critical_high = [
-                (i, c) for i, c in enumerate(self._fuzz_crashes, 1)
-                if c.get("severity", "").upper() in ("CRITICAL", "HIGH")
-            ]
-            if critical_high:
-                sections.append("<h3>Crash Details (Critical/High)</h3>")
-                for idx, crash in critical_high:
-                    sev = crash.get("severity", "UNKNOWN").upper()
-                    protocol = crash.get("protocol", "unknown")
-                    crash_type = crash.get("crash_type", "unknown")
-                    timestamp = crash.get("timestamp", "N/A")
-                    payload_hex = crash.get("payload_hex", "")
-                    payload_len = crash.get("payload_len", len(payload_hex) // 2)
-                    mutation = crash.get("mutation_log", "") or "(none)"
-                    response_hex = crash.get("response_hex", "")
-                    reproduced = crash.get("reproduced", 0)
-                    target_addr = crash.get("target_addr", "N/A")
-
-                    card_css = "crash-card" + (" high" if sev == "HIGH" else "")
-
-                    repro_str = ('<span class="reproduced-yes">Yes</span>' if reproduced
-                                 else '<span class="reproduced-no">No</span>')
-
-                    sections.append(f'<div class="{card_css}">')
-                    sections.append(
-                        f'<h4>Crash #{idx} '
-                        f'<span class="severity-badge severity-{sev}">{_esc(sev)}</span> '
-                        f'{_esc(protocol)} / {_esc(crash_type)}</h4>'
-                    )
-                    sections.append(f'<p><strong>Timestamp:</strong> {_esc(timestamp)} '
-                                    f'| <strong>Target:</strong> <code>{_esc(target_addr)}</code> '
-                                    f'| <strong>Reproduced:</strong> {repro_str}</p>')
-
-                    # Reproduction steps
-                    sections.append('<div class="evidence-block">'
-                                    '<div class="ev-label">Reproduction Steps</div>'
-                                    '<pre>'
-                                    f'1. Connect to target: {_esc(target_addr)}\n'
-                                    f'2. Select protocol: {_esc(protocol)}\n'
-                                    f'3. Send payload ({payload_len} bytes):\n'
-                                    f'   blue-tap fuzz replay --payload-hex {_esc(payload_hex[:80])}'
-                                    f'{"..." if len(payload_hex) > 80 else ""}\n'
-                                    f'4. Observe: {_esc(crash_type)}'
-                                    '</pre></div>')
-
-                    sections.append(f'<h5>Payload ({payload_len} bytes)</h5>')
-                    sections.append(f'<pre class="hexdump">{_esc(_format_hexdump(payload_hex))}</pre>')
-
-                    sections.append("<h5>Mutation Log</h5>")
-                    sections.append(f"<pre>{_esc(mutation)}</pre>")
-
-                    sections.append("<h5>Device Response</h5>")
-                    if response_hex:
-                        sections.append(f'<pre class="hexdump">{_esc(_format_hexdump(response_hex))}</pre>')
-                    else:
-                        sections.append("<pre>No response (connection dropped immediately)</pre>")
-
-                    # Evidence file references
-                    if self._fuzz_evidence_dir:
-                        proto_safe = protocol.replace("/", "-").replace(" ", "_")
-                        sections.append('<div class="evidence-block">'
-                                        '<div class="ev-label">Evidence Files</div>'
-                                        f'<p>Crash payload: <code>crashes/crash_{idx:03d}_{_esc(proto_safe)}.bin</code></p>')
-                        capture_path = os.path.join(self._fuzz_evidence_dir, "capture.btsnoop")
-                        if os.path.exists(capture_path):
-                            sections.append(f'<p>Pcap capture: <code>fuzz/capture.btsnoop</code> '
-                                            f'(frame at {_esc(timestamp)})</p>')
-                        sections.append('</div>')
-
-                    notes = crash.get("notes", "")
-                    if notes:
-                        sections.append(f"<p><strong>Notes:</strong> {_esc(notes)}</p>")
-
-                    sections.append("</div>")
-
-        # Protocol coverage table
-        if has_campaign and has_crashes:
-            breakdown = self._fuzz_campaign_stats.get("protocol_breakdown", {})
-            if breakdown:
-                crash_by_proto: dict[str, int] = {}
-                for crash in self._fuzz_crashes:
-                    p = crash.get("protocol", "unknown")
-                    crash_by_proto[p] = crash_by_proto.get(p, 0) + 1
-
-                sections.append("<h3>Protocol Coverage</h3>")
-                sections.append(
-                    "<table><tr><th>Protocol</th><th>Test Cases Sent</th>"
-                    "<th>Crashes</th><th>Crash Rate</th></tr>"
-                )
-                for proto, sent in sorted(breakdown.items()):
-                    crashes_for = crash_by_proto.get(proto, 0)
-                    rate = (crashes_for / sent * 100) if sent > 0 else 0
-                    sections.append(
-                        f"<tr><td>{_esc(proto)}</td><td>{sent:,}</td>"
-                        f"<td>{crashes_for}</td><td>{rate:.2f}%</td></tr>"
-                    )
-                sections.append("</table>")
-
-        # Evidence package
-        if self._fuzz_evidence_files:
-            sections.append("<h3>Evidence Package</h3>")
-            sections.append('<ul class="evidence-list">')
-            for desc, path in self._fuzz_evidence_files:
-                rel = os.path.relpath(path, self._fuzz_evidence_dir) if self._fuzz_evidence_dir else desc
-                sections.append(f"<li>{_esc(desc)} -- <code>{_esc(rel)}</code></li>")
-            sections.append("</ul>")
-
-        if self._fuzz_corpus_stats:
-            sections.append("<h4>Corpus Statistics</h4>")
-            sections.append("<table><tr><th>Protocol</th><th>Seeds</th></tr>")
-            for proto, count in sorted(self._fuzz_corpus_stats.items()):
-                sections.append(f"<tr><td>{_esc(proto)}</td><td>{count}</td></tr>")
-            sections.append("</table>")
-
-        # Fallback: raw fuzz_results
-        if self.fuzz_results and not has_campaign and not has_crashes:
-            for entry in self.fuzz_results:
-                src = entry.get("source", "fuzz")
-                sections.append(f"<h3>{_esc(src)}</h3>")
-                sections.append(f"<pre>{_esc(json.dumps(entry.get('data', entry), indent=2, default=str)[:2000])}</pre>")
-
-        sections.append("</div>")
-        return sections
-
-    def _build_fuzz_intelligence_html(self) -> str:
-        """Build the fuzzing intelligence section (state coverage, field weights, health).
-
-        TODO(standardization): Move this intelligence rendering into
-        FuzzReportAdapter or a dedicated FuzzIntelligenceAdapter.
-        """
-        has_data = any([self._fuzz_state_coverage, self._fuzz_field_weights,
-                        self._fuzz_health_events, self._fuzz_baselines])
-        if not has_data:
-            return ""
-
-        s = []
-        s.append('<div class="section" id="sec-fuzz-intel">')
-        s.append('<h2>Fuzzing Intelligence Analysis</h2>')
-        s.append('<p>Behavioral analysis data collected during the fuzzing campaign.</p>')
-
-        # State coverage
-        if self._fuzz_state_coverage:
-            sc = self._fuzz_state_coverage
-            s.append('<h3>Protocol State Coverage</h3>')
-            total_states = sc.get("total_states", 0)
-            total_trans = sc.get("total_transitions", 0)
-            protos_tracked = sc.get("protocols_tracked") or sc.get("protocols", {})
-            num_protos = len(protos_tracked) if isinstance(protos_tracked, (dict, list)) else 0
-            s.append(f'<p>The fuzzer explored {total_states} unique protocol state(s) '
-                     f'across {total_trans} transition(s)'
-                     f'{" in " + str(num_protos) + " protocol(s)" if num_protos else ""}. '
-                     f'Higher coverage indicates more thorough testing of the target\'s '
-                     f'protocol implementation.</p>')
-            s.append(f'<p>Total states discovered: <strong>{sc.get("total_states", 0)}</strong> | '
-                     f'Total transitions: <strong>{sc.get("total_transitions", 0)}</strong></p>')
-            protos = sc.get("protocols_tracked") or sc.get("protocols", {})
-            if isinstance(protos, dict):
-                s.append('<table><tr><th>Protocol</th><th>States</th><th>Transitions</th></tr>')
-                for proto, pdata in sorted(protos.items()) if isinstance(protos, dict) else []:
-                    states = pdata.get("states", 0) if isinstance(pdata, dict) else 0
-                    trans = pdata.get("transitions", 0) if isinstance(pdata, dict) else 0
-                    s.append(f'<tr><td>{_esc(proto)}</td><td>{states}</td><td>{trans}</td></tr>')
-                s.append('</table>')
-            elif isinstance(protos, list):
-                s.append(f'<p>Protocols tracked: {_esc(", ".join(protos))}</p>')
-
-        # Field mutation weights
-        if self._fuzz_field_weights:
-            s.append('<h3>Field Mutation Weight Analysis</h3>')
-            s.append('<p>The fuzzer learned which protocol fields are most likely to '
-                     'trigger anomalies. Fields with high mutation weights produced more '
-                     'interesting target behavior when mutated.</p>')
-            s.append('<p>Fields ranked by anomaly/crash production. Higher weight = '
-                     'more productive for finding bugs.</p>')
-            for proto, weights in sorted(self._fuzz_field_weights.items()):
-                if not isinstance(weights, dict) or not weights:
-                    continue
-                s.append(f'<h4>{_esc(proto)}</h4>')
-                s.append('<table><tr><th>Field</th><th>Weight</th><th>Bar</th></tr>')
-                sorted_fields = sorted(weights.items(), key=lambda x: x[1], reverse=True)
-                for fname, w in sorted_fields:
-                    bar_width = int(w * 200)
-                    bar_color = "#D43F3A" if w > 0.3 else "#EE9336" if w > 0.15 else "#4CAE4C"
-                    s.append(
-                        f'<tr><td><code>{_esc(fname)}</code></td>'
-                        f'<td>{w:.1%}</td>'
-                        f'<td><div style="background:{bar_color};width:{bar_width}px;'
-                        f'height:14px;border-radius:3px;display:inline-block"></div></td></tr>'
-                    )
-                s.append('</table>')
-
-        # Baseline profiles
-        if self._fuzz_baselines:
-            s.append('<h3>Target Response Baselines</h3>')
-            s.append('<p>Normal response behavior learned before fuzzing began.</p>')
-            s.append('<table><tr><th>Protocol</th><th>Samples</th><th>Avg Size</th>'
-                     '<th>Avg Latency</th><th>Response Opcodes</th></tr>')
-            for proto, bl in sorted(self._fuzz_baselines.items()):
-                if not isinstance(bl, dict):
-                    continue
-                s.append(
-                    f'<tr><td>{_esc(proto)}</td>'
-                    f'<td>{bl.get("samples", 0)}</td>'
-                    f'<td>{bl.get("mean_len", 0):.0f}B</td>'
-                    f'<td>{bl.get("mean_latency_ms", 0):.0f}ms</td>'
-                    f'<td>{_esc(str(bl.get("seen_opcodes", [])))}</td></tr>'
-                )
-            s.append('</table>')
-
-        # Health events (reboots, degradation)
-        if self._fuzz_health_events:
-            num_events = len(self._fuzz_health_events)
-            reboot_events = sum(
-                1 for e in self._fuzz_health_events
-                if isinstance(e, dict) and e.get("status", "") in ("rebooted", "unreachable"))
-            s.append('<h3>Target Health Events</h3>')
-            s.append(f'<p>Target health monitoring detected {num_events} event(s) during '
-                     f'the campaign.'
-                     f'{" Reboot events are the highest-confidence indicator of exploitable crashes." if reboot_events else ""}'
-                     f'{" " + str(reboot_events) + " reboot/unreachable event(s) were observed." if reboot_events else ""}'
-                     f'</p>')
-            s.append('<table><tr><th>Time</th><th>Status</th><th>Details</th>'
-                     '<th>Iteration</th></tr>')
-            for evt in self._fuzz_health_events:
-                if not isinstance(evt, dict):
-                    continue
-                status = evt.get("status", "unknown")
-                status_color = "#D43F3A" if status in ("rebooted", "zombie", "unreachable") else (
-                    "#EE9336" if status == "degraded" else "#4CAE4C")
-                s.append(
-                    f'<tr><td>{_esc(str(evt.get("timestamp", "")))}</td>'
-                    f'<td style="color:{status_color};font-weight:bold">'
-                    f'{_esc(status.upper())}</td>'
-                    f'<td>{_esc(evt.get("details", ""))}</td>'
-                    f'<td>{evt.get("iteration", "")}</td></tr>'
-                )
-            s.append('</table>')
-
-        s.append('</div>')
-        return "\n".join(s)
-
-    def _build_lmp_html(self) -> str:
-        """Render LMP capture findings as HTML section.
-
-        TODO(standardization): Move this into a dedicated LmpCaptureAdapter
-        or integrate into the ReconReportAdapter, matching the adapter-based
-        rendering pattern used by other modules.
-
-        Produces a table of captured LMP packets color-coded by category
-        (auth=red, encryption=orange, features=blue), a feature bitmap
-        visualization, and an encryption negotiation summary.
-        """
-        if not self._lmp_captures:
-            return ""
-
-        from datetime import datetime as _dt
-
-        s = []
-        s.append('<div class="section" id="sec-lmp">')
-        s.append('<h2>LMP Capture Analysis</h2>')
-        s.append('<p>Link Manager Protocol packets captured via DarkFirmware '
-                 'RTL8761B reveal the below-HCI negotiation between link '
-                 'managers, including authentication, encryption setup, and '
-                 'feature exchange.</p>')
-
-        # Category colour map
-        _auth = {8, 9, 10, 11, 12, 13, 14, 59, 60, 61}
-        _enc = {15, 16, 17, 18}
-        _feat = {37, 38, 39, 40}
-
-        features_hex = None
-        key_sizes: list[int] = []
-
-        for capture in self._lmp_captures:
-            bdaddr = capture.get("bdaddr", "unknown")
-            lmp_array = capture.get("LMPArray", [])
-            if not lmp_array:
-                continue
-
-            s.append(f'<h3>Capture: {_esc(bdaddr)}</h3>')
-            s.append('<table><tr><th>Timestamp</th><th>Direction</th>'
-                     '<th>Opcode</th><th>Decoded</th></tr>')
-
-            for pkt in lmp_array:
-                opcode = pkt.get("opcode", 0)
-                ts_val = pkt.get("timestamp", 0)
-                try:
-                    ts_str = _dt.fromtimestamp(ts_val).strftime("%H:%M:%S.%f")[:-3] if ts_val else ""
-                except (OSError, ValueError):
-                    ts_str = str(ts_val)
-
-                direction = _esc(pkt.get("direction", "rx"))
-                decoded = pkt.get("decoded", {})
-                opcode_name = _esc(decoded.get("opcode_name", f"0x{opcode:04x}"))
-
-                # Build decoded params string
-                params = []
-                for k, v in decoded.items():
-                    if k == "opcode_name":
-                        continue
-                    params.append(f"{k}={_esc(str(v))}")
-                params_str = ", ".join(params) if params else ""
-
-                # Colour by category
-                if opcode in _auth:
-                    color = "#dc2626"  # red
-                elif opcode in _enc:
-                    color = "#ea580c"  # orange
-                elif opcode in _feat:
-                    color = "#2563eb"  # blue
-                else:
-                    color = "#6b7280"  # grey
-
-                s.append(
-                    f'<tr style="color:{color}">'
-                    f'<td>{_esc(ts_str)}</td>'
-                    f'<td>{direction}</td>'
-                    f'<td class="mono">{opcode_name}</td>'
-                    f'<td>{params_str}</td></tr>'
-                )
-
-                # Track for summaries
-                if decoded.get("features_hex"):
-                    features_hex = decoded["features_hex"]
-                if decoded.get("key_size"):
-                    key_sizes.append(decoded["key_size"])
-
-            s.append('</table>')
-
-        # Feature bitmap visualization
-        if features_hex:
-            s.append('<h3>Feature Bitmap</h3>')
-            s.append('<p>8-byte LMP features bitmap from '
-                     'LMP_FEATURES_RES:</p>')
-            try:
-                feat_bytes = bytes.fromhex(features_hex)
-                s.append('<table class="feature-grid"><tr>')
-                _feature_names = [
-                    "3-slot", "5-slot", "Encryption", "SlotOffset",
-                    "TimingAccuracy", "RoleSwitch", "HoldMode", "SniffMode",
-                    "ParkState", "PowerCtrlReq", "CQDDR", "SCOLink",
-                    "HV2", "HV3", "uLaw", "aLaw",
-                ]
-                for byte_idx, b in enumerate(feat_bytes):
-                    for bit in range(8):
-                        bit_num = byte_idx * 8 + bit
-                        is_set = bool(b & (1 << bit))
-                        bg = "#22c55e" if is_set else "#374151"
-                        name = _feature_names[bit_num] if bit_num < len(_feature_names) else f"bit{bit_num}"
-                        s.append(
-                            f'<td style="background:{bg};color:white;'
-                            f'padding:2px 4px;font-size:10px;" '
-                            f'title="Bit {bit_num}: {_esc(name)}">'
-                            f'{"1" if is_set else "0"}</td>'
-                        )
-                    if byte_idx % 2 == 1:
-                        s.append('</tr><tr>')
-                s.append('</tr></table>')
-            except (ValueError, IndexError):
-                s.append(f'<pre>{_esc(features_hex)}</pre>')
-
-        # Encryption negotiation summary
-        if key_sizes:
-            min_ks = min(key_sizes)
-            max_ks = max(key_sizes)
-            s.append('<h3>Encryption Negotiation Summary</h3>')
-            s.append(f'<p>Key size requests observed: min={min_ks}, '
-                     f'max={max_ks}, count={len(key_sizes)}</p>')
-            if min_ks < 7:
-                s.append(
-                    '<p style="color:#dc2626;font-weight:bold">'
-                    'WARNING: Key size below 7 bytes detected '
-                    '(potential KNOB attack surface - CVE-2019-9506)</p>'
-                )
-
-        s.append('</div>')
-        return "\n".join(s)
+        return self._render_module_html("attack", state_keys=("runs", "attack_runs"))
 
     def _build_recon_html(self) -> str:
         adapter_state = self._module_report_state.get("recon", {})
@@ -1644,166 +799,7 @@ class ReportGenerator:
         return ""
 
     def _build_dos_html(self) -> str:
-        adapter_state = self._module_report_state.get("dos", {})
-        if adapter_state.get("dos_runs"):
-            sections = _REPORT_ADAPTER_MAP["dos"].build_sections(adapter_state)
-            return render_sections(sections)
-        # TODO(standardization): Delete the legacy DoS HTML branch below once all
-        # DoS report producers emit standardized envelopes only.
-        if not self.dos_results:
-            return ""
-        s = []
-        s.append('<div class="section" id="sec-dos">')
-        s.append('<h2>Denial of Service Test Results</h2>')
-        s.append('<p>Denial of Service tests evaluate the target\'s resilience to '
-                 'protocol-level resource exhaustion and state machine confusion attacks. '
-                 'The following tests were conducted across multiple Bluetooth protocol '
-                 'layers.</p>')
-
-        if self.dos_runs:
-            latest = self.dos_runs[-1]
-            summary = latest.get("summary", {})
-            s.append('<p><strong>Structured DoS Run Summary:</strong> '
-                     f'total={_esc(str(summary.get("total", 0)))}, '
-                     f'success={_esc(str(summary.get("success", 0)))}, '
-                     f'recovered={_esc(str(summary.get("recovered", 0)))}, '
-                     f'unresponsive={_esc(str(summary.get("unresponsive", 0)))}, '
-                     f'error={_esc(str(summary.get("error", 0)))}</p>')
-            run_meta = []
-            if latest.get("selected_checks"):
-                run_meta.append(f"selected={', '.join(str(x) for x in latest.get('selected_checks', []))}")
-            if latest.get("recovery_timeout") is not None:
-                run_meta.append(f"recovery_timeout={latest.get('recovery_timeout')}s")
-            if latest.get("interrupted_on"):
-                run_meta.append(f"interrupted_on={latest.get('interrupted_on')}")
-            if latest.get("abort_reason"):
-                run_meta.append(f"abort_reason={latest.get('abort_reason')}")
-            if run_meta:
-                s.append(f"<p><strong>Run Metadata:</strong> {_esc(' | '.join(run_meta))}</p>")
-            checks = latest.get("checks", [])
-            if checks:
-                s.append('<h3>DoS Check Execution</h3>')
-                s.append('<table><tr><th>Check ID</th><th>Check</th><th>CVE</th><th>Protocol</th><th>Pairing</th><th>Status</th><th>Recovery</th><th>Evidence</th></tr>')
-                for check in checks:
-                    recovery = check.get("recovery", {})
-                    recovery_text = ""
-                    if recovery:
-                        recovery_text = (
-                            f"recovered={recovery.get('recovered')} "
-                            f"waited={recovery.get('waited_seconds', 0)}s"
-                        )
-                        if recovery.get("probe_strategy"):
-                            recovery_text += f" via {','.join(str(x) for x in recovery.get('probe_strategy', []))}"
-                    s.append(
-                        f'<tr><td>{_esc(check.get("check_id", ""))}</td>'
-                        f'<td>{_esc(check.get("title", ""))}</td>'
-                        f'<td>{_esc(", ".join(str(x) for x in check.get("cves", [])))}</td>'
-                        f'<td>{_esc(check.get("protocol", ""))}</td>'
-                        f'<td>{_esc("yes" if check.get("requires_pairing") else "no")}</td>'
-                        f'<td class="status-{_esc(check.get("status", "unknown"))}">{_esc(check.get("status", "unknown"))}</td>'
-                        f'<td>{_esc(recovery_text)}</td>'
-                        f'<td>{_esc(check.get("evidence", ""))}</td></tr>'
-                    )
-                s.append('</table>')
-
-        # Group results by protocol layer
-        layer_keywords = {
-            "L2CAP": ["l2cap", "l2ping", "cid_exhaust", "connection_storm", "data_flood", "echo"],
-            "SDP": ["sdp", "continuation", "des_bomb", "service_search"],
-            "RFCOMM": ["rfcomm", "sabm", "mux_command", "credit_exhaust", "dlci"],
-            "OBEX": ["obex", "setpath", "connect_flood"],
-            "HFP": ["hfp", "at_command", "slc_", "handsfree", "hands-free"],
-            "AVDTP": ["avdtp", "a2dp", "setconf"],
-            "AVRCP": ["avrcp", "avctp", "register_notification"],
-            "BLE": ["ble", "att", "smp", "eatt", "sweyntooth"],
-            "Raw ACL": ["raw_acl", "bluefrag"],
-            "Pairing": ["pair", "ssp", "pin", "auth", "name_flood", "rate_test"],
-        }
-        grouped: dict[str, list[dict]] = {}
-        for entry in self.dos_results:
-            data = entry.get("data", entry) if isinstance(entry, dict) else entry
-            if not isinstance(data, dict):
-                grouped.setdefault("Other", []).append(data)
-                continue
-            if "check_id" in data and "raw_result" in data:
-                raw = data.get("raw_result", {})
-                test_name = " ".join(
-                    str(part) for part in (
-                        data.get("protocol", ""),
-                        data.get("check_id", ""),
-                        data.get("title", ""),
-                        raw.get("attack", ""),
-                        raw.get("attack_name", ""),
-                    ) if part
-                ).lower()
-            else:
-                test_name = str(data.get("attack", data.get("test", data.get("command",
-                               data.get("attack_name",
-                               entry.get("source", "") if isinstance(entry, dict) else ""))))).lower()
-            placed = False
-            for layer, keywords in layer_keywords.items():
-                if any(kw in test_name for kw in keywords):
-                    grouped.setdefault(layer, []).append(data)
-                    placed = True
-                    break
-            if not placed:
-                grouped.setdefault("Other", []).append(data)
-
-        total_tests = len(self.dos_results)
-        unresponsive_count = 0
-
-        for layer, tests in grouped.items():
-            s.append(f'<h3>{_esc(layer)} Layer Tests</h3>')
-            s.append('<table><tr><th>Test</th><th>Target</th><th>Duration</th>'
-                     '<th>Packets Sent</th><th>Result</th><th>Impact</th></tr>')
-            for data in tests:
-                if not isinstance(data, dict):
-                    s.append(f'<tr><td colspan="6"><pre>'
-                             f'{_esc(json.dumps(data, indent=2, default=str)[:500])}'
-                             f'</pre></td></tr>')
-                    continue
-                if "check_id" in data and "raw_result" in data:
-                    raw = data.get("raw_result", {})
-                    result_str = str(data.get("status", "unknown"))
-                    impact_str = str(raw.get("notes", raw.get("error", data.get("evidence", ""))))
-                    packets_sent = raw.get("packets_sent", raw.get("packets", "N/A"))
-                    duration = raw.get("duration", raw.get("duration_seconds", "N/A"))
-                    test_name = data.get("title", data.get("check_id", "dos"))
-                else:
-                    result_str = str(data.get("result", data.get("status", "unknown")))
-                    impact_str = str(data.get("impact", data.get("effect", "")))
-                    packets_sent = data.get("packets_sent", data.get("packets", "N/A"))
-                    duration = data.get("duration", data.get("duration_seconds", "N/A"))
-                    test_name = str(data.get("attack", data.get("test", data.get("command", data.get("attack_name", "dos")))))
-                is_unresponsive = any(
-                    kw in (result_str + impact_str).lower()
-                    for kw in ("unresponsive", "crash", "timeout", "reboot",
-                               "disconnected", "frozen", "hung"))
-                if is_unresponsive:
-                    unresponsive_count += 1
-                s.append(
-                    f'<tr><td>{_esc(test_name)}</td>'
-                    f'<td class="mono">{_esc(str(data.get("target", raw.get("target", "")) if "check_id" in data and "raw_result" in data else data.get("target", "")))}</td>'
-                    f'<td>{_esc(str(duration))}</td>'
-                    f'<td>{_esc(str(packets_sent))}</td>'
-                    f'<td>{_esc(result_str)}</td>'
-                    f'<td>{_esc(impact_str)}</td></tr>'
-                )
-                if is_unresponsive:
-                    s.append(f'<tr><td colspan="6" style="color:#D43F3A;font-style:italic">'
-                             f'Impact: Target became unresponsive following this test, '
-                             f'indicating insufficient resource management for {_esc(layer)} '
-                             f'protocol operations.</td></tr>')
-            s.append('</table>')
-
-        # Summary
-        s.append(f'<p><strong>Summary:</strong> Of {total_tests} DoS test(s) conducted, '
-                 f'{unresponsive_count} caused the target to become unresponsive, '
-                 f'{"indicating insufficient rate limiting and resource management in " if unresponsive_count else "suggesting adequate resilience in "}'
-                 f'the Bluetooth stack.</p>')
-
-        s.append('</div>')
-        return "\n".join(s)
+        return self._render_module_html("dos", state_keys=("dos_runs",))
 
     def _build_pbap_html(self) -> str:
         return ""
@@ -1812,17 +808,10 @@ class ReportGenerator:
         return ""
 
     def _build_data_ops_html(self) -> str:
-        adapter_state = self._module_report_state.get("data", {})
-        if not (adapter_state.get("runs") or adapter_state.get("data_runs")):
-            return ""
-        return render_sections(_REPORT_ADAPTER_MAP["data"].build_sections(adapter_state))
+        return self._render_module_html("data", state_keys=("runs", "data_runs"))
 
     def _build_audio_html(self) -> str:
-        adapter_state = self._module_report_state.get("audio", {})
-        if adapter_state.get("runs") or adapter_state.get("audio_runs"):
-            sections = _REPORT_ADAPTER_MAP["audio"].build_sections(adapter_state)
-            return render_sections(sections)
-        return ""
+        return self._render_module_html("audio", state_keys=("runs", "audio_runs"))
 
     def _build_appendix_html(self) -> str:
         if not self.notes:
@@ -1854,19 +843,24 @@ class ReportGenerator:
             toc_entries.append(("sec-vulnerabilities", "Vulnerability Findings"))
         if self._module_report_state.get("attack", {}).get("runs") or self._module_report_state.get("attack", {}).get("attack_runs"):
             toc_entries.append(("sec-attack-ops", "Attack Operation Runs"))
-        if self._module_report_state.get("fuzz", {}).get("fuzz_runs"):
-            toc_entries.append(("sec-fuzz-runs", "Ad Hoc Fuzz Command Runs"))
-        if self._fuzz_campaign_stats or self._fuzz_crashes or self.fuzz_results:
+        if self._module_report_state.get("auto", {}).get("auto_runs"):
+            toc_entries.append(("sec-auto-pentest", "Automated Pentest Workflow"))
+        fuzz_state = self._module_report_state.get("fuzz", {})
+        if fuzz_state.get("fuzz_runs"):
             toc_entries.append(("sec-fuzzing", "Fuzzing Campaign Results"))
-        has_fuzz_intel = any([self._fuzz_state_coverage, self._fuzz_field_weights,
-                             self._fuzz_health_events, self._fuzz_baselines])
+        has_fuzz_intel = any([
+            fuzz_state.get("campaign_state_coverage"),
+            fuzz_state.get("campaign_field_weights"),
+            fuzz_state.get("campaign_health_events"),
+            fuzz_state.get("campaign_baselines"),
+        ])
         if has_fuzz_intel:
             toc_entries.append(("sec-fuzz-intel", "Fuzzing Intelligence Analysis"))
-        if self._lmp_captures:
+        if self._module_report_state.get("lmp_capture", {}).get("lmp_captures"):
             toc_entries.append(("sec-lmp", "LMP Capture Analysis"))
         if self.recon_results or self._module_report_state.get("recon", {}).get("recon_runs"):
             toc_entries.append(("sec-recon", "Reconnaissance Results"))
-        if self.dos_results:
+        if self._module_report_state.get("dos", {}).get("dos_runs"):
             toc_entries.append(("sec-dos", "Denial of Service Tests"))
         if self._module_report_state.get("data", {}).get("runs") or self._module_report_state.get("data", {}).get("data_runs"):
             toc_entries.append(("sec-data-ops", "Data Extraction Operations"))
@@ -1885,10 +879,10 @@ class ReportGenerator:
             self._build_scan_html(),
             self._build_vuln_html(),
             self._build_attack_html(),
+            self._render_module_html("auto", state_keys=("auto_runs",)),
         ]
-        body_parts.extend(self._build_fuzz_html())
-        body_parts.append(self._build_fuzz_intelligence_html())
-        body_parts.append(self._build_lmp_html())
+        body_parts.append(self._render_module_html("fuzz", state_keys=("fuzz_runs",)))
+        body_parts.append(self._render_module_html("lmp_capture", state_keys=("lmp_captures",)))
         body_parts.extend([
             self._build_recon_html(),
             self._build_dos_html(),
@@ -1897,7 +891,7 @@ class ReportGenerator:
             self._build_map_html(),
             self._build_audio_html(),
             self._build_appendix_html(),
-            '</div>'  # close .report-body
+            '</div>',  # close .report-body
             f'<div class="footer">Blue-Tap v{_esc(__version__)} | '
             f'Report generated {datetime.now().strftime("%Y-%m-%d %H:%M:%S")} | '
             f'CONFIDENTIAL</div>',
@@ -1961,7 +955,7 @@ class ReportGenerator:
 
         # Timeline
         timeline = []
-        for cmd in self._session_metadata.get("commands", []):
+        for cmd in (self._session_metadata or {}).get("commands", []):
             timeline.append({
                 "timestamp": cmd.get("timestamp", ""),
                 "command": cmd.get("command", ""),
@@ -1995,10 +989,12 @@ class ReportGenerator:
                 "scan": self._module_json_section("scan"),
                 "vulnscan": self._module_json_section("vulnscan"),
                 "attack": self._module_json_section("attack"),
+                "auto": self._module_json_section("auto"),
                 "data": self._module_json_section("data"),
                 "audio": self._module_json_section("audio"),
                 "dos": self._module_json_section("dos"),
                 "fuzz": self._module_json_section("fuzz"),
+                "lmp_capture": self._module_json_section("lmp_capture"),
                 "recon": self._module_json_section("recon"),
             },
             "executions": self._all_module_executions(),
@@ -2007,9 +1003,12 @@ class ReportGenerator:
             "vulnerabilities": self.vuln_findings,
             "vulnerability_scans": self.vuln_scan_runs,
             "recon_results": self.recon_results,
-            "fuzzing": fuzz_data if fuzz_data else self.fuzz_results,
+            "fuzzing": (
+                fuzz_data
+                if fuzz_data
+                else self._module_json_section("fuzz").get("results", [])
+            ),
             "fuzz_runs": self.fuzz_runs,
-            "dos_runs": self.dos_runs,
             "fuzzing_intelligence": {
                 "state_coverage": self._fuzz_state_coverage,
                 "field_weights": self._fuzz_field_weights,
@@ -2017,7 +1016,6 @@ class ReportGenerator:
                 "health_events": self._fuzz_health_events,
             } if any([self._fuzz_state_coverage, self._fuzz_field_weights,
                       self._fuzz_health_events, self._fuzz_baselines]) else {},
-            "dos_results": self.dos_results,
             "notes": self.notes,
         }
 

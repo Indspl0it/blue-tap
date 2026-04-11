@@ -449,7 +449,7 @@ def _run_hci_capture_step(address: str, hci: str, duration: int, prerequisites: 
         completed_at=now_iso(),
         module_data={"capture_result": {"success": False}},
     )
-    _emit(cli_events, event_type="execution_error", run_id=run_id, execution_id="recon_hci_capture", target=address, adapter=hci, message="HCI capture failed to start")
+    _emit(cli_events, event_type="execution_result", run_id=run_id, execution_id="recon_hci_capture", target=address, adapter=hci, message="HCI capture failed to start", details={"execution_status": EXECUTION_FAILED, "module_outcome": "collector_unavailable"})
     return execution, {"status": "failed"}, []
 
 
@@ -491,7 +491,7 @@ def _run_nrf_capture_step(address: str, duration: int, prerequisites: dict[str, 
         completed_at=now_iso(),
         module_data={"capture_result": result},
     )
-    _emit(cli_events, event_type="execution_error", run_id=run_id, execution_id="recon_nrf_capture", target=address, adapter="nrf52840", message=execution["evidence"]["summary"])
+    _emit(cli_events, event_type="execution_result", run_id=run_id, execution_id="recon_nrf_capture", target=address, adapter="nrf52840", message=execution["evidence"]["summary"], details={"execution_status": EXECUTION_FAILED, "module_outcome": execution.get("module_outcome", "")})
     return execution, {"status": "failed", "result": result}, []
 
 
@@ -534,7 +534,7 @@ def _run_lmp_capture_step(address: str, below_hci_hci: str, duration: int, prere
         completed_at=now_iso(),
         module_data={"capture_result": result},
     )
-    _emit(cli_events, event_type="execution_error", run_id=run_id, execution_id="recon_below_hci", target=address, adapter=below_hci_hci, message=execution["evidence"]["summary"])
+    _emit(cli_events, event_type="execution_result", run_id=run_id, execution_id="recon_below_hci", target=address, adapter=below_hci_hci, message=execution["evidence"]["summary"], details={"execution_status": EXECUTION_FAILED, "module_outcome": "collector_unavailable"})
     return execution, {"status": "failed", "result": result}, []
 
 
@@ -578,7 +578,7 @@ def _run_combined_capture_step(address: str, below_hci_hci: str, duration: int, 
         completed_at=now_iso(),
         module_data={"capture_result": result, "exported": exported},
     )
-    _emit(cli_events, event_type="execution_error", run_id=run_id, execution_id="recon_combined_capture", target=address, adapter=below_hci_hci, message="Combined capture unsuccessful")
+    _emit(cli_events, event_type="execution_result", run_id=run_id, execution_id="recon_combined_capture", target=address, adapter=below_hci_hci, message="Combined capture unsuccessful", details={"execution_status": EXECUTION_FAILED, "module_outcome": "collector_unavailable"})
     return execution, {"status": "failed", "result": result}, []
 
 

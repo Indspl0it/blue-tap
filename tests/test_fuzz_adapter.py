@@ -135,7 +135,7 @@ def test_build_sections_returns_section_models():
     sections = adapter.build_sections(state)
     assert len(sections) >= 1
     sec = sections[0]
-    assert sec.section_id == "sec-fuzz-runs"
+    assert sec.section_id == "sec-fuzzing"
     assert "Fuzz" in sec.title
     assert sec.summary
     assert len(sec.blocks) > 0

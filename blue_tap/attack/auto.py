@@ -1,10 +1,8 @@
 """Automated full-spectrum Bluetooth penetration test workflow.
 
-TODO(standardization): The auto pentest orchestrator collects per-phase
-results but does not itself produce a unified RunEnvelope v2.  Each
-sub-phase (recon, vulnscan, dos, etc.) emits its own envelope; this
-module should wrap them in a top-level "auto" envelope so the full run
-is a single session entry with cross-phase execution records.
+The auto orchestrator wraps per-phase results in a parent RunEnvelope v2
+via ``build_auto_result()`` from ``blue_tap.core.auto_framework``.  Each
+sub-phase also emits its own module-specific envelope independently.
 
 Executes a complete pentest methodology against a target IVI system:
 
@@ -520,9 +518,8 @@ class AutoPentest:
                 if dos_run:
                     report.add_run_envelope(dos_run)
                 else:
-                    # TODO(standardization): auto DoS reporting expects a dos_runner
-                    # envelope. If this path is hit, the phase producer regressed and
-                    # needs to be re-migrated instead of reintroducing legacy report intake.
+                    # Defensive guard: auto DoS reporting expects a dos_runner
+                    # envelope. If this path is hit, the phase producer regressed.
                     warning("Auto DoS phase produced no standardized run envelope; skipping report ingestion")
 
             # Session metadata

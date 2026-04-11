@@ -36,9 +36,11 @@ class ArtifactRef:
 
 @dataclass(frozen=True)
 class EvidenceRecord:
-    # TODO: Split operator-facing notes from technical/raw evidence in a future
-    # schema version. For now the record stays permissive to avoid breaking
-    # varied target-derived data captured by existing modules.
+    # Schema v3 consideration: split operator-facing notes (human summary,
+    # triage hints) from technical/raw evidence (packets, hex, machine fields).
+    # For now the record stays permissive to avoid breaking varied target-derived
+    # data captured by existing modules. When splitting, introduce an
+    # OperatorNotes dataclass alongside EvidenceRecord.
     summary: str
     confidence: str = "medium"
     observations: tuple[str, ...] = field(default_factory=tuple)

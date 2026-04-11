@@ -102,7 +102,7 @@ class BIASAttack:
                 started_at=phase_start, completed_at=now_iso(),
                 tags=["cve", "CVE-2020-10135", "bias"],
             ))
-            self._emit("execution_error", "BIAS probe failed: adapter not ready")
+            self._emit("run_error", "BIAS probe failed: adapter not ready")
             return {"potentially_vulnerable": False, "error": "adapter not ready"}
 
         result = {
@@ -259,7 +259,7 @@ class BIASAttack:
                         started_at=phase_start, completed_at=now_iso(),
                         tags=["cve", "CVE-2020-10135", "bias", "role-switch"], module_data=results,
                     ))
-                    self._emit("execution_error", "BIAS role-switch failed: identity clone failed")
+                    self._emit("run_error", "BIAS role-switch failed: identity clone failed")
                     return results
                 success("Identity cloned")
                 time.sleep(2)
@@ -307,7 +307,7 @@ class BIASAttack:
                         started_at=phase_start, completed_at=now_iso(),
                         tags=["cve", "CVE-2020-10135", "bias", "role-switch"], module_data=results,
                     ))
-                    self._emit("execution_error", "BIAS role-switch failed: bluetoothctl timeout")
+                    self._emit("run_error", "BIAS role-switch failed: bluetoothctl timeout")
                     return results
                 output = proc_result.stdout + proc_result.stderr
                 verbose(f"bluetoothctl output:\n{output.strip()}")
@@ -425,7 +425,7 @@ class BIASAttack:
                     started_at=phase_start, completed_at=now_iso(),
                     tags=["cve", "CVE-2020-10135", "bias", "darkfirmware"], module_data=result,
                 ))
-                self._emit("execution_error", "BIAS DarkFirmware: not loaded on adapter")
+                self._emit("run_error", "BIAS DarkFirmware: not loaded on adapter")
                 return result
 
             info("[BIAS] Step 1: DarkFirmware confirmed on adapter")
@@ -446,7 +446,7 @@ class BIASAttack:
                     started_at=phase_start, completed_at=now_iso(),
                     tags=["cve", "CVE-2020-10135", "bias", "darkfirmware"], module_data=result,
                 ))
-                self._emit("execution_error", "BIAS DarkFirmware: identity clone failed")
+                self._emit("run_error", "BIAS DarkFirmware: identity clone failed")
                 return result
             result["details"].append(f"Cloned identity: {self.phone_address}")
 

@@ -247,6 +247,13 @@ def _run_fuzz_cases(
 ) -> dict:
     """Shared logic for per-protocol fuzz commands.
 
+    NOTE: Only the ``fuzz cve`` command still uses this function.  All other
+    per-protocol commands have been migrated to ``_run_via_engine()``.  This
+    function cannot be deleted until the CVE command is also migrated (the CVE
+    command constructs a ``transport_factory`` dynamically based on the first
+    CVE entry's protocol, which does not map cleanly to the engine's
+    single-protocol API).
+
     Connects via *transport_factory*, iterates through *cases* with a Rich
     progress bar, detects crashes, and logs them to a :class:`CrashDB`.
 

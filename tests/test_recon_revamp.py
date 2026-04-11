@@ -124,6 +124,63 @@ def test_run_auto_recon_logs_skips_for_unsupported_transport(monkeypatch):
     assert envelope["module_data"]["gatt"]["service_count"] == 1
 
 
+def test_run_auto_recon_capture_failures_emit_execution_result_not_run_error(monkeypatch):
+    monkeypatch.setattr(
+        "blue_tap.recon.campaign.detect_target_capabilities",
+        lambda address, hci="hci0": {
+            "classification": "classic_only",
+            "classic": {"supported": True, "signals": []},
+            "ble": {"supported": False, "signals": []},
+            "observations": [],
+        },
+    )
+    monkeypatch.setattr(
+        "blue_tap.recon.campaign.evaluate_recon_prerequisites",
+        lambda **kwargs: {
+            "hci_capture": {"available": True, "reason": ""},
+            "nrf_ble_sniffer": {"available": False, "reason": "unsupported"},
+            "darkfirmware_lmp": {"available": False, "reason": "unsupported"},
+            "combined_capture": {"available": False, "reason": "unsupported"},
+        },
+    )
+    monkeypatch.setattr("blue_tap.recon.campaign.fingerprint_device", lambda address, hci="hci0": {})
+    monkeypatch.setattr(
+        "blue_tap.recon.campaign.browse_services_detailed",
+        lambda address, hci="hci0": {"services": [], "rfcomm_channels": [], "l2cap_psms": []},
+    )
+    monkeypatch.setattr(
+        "blue_tap.recon.campaign.RFCOMMScanner.scan_all_channels",
+        lambda self, hci="hci0": [],
+    )
+    monkeypatch.setattr(
+        "blue_tap.recon.campaign.L2CAPScanner.scan_standard_psms",
+        lambda self, timeout=1.0, full=False, hci="hci0": [],
+    )
+    monkeypatch.setattr(
+        "blue_tap.recon.campaign.correlate_rfcomm_with_sdp",
+        lambda entries, channels: {"hidden_channels": [], "entries": []},
+    )
+    monkeypatch.setattr(
+        "blue_tap.recon.campaign.correlate_l2cap_with_sdp",
+        lambda entries, psms: {"unexpected_psms": [], "entries": []},
+    )
+    monkeypatch.setattr("blue_tap.recon.campaign.detect_pairing_mode", lambda address, hci="hci0": {})
+
+    class FakeCapture:
+        def start(self, output, hci="hci0", pcap=True):
+            return False
+
+    monkeypatch.setattr("blue_tap.recon.campaign.HCICapture", lambda: FakeCapture())
+
+    envelope = run_auto_recon(address="AA:BB:CC:DD:EE:FF", with_captures=True)
+
+    cli_events = envelope["module_data"]["cli_events"]
+    capture_events = [event for event in cli_events if event.get("execution_id") == "recon_hci_capture"]
+    assert any(event["event_type"] == "execution_result" for event in capture_events)
+    assert not any(event["event_type"] == "run_error" for event in capture_events)
+    assert any(event["event_type"] == "run_completed" for event in cli_events)
+
+
 def test_parse_sdp_output_preserves_protocol_details():
     services = parse_sdp_output(
         """

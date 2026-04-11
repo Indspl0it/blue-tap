@@ -705,8 +705,10 @@ class KNOBAttack:
 
                 if has_acl:
                     # TODO: Replace this repeating-XOR heuristic with true
-                    # BR/EDR E0 keystream generation once EN_RAND/BD_ADDR/CLK
-                    # capture is wired into the sniffer path.
+                    # BR/EDR E0 keystream generation once the sniffer path
+                    # exposes EN_RAND and link clock alongside BD_ADDR. The
+                    # current DarkFirmware/LMP capture integration produces
+                    # packets and timelines, but not the full E0 seed inputs.
                     # E0 stream cipher approximation: XOR key stream with data
                     # Real E0 uses LFSR-based stream generation seeded from
                     # the encryption key + EN_RAND + BD_ADDR. Here we test

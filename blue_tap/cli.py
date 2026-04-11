@@ -160,7 +160,6 @@ def _recon_skip(ctx: dict, *, execution_id: str, message: str, details: dict | N
 
 
 def _recon_error(ctx: dict, *, execution_id: str, message: str, details: dict | None = None) -> None:
-    _recon_emit(ctx, event_type="execution_error", execution_id=execution_id, message=message, details=details)
     _recon_emit(ctx, event_type="run_error", execution_id=execution_id, message=message, details=details)
 
 
@@ -440,7 +439,20 @@ def up(hci):
     from blue_tap.core.result_schema import build_run_envelope, make_run_id, now_iso
     from blue_tap.utils.session import log_command
     started = now_iso()
-    ok = adapter_up(hci)
+    run_id = make_run_id("general")
+    emit_cli_event(
+        event_type="run_started", module="general", run_id=run_id,
+        adapter=hci, message=f"Bringing adapter {hci} up",
+        echo=False,
+    )
+    result = adapter_up(hci)
+    ok = result["success"]
+    emit_cli_event(
+        event_type="execution_result", module="general", run_id=run_id,
+        adapter=hci, message=f"adapter up {'succeeded' if ok else 'failed'} on {hci}",
+        details={"success": ok, "error": result.get("error")},
+        echo=False,
+    )
     envelope = build_run_envelope(
         schema="blue_tap.general.result",
         module="general",
@@ -449,9 +461,16 @@ def up(hci):
         operator_context={"operation": "adapter_up"},
         summary={"success": ok},
         executions=[],
-        module_data={"operation": "adapter_up", "hci": hci, "success": ok},
+        module_data={"operation": "adapter_up", "hci": hci, "success": ok, "error": result.get("error")},
         started_at=started,
-        run_id=make_run_id("general"),
+        run_id=run_id,
+    )
+    emit_cli_event(
+        event_type="run_completed" if ok else "run_error",
+        module="general", run_id=run_id, adapter=hci,
+        message=f"adapter up {'complete' if ok else 'failed'}: {hci}",
+        details={"success": ok},
+        echo=False,
     )
     log_command("adapter_up", envelope, category="general")
 
@@ -464,7 +483,20 @@ def down(hci):
     from blue_tap.core.result_schema import build_run_envelope, make_run_id, now_iso
     from blue_tap.utils.session import log_command
     started = now_iso()
-    ok = adapter_down(hci)
+    run_id = make_run_id("general")
+    emit_cli_event(
+        event_type="run_started", module="general", run_id=run_id,
+        adapter=hci, message=f"Bringing adapter {hci} down",
+        echo=False,
+    )
+    result = adapter_down(hci)
+    ok = result["success"]
+    emit_cli_event(
+        event_type="execution_result", module="general", run_id=run_id,
+        adapter=hci, message=f"adapter down {'succeeded' if ok else 'failed'} on {hci}",
+        details={"success": ok, "error": result.get("error")},
+        echo=False,
+    )
     envelope = build_run_envelope(
         schema="blue_tap.general.result",
         module="general",
@@ -473,9 +505,16 @@ def down(hci):
         operator_context={"operation": "adapter_down"},
         summary={"success": ok},
         executions=[],
-        module_data={"operation": "adapter_down", "hci": hci, "success": ok},
+        module_data={"operation": "adapter_down", "hci": hci, "success": ok, "error": result.get("error")},
         started_at=started,
-        run_id=make_run_id("general"),
+        run_id=run_id,
+    )
+    emit_cli_event(
+        event_type="run_completed" if ok else "run_error",
+        module="general", run_id=run_id, adapter=hci,
+        message=f"adapter down {'complete' if ok else 'failed'}: {hci}",
+        details={"success": ok},
+        echo=False,
     )
     log_command("adapter_down", envelope, category="general")
 
@@ -488,7 +527,20 @@ def reset(hci):
     from blue_tap.core.result_schema import build_run_envelope, make_run_id, now_iso
     from blue_tap.utils.session import log_command
     started = now_iso()
-    ok = adapter_reset(hci)
+    run_id = make_run_id("general")
+    emit_cli_event(
+        event_type="run_started", module="general", run_id=run_id,
+        adapter=hci, message=f"Resetting adapter {hci}",
+        echo=False,
+    )
+    result = adapter_reset(hci)
+    ok = result["success"]
+    emit_cli_event(
+        event_type="execution_result", module="general", run_id=run_id,
+        adapter=hci, message=f"adapter reset {'succeeded' if ok else 'failed'} on {hci}",
+        details={"success": ok, "error": result.get("error")},
+        echo=False,
+    )
     envelope = build_run_envelope(
         schema="blue_tap.general.result",
         module="general",
@@ -497,9 +549,16 @@ def reset(hci):
         operator_context={"operation": "adapter_reset"},
         summary={"success": ok},
         executions=[],
-        module_data={"operation": "adapter_reset", "hci": hci, "success": ok},
+        module_data={"operation": "adapter_reset", "hci": hci, "success": ok, "error": result.get("error")},
         started_at=started,
-        run_id=make_run_id("general"),
+        run_id=run_id,
+    )
+    emit_cli_event(
+        event_type="run_completed" if ok else "run_error",
+        module="general", run_id=run_id, adapter=hci,
+        message=f"adapter reset {'complete' if ok else 'failed'}: {hci}",
+        details={"success": ok},
+        echo=False,
     )
     log_command("adapter_reset", envelope, category="general")
 
@@ -513,7 +572,30 @@ def set_name(hci, name):
     from blue_tap.core.result_schema import build_run_envelope, make_run_id, now_iso
     from blue_tap.utils.session import log_command
     started = now_iso()
-    ok = set_device_name(hci, name)
+    run_id = make_run_id("general")
+    emit_cli_event(
+        event_type="run_started", module="general", run_id=run_id,
+        adapter=hci, message=f"Setting adapter {hci} name to {name!r}",
+        echo=False,
+    )
+    try:
+        result = set_device_name(hci, name)
+    except ValueError as exc:
+        error(str(exc))
+        emit_cli_event(
+            event_type="run_error", module="general", run_id=run_id,
+            adapter=hci, message=f"adapter set-name validation failed: {exc}",
+            details={"error": str(exc)},
+            echo=False,
+        )
+        return
+    ok = result["success"]
+    emit_cli_event(
+        event_type="execution_result", module="general", run_id=run_id,
+        adapter=hci, message=f"adapter name set to {result['name']!r} on {hci}",
+        details={"success": ok, "name": result["name"], "previous_name": result.get("previous_name")},
+        echo=False,
+    )
     envelope = build_run_envelope(
         schema="blue_tap.general.result",
         module="general",
@@ -522,9 +604,22 @@ def set_name(hci, name):
         operator_context={"operation": "adapter_set_name", "name": name},
         summary={"success": ok},
         executions=[],
-        module_data={"operation": "adapter_set_name", "hci": hci, "name": name, "success": ok},
+        module_data={
+            "operation": "adapter_set_name",
+            "hci": hci,
+            "name": result["name"],
+            "previous_name": result.get("previous_name"),
+            "success": ok,
+        },
         started_at=started,
-        run_id=make_run_id("general"),
+        run_id=run_id,
+    )
+    emit_cli_event(
+        event_type="run_completed" if ok else "run_error",
+        module="general", run_id=run_id, adapter=hci,
+        message=f"adapter set-name {'complete' if ok else 'failed'}: {name!r} on {hci}",
+        details={"success": ok},
+        echo=False,
     )
     log_command("adapter_set_name", envelope, category="general")
 
@@ -538,7 +633,30 @@ def set_class(hci, device_class):
     from blue_tap.core.result_schema import build_run_envelope, make_run_id, now_iso
     from blue_tap.utils.session import log_command
     started = now_iso()
-    ok = set_device_class(hci, device_class)
+    run_id = make_run_id("general")
+    emit_cli_event(
+        event_type="run_started", module="general", run_id=run_id,
+        adapter=hci, message=f"Setting adapter {hci} device class to {device_class}",
+        echo=False,
+    )
+    try:
+        result = set_device_class(hci, device_class)
+    except ValueError as exc:
+        error(str(exc))
+        emit_cli_event(
+            event_type="run_error", module="general", run_id=run_id,
+            adapter=hci, message=f"adapter set-class validation failed: {exc}",
+            details={"error": str(exc)},
+            echo=False,
+        )
+        return
+    ok = result["success"]
+    emit_cli_event(
+        event_type="execution_result", module="general", run_id=run_id,
+        adapter=hci, message=f"adapter device class set to {result['device_class']} on {hci}",
+        details={"success": ok, "device_class": result["device_class"]},
+        echo=False,
+    )
     envelope = build_run_envelope(
         schema="blue_tap.general.result",
         module="general",
@@ -547,9 +665,21 @@ def set_class(hci, device_class):
         operator_context={"operation": "adapter_set_class", "device_class": device_class},
         summary={"success": ok},
         executions=[],
-        module_data={"operation": "adapter_set_class", "hci": hci, "device_class": device_class, "success": ok},
+        module_data={
+            "operation": "adapter_set_class",
+            "hci": hci,
+            "device_class": result["device_class"],
+            "success": ok,
+        },
         started_at=started,
-        run_id=make_run_id("general"),
+        run_id=run_id,
+    )
+    emit_cli_event(
+        event_type="run_completed" if ok else "run_error",
+        module="general", run_id=run_id, adapter=hci,
+        message=f"adapter set-class {'complete' if ok else 'failed'}: {device_class} on {hci}",
+        details={"success": ok},
+        echo=False,
     )
     log_command("adapter_set_class", envelope, category="general")
 
@@ -947,17 +1077,63 @@ def adapter_firmware_spoof(address, hci):
     This is the only reliable spoofing method for Realtek chipsets.
     """
     from blue_tap.core.firmware import DarkFirmwareManager
+    from blue_tap.core.firmware_framework import build_firmware_operation_result, make_firmware_run_id
+    from blue_tap.core.result_schema import now_iso
+    from blue_tap.utils.session import log_command
+
+    run_id = make_firmware_run_id()
+    started_at = now_iso()
+    emit_cli_event(
+        event_type="run_started", module="firmware", run_id=run_id,
+        adapter=hci, target=address,
+        message=f"Firmware BDADDR spoof to {address} on {hci}",
+        echo=False,
+    )
 
     fw = DarkFirmwareManager()
     if not fw.detect_rtl8761b(hci):
         error(f"No RTL8761B detected on {hci}")
+        emit_cli_event(
+            event_type="run_error", module="firmware", run_id=run_id,
+            adapter=hci, target=address,
+            message=f"No RTL8761B detected on {hci}",
+            details={"error": "rtl8761b_not_found"},
+            echo=False,
+        )
         return
 
     info(f"Patching BDADDR to {address}...")
-    if fw.patch_bdaddr(address, hci):
+    ok = fw.patch_bdaddr(address, hci)
+    if ok:
         success(f"BDADDR set to {address}")
     else:
         error("BDADDR patching failed")
+
+    emit_cli_event(
+        event_type="execution_result", module="firmware", run_id=run_id,
+        adapter=hci, target=address,
+        message=f"BDADDR patch {'succeeded' if ok else 'failed'}: {address}",
+        details={"success": ok, "address": address},
+        echo=False,
+    )
+    envelope = build_firmware_operation_result(
+        adapter=hci,
+        operation="spoof",
+        title=f"BDADDR spoof to {address}",
+        success=ok,
+        observations=[f"Target BDADDR: {address}", f"Adapter: {hci}"],
+        module_data={"address": address, "hci": hci},
+        started_at=started_at,
+        run_id=run_id,
+    )
+    emit_cli_event(
+        event_type="run_completed" if ok else "run_error",
+        module="firmware", run_id=run_id, adapter=hci, target=address,
+        message=f"Firmware BDADDR spoof {'complete' if ok else 'failed'}: {address}",
+        details={"success": ok},
+        echo=False,
+    )
+    log_command("firmware_spoof", envelope, category="general", target=hci)
 
 
 @adapter.command("firmware-set")
@@ -983,22 +1159,67 @@ def adapter_firmware_set(setting, value, hci):
       blue-tap adapter firmware-set lmp-slot 2      # target third connection
     """
     from blue_tap.core.firmware import DarkFirmwareManager
+    from blue_tap.core.firmware_framework import build_firmware_operation_result, make_firmware_run_id
+    from blue_tap.core.result_schema import now_iso
+    from blue_tap.utils.session import log_command
+
+    run_id = make_firmware_run_id()
+    started_at = now_iso()
+    emit_cli_event(
+        event_type="run_started", module="firmware", run_id=run_id,
+        adapter=hci, message=f"Firmware set {setting}={value} on {hci}",
+        echo=False,
+    )
 
     fw = DarkFirmwareManager()
     if not fw.is_darkfirmware_loaded(hci):
         error(f"DarkFirmware not loaded on {hci}")
+        emit_cli_event(
+            event_type="run_error", module="firmware", run_id=run_id,
+            adapter=hci, message=f"DarkFirmware not loaded on {hci}",
+            details={"error": "darkfirmware_not_loaded"},
+            echo=False,
+        )
         return
 
+    ok = False
     if setting == "lmp-size":
-        if fw.patch_send_length(value, hci):
+        ok = fw.patch_send_length(value, hci)
+        if ok:
             success(f"LMP send size set to {value} bytes")
         else:
             error(f"Failed to set LMP send size to {value}")
     elif setting == "lmp-slot":
-        if fw.patch_connection_index(value, hci):
+        ok = fw.patch_connection_index(value, hci)
+        if ok:
             success(f"LMP injection slot set to {value}")
         else:
             error(f"Failed to set LMP slot to {value}")
+
+    emit_cli_event(
+        event_type="execution_result", module="firmware", run_id=run_id,
+        adapter=hci, message=f"firmware-set {setting}={value} {'succeeded' if ok else 'failed'}",
+        details={"success": ok, "setting": setting, "value": value},
+        echo=False,
+    )
+    envelope = build_firmware_operation_result(
+        adapter=hci,
+        operation="set",
+        title=f"Firmware set {setting}={value}",
+        success=ok,
+        observations=[f"Setting: {setting}", f"Value: {value}", f"Adapter: {hci}"],
+        module_data={"setting": setting, "value": value, "hci": hci},
+        started_at=started_at,
+        run_id=run_id,
+    )
+    emit_cli_event(
+        event_type="run_completed" if ok else "run_error",
+        module="firmware", run_id=run_id, adapter=hci,
+        message=f"firmware-set {'complete' if ok else 'failed'}: {setting}={value}",
+        details={"success": ok},
+        echo=False,
+    )
+    log_command("firmware_set", envelope, category="general", target=hci)
 
 
 @adapter.command("firmware-dump")
@@ -6352,41 +6573,32 @@ def report_cmd(dump_dir, fmt, output):
             data = entry.get("data", {})
             if report.add_run_envelope(data):
                 continue
-            # TODO(standardization): Raw/operator-only attack commands are
-            # intentionally excluded from formal reports. Only standardized
-            # attack envelopes are ingested here.
+            # Raw/operator-only attack commands are intentionally excluded from
+            # formal reports. Only standardized attack envelopes are ingested.
 
         for entry in session_data.get("data", []):
             data = entry.get("data", {})
             if report.add_run_envelope(data):
                 continue
-            # TODO(standardization): Raw data extraction blobs are intentionally
-            # excluded from formal reports. Only standardized data envelopes
-            # are ingested here.
+            # Raw data extraction blobs are intentionally excluded from formal
+            # reports. Only standardized data envelopes are ingested.
 
         for entry in session_data.get("fuzz", []):
             data = entry.get("data", {})
             if report.add_run_envelope(data):
                 continue
-            # TODO(standardization): Remove this legacy fuzz session fallback after
-            # fuzz-producing commands log standardized envelopes only.
-            report.add_fuzz_results(data)
 
         for entry in session_data.get("dos", []):
             data = entry.get("data", {})
             if report.add_run_envelope(data):
                 continue
-            # TODO(standardization): Remove this legacy DoS session fallback after
-            # all DoS-producing commands log standardized envelopes only.
-            report.add_dos_results(data)
 
         for entry in session_data.get("audio", []):
             data = entry.get("data", {})
             if report.add_run_envelope(data):
                 continue
-            # TODO(standardization): Raw audio/operator session entries are
-            # intentionally excluded from formal reports. Only standardized
-            # audio envelopes are ingested here.
+            # Raw audio/operator session entries are intentionally excluded from
+            # formal reports. Only standardized audio envelopes are ingested.
 
         # Add generic command execution evidence from all categories.
         for category_name, entries in session_data.items():
@@ -6403,13 +6615,6 @@ def report_cmd(dump_dir, fmt, output):
 
         # Pass full session metadata for timeline, scope, and methodology
         report.add_session_metadata(session.metadata)
-
-        # TODO(standardization): This is still an artifact hydration step. Once
-        # campaign and crash-management fuzz flows emit complete standardized
-        # envelopes with artifact refs, report generation should not depend on
-        # a parallel session-directory loader here.
-        # Load structured fuzz data (crash DB, corpus stats, evidence files)
-        report.load_fuzz_from_session(session.dir)
 
         # Add session metadata as a note
         meta = session.metadata

@@ -431,8 +431,10 @@ def clone_device_identity(hci: str, target_mac: str, target_name: str,
                 "hci": hci, "error": spoof_result.get("error", "MAC spoof failed")}
 
     try:
-        name_ok = set_device_name(hci, target_name)
-        class_ok = set_device_class(hci, device_class)
+        name_result = set_device_name(hci, target_name)
+        class_result = set_device_class(hci, device_class)
+        name_ok = bool(name_result.get("success"))
+        class_ok = bool(class_result.get("success"))
         if name_ok and class_ok:
             success(f"Full identity clone complete on {hci}")
             return {"success": True, "mac_spoofed": True, "name_set": True, "class_set": True,

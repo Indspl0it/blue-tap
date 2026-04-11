@@ -531,7 +531,7 @@ class FuzzCampaign:
                         mutated, log = self._field_mutator.mutate(protocol, seed, self._field_tracker)
                         return mutated, log
                 except Exception:
-                    pass  # fall through to byte-level
+                    logger.debug("Field-aware mutation failed for %s, falling through to byte-level", protocol, exc_info=True)
 
         # Fallback: byte-level corpus mutation
         seed = self.corpus.get_random_seed(protocol)
@@ -956,7 +956,7 @@ class FuzzCampaign:
                         latency_ms = (time.time() - t0) * 1000
                         self._analyzer.record_baseline(proto, response, latency_ms)
                     except Exception:
-                        pass
+                        logger.debug("Baseline sample failed for %s", proto, exc_info=True)
             self._analyzer.finalize_baselines()
             bl_summary = self._analyzer.baseline_summary()
             for proto, stats in bl_summary.items():
@@ -1250,7 +1250,7 @@ class FuzzCampaign:
                     try:
                         self._analyzer.analyze(protocol, payload, response, latency_ms)
                     except Exception:
-                        pass
+                        logger.debug("Response analysis failed for %s", protocol, exc_info=True)
 
             except (ConnectionResetError, BrokenPipeError):
                 crashes += 1
@@ -1500,7 +1500,7 @@ class FuzzCampaign:
                 if crash_count > 20:
                     info(f"... and {crash_count - 20} more. See {self._fuzz_dir}")
             except Exception:
-                pass
+                logger.debug("Crash summary display failed", exc_info=True)
         else:
             success("No crashes detected during this campaign.")
 
@@ -1559,6 +1559,7 @@ class FuzzCampaign:
         try:
             crashes = self.crash_db.get_crashes()
         except Exception:
+            logger.debug("Failed to retrieve crashes from crash DB", exc_info=True)
             crashes = []
         protocol_executions = []
         for proto, ps in self._protocol_stats.items():
@@ -1573,7 +1574,7 @@ class FuzzCampaign:
                             "transitions": len(proto_graph.get("edges", [])),
                         }
                 except Exception:
-                    pass
+                    logger.debug("State coverage extraction failed for %s", proto, exc_info=True)
             field_weights = None
             if self._field_tracker is not None:
                 try:
@@ -1581,7 +1582,7 @@ class FuzzCampaign:
                     if w:
                         field_weights = w
                 except Exception:
-                    pass
+                    logger.debug("Field weight extraction failed for %s", proto, exc_info=True)
             protocol_executions.append(
                 build_fuzz_protocol_execution(
                     protocol=proto,
@@ -1652,7 +1653,7 @@ class FuzzCampaign:
                     "protocols_tracked": list(tracker_data.get("graphs", {}).keys()),
                 }
             except Exception:
-                pass
+                logger.debug("State coverage summary extraction failed", exc_info=True)
 
         # Field weight stats (Phase 2)
         if self._field_tracker is not None:
@@ -1665,14 +1666,14 @@ class FuzzCampaign:
                 if weights_summary:
                     result["field_weights"] = weights_summary
             except Exception:
-                pass
+                logger.debug("Field weight summary extraction failed", exc_info=True)
 
         # Health monitor stats (Phase 6)
         if self._health_monitor is not None:
             try:
                 result["health_monitor"] = self._health_monitor.get_stats()
             except Exception:
-                pass
+                logger.debug("Health monitor stats extraction failed", exc_info=True)
 
         return result
 
