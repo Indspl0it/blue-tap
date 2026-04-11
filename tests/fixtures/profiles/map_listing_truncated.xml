@@ -1,0 +1,4 @@
+<?xml version="1.0"?>
+<MAP-msg-listing version="1.0">
+  <msg handle="300001" subject="partially closed" sender_name="Alice"/>
+  <msg handle="300002" subject="broken tail" sender_addressing="+1555"

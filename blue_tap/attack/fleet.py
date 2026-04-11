@@ -122,6 +122,7 @@ class FleetAssessment:
         self.scan_duration = scan_duration
         self._classifier = DeviceClassifier()
         self._scan_results: list[dict] = []
+        self._scan_envelope: dict = {}
         self._assessment_results: list[dict] = []
 
     # ------------------------------------------------------------------
@@ -134,10 +135,11 @@ class FleetAssessment:
         Returns a list sorted by classification then RSSI, each entry:
         {address, name, rssi, type, classification, services_found}
         """
-        from blue_tap.core.scanner import scan_all
+        from blue_tap.core.scanner import scan_all_result
 
         info(f"Fleet scan: discovering devices for {self.scan_duration}s on {self.hci}...")
-        raw_devices = scan_all(self.scan_duration, self.hci)
+        self._scan_envelope = scan_all_result(self.scan_duration, self.hci)
+        raw_devices = self._scan_envelope.get("module_data", {}).get("devices", [])
 
         results = []
         for dev in raw_devices:
@@ -186,7 +188,7 @@ class FleetAssessment:
             Per-device assessment results.
         """
         from blue_tap.recon.fingerprint import fingerprint_device
-        from blue_tap.attack.vuln_scanner import scan_vulnerabilities
+        from blue_tap.attack.vuln_scanner import run_vulnerability_scan
 
         # Resolve target list
         if targets:
@@ -224,6 +226,7 @@ class FleetAssessment:
                 "classification": device_class,
                 "fingerprint": {},
                 "findings": [],
+                "vulnscan": {},
                 "risk_rating": "UNKNOWN",
                 "error": None,
             }
@@ -242,8 +245,10 @@ class FleetAssessment:
                 device_result["name"] = fp.get("name") or device_result["name"]
 
                 # Vulnerability scan
-                findings = scan_vulnerabilities(addr, hci=self.hci)
+                vulnscan = run_vulnerability_scan(addr, hci=self.hci, active=True)
+                findings = vulnscan.get("module_data", {}).get("findings", [])
                 device_result["findings"] = findings
+                device_result["vulnscan"] = vulnscan
 
                 # Rate per device
                 device_result["risk_rating"] = self._rate_device(findings)
@@ -286,6 +291,7 @@ class FleetAssessment:
                 "name": result["name"],
                 "classification": result["classification"],
                 "findings": result["findings"],
+                **({"vulnscan": result["vulnscan"]} if result.get("vulnscan") else {}),
                 "risk_rating": result["risk_rating"],
                 **({"error": result["error"]} if result.get("error") else {}),
             })
@@ -297,6 +303,7 @@ class FleetAssessment:
             "total_devices": len(self._scan_results),
             "classifications": classifications,
             "assessed": len(self._assessment_results),
+            "scan_run": self._scan_envelope,
             "devices": devices,
             "overall_risk": overall_risk,
         }

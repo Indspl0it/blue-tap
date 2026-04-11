@@ -58,6 +58,9 @@ from blue_tap.fuzz.engine import (
     PROTOCOL_TRANSPORT_MAP,
     CRASH_SEVERITY,
 )
+from blue_tap.core.fuzz_framework import build_fuzz_operation_result, make_fuzz_run_id
+from blue_tap.core.result_schema import make_artifact
+from blue_tap.core.cli_events import emit_cli_event
 from blue_tap.fuzz.corpus import Corpus, generate_full_corpus
 
 
@@ -1098,11 +1101,29 @@ def _crash_commands(fuzz_group):
 
         console.print(table)
 
-        log_command("fuzz_crashes_list", {
-            "count": len(crashes),
-            "protocol_filter": protocol,
-            "severity_filter": severity,
-        }, category="fuzz")
+        envelope = build_fuzz_operation_result(
+            target="",
+            adapter="session",
+            operation="fuzz_crashes_list",
+            title="Fuzz Crash Listing",
+            summary_data={
+                "operation": "fuzz_crashes_list",
+                "count": len(crashes),
+                "protocol_filter": protocol or "",
+                "severity_filter": severity or "",
+            },
+            observations=[
+                f"count={len(crashes)}",
+                f"protocol_filter={protocol or ''}",
+                f"severity_filter={severity or ''}",
+            ],
+            module_data={
+                "count": len(crashes),
+                "protocol_filter": protocol,
+                "severity_filter": severity,
+            },
+        )
+        log_command("fuzz_crashes_list", envelope, category="fuzz")
 
     # ── crashes show ──────────────────────────────────────────────────
 
@@ -1217,11 +1238,30 @@ def _crash_commands(fuzz_group):
                 padding=(0, 2),
             ))
 
-        log_command("fuzz_crashes_show", {
-            "crash_id": crash_id,
-            "protocol": crash.get("protocol", ""),
-            "severity": crash.get("severity", ""),
-        }, category="fuzz")
+        envelope = build_fuzz_operation_result(
+            target=crash.get("target_addr", "") or "",
+            adapter="session",
+            operation="fuzz_crashes_show",
+            title="Fuzz Crash Detail View",
+            protocol=crash.get("protocol", "") or "",
+            summary_data={
+                "operation": "fuzz_crashes_show",
+                "crash_id": crash_id,
+                "protocol": crash.get("protocol", ""),
+                "severity": crash.get("severity", ""),
+            },
+            observations=[
+                f"crash_id={crash_id}",
+                f"protocol={crash.get('protocol', '')}",
+                f"severity={crash.get('severity', '')}",
+                f"payload_len={crash.get('payload_len', 0)}",
+            ],
+            module_data={
+                "crash_id": crash_id,
+                "crash": crash,
+            },
+        )
+        log_command("fuzz_crashes_show", envelope, category="fuzz")
 
     # ── crashes replay ────────────────────────────────────────────────
 
@@ -1239,6 +1279,7 @@ def _crash_commands(fuzz_group):
           blue-tap fuzz crashes replay 1
           blue-tap fuzz crashes replay 3 --no-capture
         """
+        run_id = make_fuzz_run_id()
         session_dir = _resolve_session_dir(session_name)
         if not session_dir:
             error("No session found.")
@@ -1256,6 +1297,14 @@ def _crash_commands(fuzz_group):
             error(f"Crash ID {crash_id} not found.")
             db.close()
             return
+
+        emit_cli_event(
+            event_type="run_started",
+            module="fuzz",
+            run_id=run_id,
+            message=f"Replaying crash #{crash_id}",
+            details={"crash_id": crash_id},
+        )
 
         # Show crash details
         section(f"Replay Crash #{crash_id}", style="bt.red")
@@ -1310,7 +1359,7 @@ def _crash_commands(fuzz_group):
 
         # Create transport
         try:
-            from blue_tap.fuzz.transport import L2CAPTransport, RFCOMMTransport, BLETransport
+            from blue_tap.fuzz.transport import L2CAPTransport, RFCOMMTransport, BLETransport, RawACLTransport
             ttype = spec["type"]
             if ttype == "l2cap":
                 transport = L2CAPTransport(target_addr, psm=spec["psm"])
@@ -1319,23 +1368,21 @@ def _crash_commands(fuzz_group):
             elif ttype == "ble":
                 transport = BLETransport(target_addr, cid=spec["cid"],
                                          address_type=BLETransport._detect_address_type(target_addr))
+            elif ttype == "raw-acl":
+                transport = RawACLTransport(target_addr, hci_dev=spec.get("hci_dev", 1))
             else:
                 error(f"Unsupported transport type: {ttype}")
                 _cleanup_capture(hci_capture)
                 db.close()
                 return
-        except ImportError:
-            # Fall back to stub transport from engine
-            from blue_tap.fuzz.engine import _StubTransport
-            transport = _StubTransport(
-                target_addr,
-                transport_type=spec["type"],
-                psm=spec.get("psm", 1),
-                channel=spec.get("channel", 1),
-                cid=spec.get("cid", 4),
-            )
+        except ImportError as exc:
+            error(f"Failed to import fuzz transport backend: {exc}")
+            _cleanup_capture(hci_capture)
+            db.close()
+            return
 
         # Replay
+        reproduced = False
         info("Connecting to target...")
         try:
             if not transport.connect():
@@ -1353,11 +1400,13 @@ def _crash_commands(fuzz_group):
                 # Connection closed -- crash reproduced
                 success(f"Crash #{crash_id} [bold {GREEN}]REPRODUCED[/bold {GREEN}] -- connection closed by remote")
                 db.mark_reproduced(crash_id, True)
+                reproduced = True
             elif response == b"":
                 warning(f"Crash #{crash_id} -- response timeout, checking target...")
                 if not _check_target_alive(target_addr):
                     success(f"Crash #{crash_id} [bold {GREEN}]REPRODUCED[/bold {GREEN}] -- target unresponsive")
                     db.mark_reproduced(crash_id, True)
+                    reproduced = True
                 else:
                     info(f"Crash #{crash_id} NOT reproduced -- target still alive")
             else:
@@ -1366,10 +1415,12 @@ def _crash_commands(fuzz_group):
         except (ConnectionResetError, BrokenPipeError, ConnectionError):
             success(f"Crash #{crash_id} [bold {GREEN}]REPRODUCED[/bold {GREEN}] -- connection dropped")
             db.mark_reproduced(crash_id, True)
+            reproduced = True
         except OSError as exc:
             if not _check_target_alive(target_addr):
                 success(f"Crash #{crash_id} [bold {GREEN}]REPRODUCED[/bold {GREEN}] -- device disappeared")
                 db.mark_reproduced(crash_id, True)
+                reproduced = True
             else:
                 error(f"OSError during replay: {exc}")
         finally:
@@ -1383,11 +1434,63 @@ def _crash_commands(fuzz_group):
         if replay_capture_path and os.path.exists(replay_capture_path):
             info(f"Replay capture saved to: {replay_capture_path}")
 
-        log_command("fuzz_crashes_replay", {
-            "crash_id": crash_id,
-            "protocol": crash.get("protocol", ""),
-            "capture_path": replay_capture_path,
-        }, category="fuzz", target=target_addr)
+        emit_cli_event(
+            event_type="execution_result",
+            module="fuzz",
+            run_id=run_id,
+            execution_id=f"crash_replay_{crash_id}",
+            target=target_addr,
+            message=f"Crash #{crash_id} {'reproduced' if reproduced else 'not reproduced'}",
+            details={"crash_id": crash_id, "reproduced": reproduced},
+        )
+        emit_cli_event(
+            event_type="run_completed",
+            module="fuzz",
+            run_id=run_id,
+            target=target_addr,
+            message=f"Crash replay #{crash_id} complete",
+            details={"reproduced": reproduced},
+        )
+
+        replay_artifacts = []
+        if replay_capture_path and os.path.exists(replay_capture_path):
+            replay_artifacts.append(
+                make_artifact(
+                    kind="capture",
+                    label="Crash Replay Capture",
+                    path=replay_capture_path,
+                    description="Capture generated during crash replay.",
+                )
+            )
+        envelope = build_fuzz_operation_result(
+            target=target_addr,
+            adapter="session",
+            operation="fuzz_crashes_replay",
+            title="Fuzz Crash Replay",
+            protocol=crash.get("protocol", "") or "",
+            module_outcome="reproduced" if reproduced else "completed",
+            summary_data={
+                "operation": "fuzz_crashes_replay",
+                "crash_id": crash_id,
+                "protocol": crash.get("protocol", ""),
+                "capture_path": replay_capture_path or "",
+                "reproduced": reproduced,
+            },
+            observations=[
+                f"crash_id={crash_id}",
+                f"protocol={crash.get('protocol', '')}",
+                f"capture_path={replay_capture_path or ''}",
+                f"reproduced={reproduced}",
+            ],
+            module_data={
+                "crash_id": crash_id,
+                "crash": crash,
+                "capture_path": replay_capture_path,
+                "reproduced": reproduced,
+            },
+            artifacts=replay_artifacts,
+        )
+        log_command("fuzz_crashes_replay", envelope, category="fuzz", target=target_addr)
 
     # ── crashes export ────────────────────────────────────────────────
 
@@ -1407,6 +1510,7 @@ def _crash_commands(fuzz_group):
           blue-tap fuzz crashes export -o /tmp/crashes.json
           blue-tap fuzz crashes export -s my_session
         """
+        run_id = make_fuzz_run_id()
         session_dir = _resolve_session_dir(session_name)
         if not session_dir:
             error("No session found.")
@@ -1419,15 +1523,64 @@ def _crash_commands(fuzz_group):
         if output is None:
             output = os.path.join(session_dir, "fuzz", "crashes_export.json")
 
+        emit_cli_event(
+            event_type="run_started",
+            module="fuzz",
+            run_id=run_id,
+            message="Exporting crash database",
+            details={"output": output, "format": fmt},
+        )
+
         try:
             db.export_json(output)
             success(f"Crashes exported to: {output}")
             crash_count = db.crash_count()
             info(f"Total crashes exported: {crash_count}")
-            log_command("fuzz_crashes_export", {
-                "output": output,
-                "crash_count": crash_count,
-            }, category="fuzz")
+            export_artifacts = []
+            if os.path.exists(output):
+                export_artifacts.append(
+                    make_artifact(
+                        kind="json",
+                        label="Crash Export",
+                        path=output,
+                        description="Exported fuzz crash dataset.",
+                    )
+                )
+                emit_cli_event(
+                    event_type="artifact_saved",
+                    module="fuzz",
+                    run_id=run_id,
+                    message=f"Crash export written to {output}",
+                    details={"path": output, "crash_count": crash_count},
+                )
+            emit_cli_event(
+                event_type="run_completed",
+                module="fuzz",
+                run_id=run_id,
+                message=f"Crash export complete ({crash_count} crashes)",
+                details={"output": output, "crash_count": crash_count},
+            )
+            envelope = build_fuzz_operation_result(
+                target="",
+                adapter="session",
+                operation="fuzz_crashes_export",
+                title="Fuzz Crash Export",
+                summary_data={
+                    "operation": "fuzz_crashes_export",
+                    "output": output,
+                    "crash_count": crash_count,
+                },
+                observations=[
+                    f"output={output}",
+                    f"crash_count={crash_count}",
+                ],
+                module_data={
+                    "output": output,
+                    "crash_count": crash_count,
+                },
+                artifacts=export_artifacts,
+            )
+            log_command("fuzz_crashes_export", envelope, category="fuzz")
         except OSError as exc:
             error(f"Export failed: {exc}")
         finally:

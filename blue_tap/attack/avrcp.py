@@ -71,6 +71,8 @@ class AVRCPController:
         self.address = normalize_mac(address)
         self.hci = hci
         self.dbus_path = None
+        self.player_candidates: list[dict] = []
+        self.selected_player: dict = {}
         self._bus = None
         self._player_iface = None
         self._props_iface = None
@@ -115,27 +117,56 @@ class AVRCPController:
             return False
 
         # Find MediaPlayer1 for this device
+        candidates = []
         for path, interfaces in objects.items():
             if str(path).startswith(dev_prefix) and BLUEZ_MEDIA_PLAYER in interfaces:
-                self.dbus_path = path
+                candidate = {"path": str(path)}
+                candidate.update(
+                    {
+                        str(key): _variant_to_python(value)
+                        for key, value in interfaces[BLUEZ_MEDIA_PLAYER].items()
+                    }
+                )
+                candidates.append(candidate)
+
+        if candidates:
+            self.player_candidates = sorted(candidates, key=self._player_sort_key)
+            # TODO: Hardware-validate the player-selection heuristic on live
+            # BlueZ stacks with multiple MediaPlayer1 objects (for example
+            # Spotify + OEM media sources) before treating the ranking as final.
+            bind_errors = []
+            for chosen in self.player_candidates:
+                self.dbus_path = chosen["path"]
                 try:
-                    introspection = await self._bus.introspect(BLUEZ_SERVICE, path)
-                    player_obj = self._bus.get_proxy_object(BLUEZ_SERVICE, path, introspection)
+                    introspection = await self._bus.introspect(BLUEZ_SERVICE, self.dbus_path)
+                    player_obj = self._bus.get_proxy_object(BLUEZ_SERVICE, self.dbus_path, introspection)
                     self._player_iface = player_obj.get_interface(BLUEZ_MEDIA_PLAYER)
                     self._props_iface = player_obj.get_interface(DBUS_PROPERTIES)
-                    success(f"AVRCP connected: {path}")
+                    self.selected_player = dict(chosen)
+                    success(f"AVRCP connected: {self.dbus_path}")
+                    if len(self.player_candidates) > 1:
+                        info(
+                            "Selected active player: "
+                            f"{chosen.get('Name', 'unknown')} ({chosen.get('Status', 'unknown')}) "
+                            f"from {len(self.player_candidates)} candidate(s)"
+                        )
+                    break
                 except Exception as e:
-                    error(f"Failed to get player interface: {e}")
-                    if self._bus:
-                        try:
-                            self._bus.disconnect()
-                        except Exception:
-                            pass
-                        self._bus = None
-                    return False
+                    bind_errors.append(f"{self.dbus_path}: {e}")
+                    self._player_iface = None
+                    self._props_iface = None
+            if not self._player_iface or not self._props_iface:
+                error(f"Failed to get player interface: {'; '.join(bind_errors)}")
+                if self._bus:
+                    try:
+                        self._bus.disconnect()
+                    except Exception:
+                        pass
+                    self._bus = None
+                return False
 
-                await self._find_transport(objects, dev_prefix)
-                return True
+            await self._find_transport(objects, dev_prefix)
+            return True
 
         error(f"No MediaPlayer1 found for {self.address}")
         warning("Ensure the device is paired, connected, and playing media")
@@ -162,6 +193,8 @@ class AVRCPController:
         self._transport_props = None
         self._bus = None
         self.dbus_path = None
+        self.player_candidates = []
+        self.selected_player = {}
         info("AVRCP disconnected")
 
     # ========================================================================
@@ -289,6 +322,41 @@ class AVRCPController:
         except Exception as e:
             error(f"Failed to get player info: {e}")
             return {}
+
+    def get_metadata_snapshot(self) -> dict:
+        """Return a consolidated snapshot of player, track, and settings."""
+        track = self.get_track_info()
+        status = self.get_status()
+        player = self.get_player_info()
+        settings = self.get_player_settings()
+        return {
+            "status": status,
+            "track": track,
+            "player": player,
+            "settings": settings,
+            "active_app": player.get("Name", ""),
+            "selection": self.get_selection_diagnostics(),
+        }
+
+    def get_selection_diagnostics(self) -> dict:
+        """Expose which player candidate was selected and why."""
+        selected = self.selected_player or (self.player_candidates[0] if self.player_candidates else {})
+        return {
+            "selected_path": self.dbus_path or "",
+            "candidate_count": len(self.player_candidates),
+            "selected_name": selected.get("Name", ""),
+            "selected_status": selected.get("Status", ""),
+            "candidates": [
+                {
+                    "path": item.get("path", ""),
+                    "name": item.get("Name", ""),
+                    "status": item.get("Status", ""),
+                    "browsable": item.get("Browsable"),
+                    "searchable": item.get("Searchable"),
+                }
+                for item in self.player_candidates
+            ],
+        }
 
     def get_player_settings(self) -> dict:
         """Read player application settings (equalizer, repeat, shuffle)."""
@@ -480,3 +548,14 @@ class AVRCPController:
             bus.remove_message_handler(message_handler)
             bus.disconnect()
             success("Metadata monitoring stopped")
+
+    @staticmethod
+    def _player_sort_key(candidate: dict) -> tuple[int, int, int, str]:
+        status = str(candidate.get("Status", "")).lower()
+        name = str(candidate.get("Name", ""))
+        return (
+            0 if status == "playing" else 1 if status == "paused" else 2,
+            0 if name else 1,
+            0 if candidate.get("Browsable") else 1,
+            str(candidate.get("path", "")),
+        )

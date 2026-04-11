@@ -31,6 +31,7 @@ import socket
 import time
 import wave
 
+from blue_tap.utils.bt_helpers import normalize_mac
 from blue_tap.utils.output import info, success, error, warning
 
 
@@ -60,7 +61,7 @@ class HFPClient:
     """
 
     def __init__(self, address: str, channel: int | None = None):
-        self.address = address
+        self.address = normalize_mac(address)
         self.channel = channel
         self.rfcomm_sock = None
         self.sco_sock = None
@@ -330,6 +331,10 @@ class HFPClient:
         """Get current call list."""
         return self._send_at("AT+CLCC")
 
+    def get_call_list_parsed(self) -> list[dict]:
+        """Get current call list parsed into structured entries."""
+        return self.parse_clcc_response(self.get_call_list())
+
     def get_operator(self) -> str:
         """Get network operator name."""
         return self._send_at("AT+COPS?")
@@ -524,19 +529,10 @@ class HFPClient:
                 if data:
                     buffer += data
                     text = buffer.decode("utf-8", errors="replace")
+                    self._ingest_unsolicited_response(text)
 
                     if "RING" in text or "+CLIP:" in text:
-                        result = {"number": "", "name": "", "type": 0}
-                        # Parse +CLIP: "number",type,,"name"
-                        clip_m = re.search(
-                            r'\+CLIP:\s*"([^"]*)",\s*(\d+)(?:,\s*,\s*"([^"]*)")?',
-                            text
-                        )
-                        if clip_m:
-                            result["number"] = clip_m.group(1)
-                            result["type"] = int(clip_m.group(2))
-                            if clip_m.group(3):
-                                result["name"] = clip_m.group(3)
+                        result = self.parse_clip_response(text)
                         success(f"Incoming call: {result['number']} ({result.get('name', 'Unknown')})")
                         return result
             except TimeoutError:
@@ -566,6 +562,7 @@ class HFPClient:
             # Collect response
             response = b""
             deadline = time.time() + timeout
+            terminal_codes = ["OK", "ERROR", "+CME ERROR", "NO CARRIER", "BUSY", "NO ANSWER"]
             while time.time() < deadline:
                 try:
                     data = self.rfcomm_sock.recv(1024)
@@ -573,7 +570,7 @@ class HFPClient:
                         response += data
                         # Check for final result codes
                         text = response.decode("utf-8", errors="replace")
-                        if any(code in text for code in ["OK", "ERROR", "+CME ERROR"]):
+                        if any(code in text for code in terminal_codes):
                             break
                 except TimeoutError:
                     continue
@@ -583,6 +580,7 @@ class HFPClient:
             # Normalize line endings for cross-platform tolerance
             result = response.decode("utf-8", errors="replace")
             result = result.replace("\r\n", "\n").replace("\r", "\n").strip()
+            self._ingest_unsolicited_response(result)
             if result:
                 info(f"AT> {command}")
                 for line in result.splitlines():
@@ -603,7 +601,7 @@ class HFPClient:
             warning(f"No indicators found in CIND mapping: {response[:80]}")
             return
         for i, name in enumerate(indicators):
-            self.indicators[name] = i
+            self.indicators[name] = i + 1
 
     def _parse_indicator_values(self, response: str):
         """Parse +CIND? response for current indicator values.
@@ -625,3 +623,73 @@ class HFPClient:
                     self.indicator_values[indicator_names[i]] = int(val)
                 except ValueError:
                     pass
+
+    def _ingest_unsolicited_response(self, response: str):
+        """Update local state from unsolicited HFP lines embedded in responses."""
+        # TODO: Validate unsolicited parsing against live AG traces from at
+        # least one modern IVI stack. The parser is intentionally tolerant, but
+        # real devices often interleave +CIEV/+CLIP/RING with vendor lines.
+        for update in self.parse_ciev_updates(response):
+            if update["name"]:
+                self.indicator_values[update["name"]] = update["value"]
+        clip = self.parse_clip_response(response)
+        if clip.get("number"):
+            self.indicator_values["last_clip_number"] = clip["number"]
+        if "RING" in (response or ""):
+            self.indicator_values["ring"] = 1
+
+    def parse_ciev_updates(self, response: str) -> list[dict]:
+        """Parse unsolicited +CIEV indicator updates."""
+        updates = []
+        for idx_str, value_str in re.findall(r"\+CIEV:\s*(\d+)\s*,\s*(\d+)", response or ""):
+            indicator_index = int(idx_str)
+            value = int(value_str)
+            name = ""
+            for indicator_name, mapped_index in self.indicators.items():
+                if mapped_index == indicator_index:
+                    name = indicator_name
+                    break
+            updates.append({"index": indicator_index, "name": name, "value": value})
+        return updates
+
+    @staticmethod
+    def parse_clip_response(response: str) -> dict:
+        """Parse +CLIP caller ID information from an HFP response."""
+        result = {"number": "", "name": "", "type": 0}
+        clip_m = re.search(
+            r'\+CLIP:\s*"([^"]*)",\s*(\d+)(?:,[^,\n\r]*){0,2}(?:,\s*"([^"]*)")?',
+            response or "",
+        )
+        if clip_m:
+            result["number"] = clip_m.group(1)
+            result["type"] = int(clip_m.group(2))
+            if clip_m.group(3):
+                result["name"] = clip_m.group(3)
+        return result
+
+    @staticmethod
+    def parse_clcc_response(response: str) -> list[dict]:
+        """Parse +CLCC current-call-list entries into structured records."""
+        calls = []
+        for line in (response or "").splitlines():
+            line = line.strip()
+            if not line.startswith("+CLCC:"):
+                continue
+            match = re.match(
+                r'\+CLCC:\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+)(?:,\s*"([^"]*)",\s*(\d+))?',
+                line,
+            )
+            if not match:
+                continue
+            calls.append(
+                {
+                    "index": int(match.group(1)),
+                    "direction": int(match.group(2)),
+                    "status": int(match.group(3)),
+                    "mode": int(match.group(4)),
+                    "multiparty": int(match.group(5)),
+                    "number": match.group(6) or "",
+                    "type": int(match.group(7)) if match.group(7) else None,
+                }
+            )
+        return calls

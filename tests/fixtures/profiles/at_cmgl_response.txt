@@ -1,0 +1,8 @@
+AT+CMGL="ALL"
++CMGL: 1,"REC READ","+1234567890","","24/04/10,12:00:00+00"
+hello world
++CMGL: 2,"REC UNREAD","+1987654321","","24/04/10,12:05:00+00"
+line one
+line two
+
+OK

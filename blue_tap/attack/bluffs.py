@@ -16,6 +16,12 @@ import time
 from blue_tap.utils.bt_helpers import normalize_mac, run_cmd
 from blue_tap.core.spoofer import clone_device_identity
 from blue_tap.utils.output import info, success, error, warning
+from blue_tap.core.result_schema import (
+    EXECUTION_COMPLETED, EXECUTION_FAILED, EXECUTION_ERROR,
+    EXECUTION_SKIPPED,
+    build_run_envelope, make_execution, make_evidence, make_run_id, now_iso,
+)
+from blue_tap.core.cli_events import emit_cli_event
 
 
 class BLUFFSAttack:
@@ -31,6 +37,18 @@ class BLUFFSAttack:
         self.target = normalize_mac(target)
         self.phone_address = phone_address
         self.hci = hci
+        self.run_id = make_run_id("bluffs")
+        self._started_at = now_iso()
+        self._cli_events: list[dict] = []
+        self._executions: list[dict] = []
+
+    def _emit(self, event_type: str, message: str, **details):
+        evt = emit_cli_event(
+            event_type=event_type, module="attack", run_id=self.run_id,
+            target=self.target, adapter=self.hci, message=message,
+            details=details,
+        )
+        self._cli_events.append(evt)
 
     def probe(self) -> dict:
         """Check if target is vulnerable to BLUFFS.
@@ -60,6 +78,8 @@ class BLUFFSAttack:
         hci_idx = int(self.hci.replace("hci", "")) if self.hci.startswith("hci") else 1
 
         info(f"[BLUFFS] Starting vulnerability probe against {self.target}")
+        phase_start = now_iso()
+        self._emit("phase_started", "BLUFFS vulnerability probe")
 
         # Verify DarkFirmware
         try:
@@ -67,10 +87,46 @@ class BLUFFSAttack:
             if not fw.is_darkfirmware_loaded(self.hci):
                 warning("[BLUFFS] DarkFirmware not loaded on adapter")
                 result["details"].append("DarkFirmware not available — cannot probe at LMP level")
+                self._executions.append(make_execution(
+                    kind="cve_check",
+                    id="bluffs-probe",
+                    title="BLUFFS Vulnerability Probe",
+                    module="attack",
+                    protocol="lmp",
+                    execution_status=EXECUTION_FAILED,
+                    module_outcome="failed",
+                    evidence=make_evidence(
+                        summary="DarkFirmware not loaded — cannot probe at LMP level",
+                        confidence="high",
+                        observations=result["details"],
+                    ),
+                    started_at=phase_start,
+                    completed_at=now_iso(),
+                    tags=["cve", "CVE-2023-24023", "bluffs", "probe"],
+                ))
+                self._emit("execution_result", "BLUFFS probe failed: DarkFirmware not available")
                 return result
         except Exception as exc:
             error(f"[BLUFFS] Failed to check DarkFirmware: {exc}")
             result["details"].append(f"DarkFirmware check failed: {exc}")
+            self._executions.append(make_execution(
+                kind="cve_check",
+                id="bluffs-probe",
+                title="BLUFFS Vulnerability Probe",
+                module="attack",
+                protocol="lmp",
+                execution_status=EXECUTION_FAILED,
+                module_outcome="failed",
+                evidence=make_evidence(
+                    summary=f"DarkFirmware check failed: {exc}",
+                    confidence="high",
+                    observations=result["details"],
+                ),
+                started_at=phase_start,
+                completed_at=now_iso(),
+                tags=["cve", "CVE-2023-24023", "bluffs", "probe"],
+            ))
+            self._emit("execution_result", f"BLUFFS probe failed: DarkFirmware check error: {exc}")
             return result
 
         info("[BLUFFS] Step 1: Opening DarkFirmware socket on hci{0}".format(hci_idx))
@@ -132,6 +188,26 @@ class BLUFFSAttack:
             error(f"[BLUFFS] Probe error: {exc}")
             result["details"].append(f"Probe error: {exc}")
 
+        outcome = "confirmed" if result["vulnerable"] else "not_applicable"
+        self._executions.append(make_execution(
+            kind="cve_check",
+            id="bluffs-probe",
+            title="BLUFFS Vulnerability Probe",
+            module="attack",
+            protocol="lmp",
+            execution_status=EXECUTION_COMPLETED,
+            module_outcome=outcome,
+            evidence=make_evidence(
+                summary="Target is vulnerable to BLUFFS SC downgrade" if result["vulnerable"]
+                        else "No BLUFFS vulnerability confirmed",
+                confidence=result.get("confidence", "low"),
+                observations=result["details"],
+            ),
+            started_at=phase_start,
+            completed_at=now_iso(),
+            tags=["cve", "CVE-2023-24023", "bluffs", "probe"],
+        ))
+        self._emit("execution_result", f"BLUFFS probe completed: {outcome}")
         return result
 
     def execute_a1(self) -> dict:
@@ -162,6 +238,8 @@ class BLUFFSAttack:
         hci_idx = int(self.hci.replace("hci", "")) if self.hci.startswith("hci") else 1
 
         info(f"[BLUFFS] Starting A1 (LSC Central) against {self.target}")
+        phase_start = now_iso()
+        self._emit("phase_started", "BLUFFS A1 (LSC Central) attack")
 
         # Verify DarkFirmware
         try:
@@ -169,10 +247,46 @@ class BLUFFSAttack:
             if not fw.is_darkfirmware_loaded(self.hci):
                 error("[BLUFFS] DarkFirmware not loaded — A1 requires LMP injection")
                 result["details"].append("DarkFirmware not available")
+                self._executions.append(make_execution(
+                    kind="cve_check",
+                    id="bluffs-a1",
+                    title="BLUFFS A1: LSC Central",
+                    module="attack",
+                    protocol="lmp",
+                    execution_status=EXECUTION_FAILED,
+                    module_outcome="failed",
+                    evidence=make_evidence(
+                        summary="DarkFirmware not loaded — A1 requires LMP injection",
+                        confidence="high",
+                        observations=result["details"],
+                    ),
+                    started_at=phase_start,
+                    completed_at=now_iso(),
+                    tags=["cve", "CVE-2023-24023", "bluffs", "a1"],
+                ))
+                self._emit("execution_result", "BLUFFS A1 failed: DarkFirmware not available")
                 return result
         except Exception as exc:
             error(f"[BLUFFS] Failed: {exc}")
             result["details"].append(f"DarkFirmware check failed: {exc}")
+            self._executions.append(make_execution(
+                kind="cve_check",
+                id="bluffs-a1",
+                title="BLUFFS A1: LSC Central",
+                module="attack",
+                protocol="lmp",
+                execution_status=EXECUTION_FAILED,
+                module_outcome="failed",
+                evidence=make_evidence(
+                    summary=f"DarkFirmware check failed: {exc}",
+                    confidence="high",
+                    observations=result["details"],
+                ),
+                started_at=phase_start,
+                completed_at=now_iso(),
+                tags=["cve", "CVE-2023-24023", "bluffs", "a1"],
+            ))
+            self._emit("execution_result", f"BLUFFS A1 failed: DarkFirmware check error: {exc}")
             return result
 
         # Step 1: Clone identity if phone_address provided (skip if empty)
@@ -241,6 +355,26 @@ class BLUFFSAttack:
             error(f"[BLUFFS] A1 error: {exc}")
             result["details"].append(f"Error: {exc}")
 
+        outcome = "success" if result["success"] else "failed"
+        self._executions.append(make_execution(
+            kind="cve_check",
+            id="bluffs-a1",
+            title="BLUFFS A1: LSC Central",
+            module="attack",
+            protocol="lmp",
+            execution_status=EXECUTION_COMPLETED,
+            module_outcome=outcome,
+            evidence=make_evidence(
+                summary="A1 session key downgrade sequence completed" if result["success"]
+                        else "A1 did not succeed — no LMP responses observed",
+                confidence="medium",
+                observations=result["details"],
+            ),
+            started_at=phase_start,
+            completed_at=now_iso(),
+            tags=["cve", "CVE-2023-24023", "bluffs", "a1"],
+        ))
+        self._emit("execution_result", f"BLUFFS A1 completed: {outcome}")
         return result
 
     def execute_a3(self) -> dict:
@@ -274,6 +408,8 @@ class BLUFFSAttack:
         hci_idx = int(self.hci.replace("hci", "")) if self.hci.startswith("hci") else 1
 
         info(f"[BLUFFS] Starting A3 (SC Central downgrade) against {self.target}")
+        phase_start = now_iso()
+        self._emit("phase_started", "BLUFFS A3 (SC Central downgrade) attack")
 
         # Verify DarkFirmware
         try:
@@ -281,10 +417,46 @@ class BLUFFSAttack:
             if not fw.is_darkfirmware_loaded(self.hci):
                 error("[BLUFFS] DarkFirmware not loaded — A3 requires LMP injection")
                 result["details"].append("DarkFirmware not available")
+                self._executions.append(make_execution(
+                    kind="cve_check",
+                    id="bluffs-a3",
+                    title="BLUFFS A3: SC Central Downgrade",
+                    module="attack",
+                    protocol="lmp",
+                    execution_status=EXECUTION_FAILED,
+                    module_outcome="failed",
+                    evidence=make_evidence(
+                        summary="DarkFirmware not loaded — A3 requires LMP injection",
+                        confidence="high",
+                        observations=result["details"],
+                    ),
+                    started_at=phase_start,
+                    completed_at=now_iso(),
+                    tags=["cve", "CVE-2023-24023", "bluffs", "a3"],
+                ))
+                self._emit("execution_result", "BLUFFS A3 failed: DarkFirmware not available")
                 return result
         except Exception as exc:
             error(f"[BLUFFS] Failed: {exc}")
             result["details"].append(f"DarkFirmware check failed: {exc}")
+            self._executions.append(make_execution(
+                kind="cve_check",
+                id="bluffs-a3",
+                title="BLUFFS A3: SC Central Downgrade",
+                module="attack",
+                protocol="lmp",
+                execution_status=EXECUTION_FAILED,
+                module_outcome="failed",
+                evidence=make_evidence(
+                    summary=f"DarkFirmware check failed: {exc}",
+                    confidence="high",
+                    observations=result["details"],
+                ),
+                started_at=phase_start,
+                completed_at=now_iso(),
+                tags=["cve", "CVE-2023-24023", "bluffs", "a3"],
+            ))
+            self._emit("execution_result", f"BLUFFS A3 failed: DarkFirmware check error: {exc}")
             return result
 
         # Step 1: Connect
@@ -375,7 +547,49 @@ class BLUFFSAttack:
             error(f"[BLUFFS] A3 error: {exc}")
             result["details"].append(f"Error: {exc}")
 
+        outcome = "success" if result["success"] else "failed"
+        self._executions.append(make_execution(
+            kind="cve_check",
+            id="bluffs-a3",
+            title="BLUFFS A3: SC Central Downgrade",
+            module="attack",
+            protocol="lmp",
+            execution_status=EXECUTION_COMPLETED,
+            module_outcome=outcome,
+            evidence=make_evidence(
+                summary="A3 SC downgrade successful" if result["success"]
+                        else "A3 SC downgrade did not succeed",
+                confidence="medium",
+                observations=result["details"],
+            ),
+            started_at=phase_start,
+            completed_at=now_iso(),
+            tags=["cve", "CVE-2023-24023", "bluffs", "a3"],
+        ))
+        self._emit("execution_result", f"BLUFFS A3 completed: {outcome}")
         return result
+
+    def build_envelope(self) -> dict:
+        capability_limitations = [
+            "Requires DarkFirmware on RTL8761B for LMP injection and monitoring."
+        ]
+        return build_run_envelope(
+            schema="blue_tap.attack.result",
+            module="attack",
+            target=self.target,
+            adapter=self.hci,
+            operator_context={"command": "bluffs", "cve": "CVE-2023-24023"},
+            summary={
+                "operation": "bluffs",
+                "cve": "CVE-2023-24023",
+                "success": any(e.get("module_outcome") == "success" for e in self._executions),
+                "capability_limitations": capability_limitations,
+            },
+            executions=self._executions,
+            module_data={"cli_events": self._cli_events, "capability_limitations": capability_limitations},
+            started_at=self._started_at,
+            run_id=self.run_id,
+        )
 
     def execute(self, variant: str = "a3") -> dict:
         """Execute BLUFFS attack with the specified variant.
@@ -386,23 +600,62 @@ class BLUFFSAttack:
         Returns:
             dict with attack results.
         """
+        self._emit("run_started", f"BLUFFS attack started (variant={variant})")
+
         if variant == "probe":
-            return self.probe()
+            result = self.probe()
         elif variant == "a1":
-            return self.execute_a1()
+            result = self.execute_a1()
         elif variant == "a3":
-            return self.execute_a3()
+            result = self.execute_a3()
         elif variant in ("a2", "a4"):
             # A2/A4 are Peripheral variants — placeholder
             info(f"[BLUFFS] Variant {variant} (Peripheral role) not yet implemented")
             info("[BLUFFS] Use A1 (LSC Central) or A3 (SC Central downgrade) instead")
-            return {
+            result = {
                 "variant": variant,
                 "success": False,
                 "details": [f"Variant {variant} not yet implemented — "
                             "requires Peripheral role setup"],
             }
+            self._executions.append(make_execution(
+                kind="cve_check",
+                id=f"bluffs-{variant}",
+                title=f"BLUFFS {variant.upper()}: Peripheral Role (Not Implemented)",
+                module="attack",
+                protocol="lmp",
+                execution_status=EXECUTION_SKIPPED,
+                module_outcome="skipped",
+                evidence=make_evidence(
+                    summary=f"Variant {variant} not yet implemented — requires Peripheral role setup",
+                    confidence="high",
+                    observations=result["details"],
+                ),
+                tags=["cve", "CVE-2023-24023", "bluffs", variant],
+                started_at=now_iso(), completed_at=now_iso(),
+            ))
+            self._emit("execution_skipped", f"BLUFFS variant {variant} not yet implemented")
         else:
             error(f"[BLUFFS] Unknown variant: {variant}")
-            return {"variant": variant, "success": False,
-                    "error": f"Unknown variant: {variant}"}
+            result = {"variant": variant, "success": False,
+                      "error": f"Unknown variant: {variant}"}
+            self._executions.append(make_execution(
+                kind="cve_check",
+                id=f"bluffs-{variant}",
+                title=f"BLUFFS Unknown Variant: {variant}",
+                module="attack",
+                protocol="lmp",
+                execution_status=EXECUTION_SKIPPED,
+                module_outcome="skipped",
+                evidence=make_evidence(
+                    summary=f"Unknown BLUFFS variant: {variant}",
+                    confidence="high",
+                    observations=[f"Unknown variant: {variant}"],
+                ),
+                tags=["cve", "CVE-2023-24023", "bluffs"],
+                started_at=now_iso(), completed_at=now_iso(),
+            ))
+            self._emit("execution_skipped", f"BLUFFS unknown variant: {variant}")
+
+        self._emit("run_completed", f"BLUFFS attack completed (variant={variant})")
+        return result

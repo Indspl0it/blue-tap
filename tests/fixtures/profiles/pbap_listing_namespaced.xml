@@ -1,0 +1,5 @@
+<?xml version="1.0"?>
+<pb:vCard-listing xmlns:pb="urn:bluetooth:pbap" version="1.0">
+  <pb:card handle="1.vcf" name="Alice Example" />
+  <pb:card handle="2.vcf" name="Bob &amp; Co" />
+</pb:vCard-listing>

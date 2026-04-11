@@ -22,6 +22,7 @@ import struct
 import time
 
 from blue_tap.attack.cve_framework import make_cve_finding as _finding
+from blue_tap.utils.bt_helpers import get_adapter_address
 
 AF_BLUETOOTH = 31
 BTPROTO_L2CAP = 0
@@ -56,7 +57,7 @@ class _SockAddrL2(ctypes.Structure):
 _BDADDR_LE_PUBLIC = 1
 
 
-def _connect_ble_smp(address: str, timeout: float = 8.0) -> "socket.socket | None":
+def _connect_ble_smp(address: str, timeout: float = 8.0, hci: str | None = None) -> "socket.socket | None":
     """Open a SEQPACKET socket connected to BLE SMP fixed channel (CID 0x0006).
 
     With this approach recv/send operate on the raw SMP payload (no L2CAP header).
@@ -64,9 +65,23 @@ def _connect_ble_smp(address: str, timeout: float = 8.0) -> "socket.socket | Non
     """
     if _libc is None:
         return None
+    sock = None
     try:
         sock = socket.socket(AF_BLUETOOTH, socket.SOCK_SEQPACKET, BTPROTO_L2CAP)
         sock.settimeout(timeout)
+
+        if hci:
+            local_addr = get_adapter_address(hci)
+            if local_addr:
+                bind_sa = _SockAddrL2()
+                bind_sa.l2_family = AF_BLUETOOTH
+                bind_sa.l2_psm = 0
+                bind_parts = [int(x, 16) for x in local_addr.split(":")]
+                for i, byte_val in enumerate(reversed(bind_parts)):
+                    bind_sa.l2_bdaddr.b[i] = byte_val
+                bind_sa.l2_cid = 0
+                bind_sa.l2_bdaddr_type = _BDADDR_LE_PUBLIC
+                _libc.bind(sock.fileno(), ctypes.byref(bind_sa), ctypes.sizeof(bind_sa))
 
         sa = _SockAddrL2()
         sa.l2_family = AF_BLUETOOTH
@@ -83,6 +98,11 @@ def _connect_ble_smp(address: str, timeout: float = 8.0) -> "socket.socket | Non
             return None
         return sock
     except Exception:
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
         return None
 # ---------------------------------------------------------------------------
 # Check 1: CVE-2024-34722 — Android BLE Legacy Pairing Auth Bypass

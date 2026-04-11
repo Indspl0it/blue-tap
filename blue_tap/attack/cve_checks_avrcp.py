@@ -33,6 +33,7 @@ def _connect_avctp(address: str, timeout: float = 5.0):
 
     Returns the connected socket, or None on failure.
     """
+    sock = None
     try:
         AF_BLUETOOTH = getattr(socket, "AF_BLUETOOTH", 31)
         BTPROTO_L2CAP = getattr(socket, "BTPROTO_L2CAP", 0)
@@ -42,6 +43,11 @@ def _connect_avctp(address: str, timeout: float = 5.0):
         sock.connect((address, 0x0017))
         return sock
     except Exception:
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
         return None
 
 

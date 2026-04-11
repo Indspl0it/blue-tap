@@ -34,6 +34,7 @@ def _build_protocol_registry() -> dict[str, Callable[[], list]]:
     from blue_tap.fuzz.protocols.bnep import generate_all_bnep_fuzz_cases
     from blue_tap.fuzz.protocols.rfcomm import generate_all_rfcomm_fuzz_cases
     from blue_tap.fuzz.protocols.l2cap import generate_all_l2cap_fuzz_cases
+    from blue_tap.fuzz.protocols.l2cap_raw import generate_all_l2cap_sig_fuzz_cases
     from blue_tap.fuzz.protocols.lmp import generate_all_lmp_fuzz_cases
 
     def _lmp_bytes_only() -> list[bytes]:
@@ -54,6 +55,7 @@ def _build_protocol_registry() -> dict[str, Callable[[], list]]:
         "bnep": generate_all_bnep_fuzz_cases,
         "rfcomm": generate_all_rfcomm_fuzz_cases,
         "l2cap": generate_all_l2cap_fuzz_cases,
+        "l2cap-sig": generate_all_l2cap_sig_fuzz_cases,
         "lmp": _lmp_bytes_only,
     }
 
@@ -95,5 +97,6 @@ PROTOCOLS: frozenset[str] = frozenset({
     "bnep",
     "rfcomm",
     "l2cap",
+    "l2cap-sig",
     "lmp",
 })

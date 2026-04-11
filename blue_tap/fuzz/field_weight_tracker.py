@@ -85,6 +85,14 @@ PROTOCOL_FIELD_MAP: dict[str, list[FieldDescriptor]] = {
         ("code", 0, 1, "uint"),
         ("data", 1, -1, "raw"),
     ],
+    "l2cap-sig": [
+        ("length", 0, 2, "length"),
+        ("cid", 2, 2, "uint"),
+        ("code", 4, 1, "uint"),
+        ("identifier", 5, 1, "uint"),
+        ("sig_length", 6, 2, "length"),
+        ("payload", 8, -1, "raw"),
+    ],
     # OBEX (generic — covers PBAP, MAP, OPP)
     "obex-pbap": [
         ("opcode", 0, 1, "uint"),

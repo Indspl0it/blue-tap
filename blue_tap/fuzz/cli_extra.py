@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 import time
 from pathlib import Path
+from typing import Any
 
 import click
 from rich.progress import (
@@ -35,6 +36,8 @@ from blue_tap.utils.output import (
 )
 from blue_tap.utils.interactive import resolve_address
 from blue_tap.utils.session import get_session, log_command
+from blue_tap.core.cli_events import emit_cli_event
+from blue_tap.core.fuzz_framework import make_fuzz_run_id
 
 
 # ---------------------------------------------------------------------------
@@ -58,12 +61,175 @@ _PROTOCOL_SHORT_MAP: dict[str, list[str]] = {
 }
 
 
+def _current_adapter() -> str:
+    session = get_session()
+    if session is None:
+        return ""
+    return str(session.metadata.get("adapter", "") or "")
+
+
 def _expand_protocol_names(short_names: list[str]) -> list[str]:
     """Expand short CLI protocol names to corpus generator keys."""
     expanded = []
     for name in short_names:
         expanded.extend(_PROTOCOL_SHORT_MAP.get(name, [name]))
     return expanded
+
+
+def _run_via_engine(
+    address: str,
+    protocol: str,
+    cases: list[bytes],
+    session_dir: str = "",
+    delay: float = 0.5,
+    timeout: float = 5.0,
+    transport_override: dict | None = None,
+) -> dict:
+    """Run fuzz cases through the campaign engine for standardized envelopes.
+
+    Only protocols present in engine.PROTOCOL_TRANSPORT_MAP are supported.
+    Callers should verify compatibility before using this helper.
+    """
+    from blue_tap.fuzz.engine import FuzzCampaign
+    from blue_tap.fuzz.cli_commands import ensure_corpus
+
+    if not session_dir:
+        session = get_session()
+        if session:
+            session_dir = session.dir
+        else:
+            session_dir = os.path.join("sessions", "fuzz_adhoc")
+
+    # Ensure corpus is generated
+    ensure_corpus(session_dir, protocols=[protocol])
+
+    campaign = FuzzCampaign(
+        target=address,
+        protocols=[protocol],
+        session_dir=session_dir,
+        transport_overrides={protocol: dict(transport_override or {})} if transport_override else None,
+    )
+    envelope = campaign.run_single_protocol(protocol, cases, delay=delay, recv_timeout=timeout)
+
+    # Extract the result dict for the summary display
+    summary = envelope.get("summary", {})
+    return {
+        "sent": summary.get("sent", 0),
+        "crashes": summary.get("crashes", 0),
+        "errors": summary.get("errors", 0),
+        "elapsed": summary.get("elapsed_seconds", 0.0),
+        "total_cases": summary.get("total_cases", len(cases)),
+        "crash_db_path": envelope.get("module_data", {}).get("result", {}).get("crash_db_path", ""),
+        "logged_by_engine": True,
+    }
+
+
+def _normalize_batch_run(run: tuple[str, list[bytes], dict | None] | dict[str, Any]) -> dict[str, Any]:
+    """Normalize legacy tuple-style and explicit dict-style batch run configs."""
+    if isinstance(run, dict):
+        return {
+            "name": str(run.get("name") or run.get("protocol")),
+            "protocol": str(run["protocol"]),
+            "cases": list(run.get("cases", [])),
+            "transport_override": dict(run.get("transport_override") or {}) or None,
+            "surface": run.get("surface"),
+        }
+    protocol, cases, override = run
+    return {
+        "name": protocol,
+        "protocol": protocol,
+        "cases": cases,
+        "transport_override": override,
+        "surface": None,
+    }
+
+
+def _run_protocol_batch(
+    address: str,
+    *,
+    runs: list[tuple[str, list[bytes], dict | None] | dict[str, Any]],
+    session_dir: str = "",
+    delay: float = 0.5,
+    timeout: float = 5.0,
+) -> dict:
+    """Run multiple protocol-specific fuzz batches and aggregate the outcome."""
+    combined = {
+        "sent": 0,
+        "crashes": 0,
+        "errors": 0,
+        "elapsed": 0.0,
+        "total_cases": 0,
+        "crash_db_paths": [],
+        "protocols": {},
+        "logged_by_engine": True,
+    }
+    for run in runs:
+        item = _normalize_batch_run(run)
+        protocol = item["protocol"]
+        cases = item["cases"]
+        override = item["transport_override"]
+        result = _run_via_engine(
+            address,
+            protocol,
+            cases,
+            session_dir=session_dir,
+            delay=delay,
+            timeout=timeout,
+            transport_override=override,
+        )
+        combined["sent"] += int(result.get("sent", 0) or 0)
+        combined["crashes"] += int(result.get("crashes", 0) or 0)
+        combined["errors"] += int(result.get("errors", 0) or 0)
+        combined["elapsed"] += float(result.get("elapsed", 0.0) or 0.0)
+        combined["total_cases"] += int(result.get("total_cases", 0) or 0)
+        combined["logged_by_engine"] = combined["logged_by_engine"] and bool(result.get("logged_by_engine", False))
+        combined["protocols"][item["name"]] = {
+            "protocol": protocol,
+            "surface": item.get("surface"),
+            "sent": int(result.get("sent", 0) or 0),
+            "crashes": int(result.get("crashes", 0) or 0),
+            "errors": int(result.get("errors", 0) or 0),
+            "total_cases": int(result.get("total_cases", 0) or 0),
+            "elapsed": float(result.get("elapsed", 0.0) or 0.0),
+            "transport_override": dict(override or {}),
+        }
+        crash_db_path = result.get("crash_db_path", "")
+        if crash_db_path:
+            combined["crash_db_paths"].append(crash_db_path)
+    return combined
+
+
+def _discover_at_surface_channels(address: str, fallback_channel: int) -> dict[str, int]:
+    """Probe RFCOMM surfaces and choose channels for AT-capable endpoints."""
+    try:
+        from blue_tap.recon.rfcomm_scan import RFCOMMScanner
+
+        scanner = RFCOMMScanner(address)
+        results = scanner.scan_all_channels(timeout_per_ch=1.0, max_retries=0, unreachable_threshold=2)
+        at_channels = [
+            int(item["channel"])
+            for item in results
+            if item.get("status") == "open" and item.get("response_type") == "at_modem"
+        ]
+    except Exception as exc:
+        warning(f"AT surface autodiscovery failed: {exc}")
+        at_channels = []
+
+    if not at_channels:
+        return {
+            "hfp": fallback_channel,
+            "phonebook": fallback_channel,
+            "sms": fallback_channel,
+            "injection": fallback_channel,
+        }
+
+    primary = at_channels[0]
+    return {
+        "hfp": primary,
+        "phonebook": primary,
+        "sms": primary,
+        "injection": primary,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -81,6 +247,13 @@ def _run_fuzz_cases(
 ) -> dict:
     """Shared logic for per-protocol fuzz commands.
 
+    NOTE: Only the ``fuzz cve`` command still uses this function.  All other
+    per-protocol commands have been migrated to ``_run_via_engine()``.  This
+    function cannot be deleted until the CVE command is also migrated (the CVE
+    command constructs a ``transport_factory`` dynamically based on the first
+    CVE entry's protocol, which does not map cleanly to the engine's
+    single-protocol API).
+
     Connects via *transport_factory*, iterates through *cases* with a Rich
     progress bar, detects crashes, and logs them to a :class:`CrashDB`.
 
@@ -97,8 +270,11 @@ def _run_fuzz_cases(
         Summary dict with ``sent``, ``crashes``, ``errors``,
         ``elapsed``, and ``crash_db_path`` keys.
     """
+    from blue_tap.core.result_schema import now_iso
     from blue_tap.fuzz.crash_db import CrashDB, CrashType, CrashSeverity
     from blue_tap.fuzz.corpus import Corpus, generate_full_corpus
+
+    started_at = now_iso()
 
     # Ensure full corpus is generated (visible progress to user)
     if not session_dir:
@@ -129,12 +305,14 @@ def _run_fuzz_cases(
             error(f"Failed to connect to {style_target(address)} for {protocol}")
             db.close()
             return {"sent": 0, "crashes": 0, "errors": 1, "elapsed": 0.0,
-                    "crash_db_path": crash_db_path}
+                    "crash_db_path": crash_db_path, "total_cases": len(cases),
+                    "started_at": started_at, "completed_at": now_iso()}
     except Exception as exc:
         error(f"Connection error: {exc}")
         db.close()
         return {"sent": 0, "crashes": 0, "errors": 1, "elapsed": 0.0,
-                "crash_db_path": crash_db_path}
+                "crash_db_path": crash_db_path, "total_cases": len(cases),
+                "started_at": started_at, "completed_at": now_iso()}
 
     total = len(cases)
 
@@ -250,10 +428,13 @@ def _run_fuzz_cases(
         "errors": errors,
         "elapsed": elapsed,
         "crash_db_path": crash_db_path,
+        "total_cases": total,
+        "started_at": started_at,
+        "completed_at": now_iso(),
     }
 
 
-def _show_fuzz_summary(protocol: str, address: str, result: dict) -> None:
+def _show_fuzz_summary(protocol: str, address: str, result: dict, *, log_result: bool = True) -> None:
     """Print a styled summary panel after a per-protocol fuzz run."""
     crash_style = "bt.red" if result["crashes"] > 0 else "bt.green"
     items = {
@@ -268,8 +449,27 @@ def _show_fuzz_summary(protocol: str, address: str, result: dict) -> None:
     style = "red" if result["crashes"] > 0 else "green"
     summary_panel(f"Fuzz {protocol.upper()} Results", items, style=style)
 
+    if not log_result:
+        return
+
     # Log to session
-    log_command(f"fuzz_{protocol}", result, category="fuzz", target=address)
+    from blue_tap.core.fuzz_framework import build_fuzz_result
+
+    session = get_session()
+    adapter = ""
+    if session is not None:
+        adapter = str(session.metadata.get("adapter", "") or "")
+
+    envelope = build_fuzz_result(
+        target=address,
+        adapter=adapter,
+        command=f"fuzz_{protocol}",
+        protocol=protocol,
+        result=result,
+        started_at=result.get("started_at"),
+        completed_at=result.get("completed_at"),
+    )
+    log_command(f"fuzz_{protocol}", envelope, category="fuzz", target=address)
 
 
 # ===========================================================================
@@ -309,7 +509,6 @@ def register_extra_commands(fuzz_group):
           blue-tap fuzz obex --channel 19 -p pbap
         """
         from blue_tap.fuzz.protocols.obex import generate_all_obex_fuzz_cases
-        from blue_tap.fuzz.transport import RFCOMMTransport
 
         address = resolve_address(address)
         if not address:
@@ -330,16 +529,13 @@ def register_extra_commands(fuzz_group):
 
             info(f"Generated {len(flat_cases)} OBEX fuzz cases for {profile}")
 
-            rfcomm_channel = channel if channel else 19  # PBAP commonly on 19
-            def transport_factory(addr):
-                return RFCOMMTransport(addr, rfcomm_channel)
-
-            result = _run_fuzz_cases(
-                address, "obex", flat_cases, transport_factory,
+            proto_key = f"obex-{profile}"
+            result = _run_via_engine(
+                address, proto_key, flat_cases,
                 delay=delay, timeout=timeout,
             )
 
-        _show_fuzz_summary("obex", address, result)
+        _show_fuzz_summary(f"obex-{profile}", address, result, log_result=not result.get("logged_by_engine", False))
 
     # -------------------------------------------------------------------
     # blue-tap fuzz ble-att
@@ -399,17 +595,12 @@ def register_extra_commands(fuzz_group):
 
             info(f"Generated {len(cases)} ATT fuzz cases")
 
-            addr_type = BLETransport._detect_address_type(address)
-
-            def transport_factory(addr):
-                return BLETransport(addr, address_type=addr_type)
-
-            result = _run_fuzz_cases(
-                address, "ble-att", cases, transport_factory,
+            result = _run_via_engine(
+                address, "ble-att", cases,
                 delay=delay, timeout=timeout,
             )
 
-        _show_fuzz_summary("ble-att", address, result)
+        _show_fuzz_summary("ble-att", address, result, log_result=not result.get("logged_by_engine", False))
 
     # -------------------------------------------------------------------
     # blue-tap fuzz ble-smp
@@ -468,17 +659,12 @@ def register_extra_commands(fuzz_group):
 
             info(f"Generated {len(cases)} SMP fuzz cases")
 
-            addr_type = BLETransport._detect_address_type(address)
-
-            def transport_factory(addr):
-                return BLETransport(addr, cid=BLETransport.SMP_CID, address_type=addr_type)
-
-            result = _run_fuzz_cases(
-                address, "ble-smp", cases, transport_factory,
+            result = _run_via_engine(
+                address, "ble-smp", cases,
                 delay=delay, timeout=timeout,
             )
 
-        _show_fuzz_summary("ble-smp", address, result)
+        _show_fuzz_summary("ble-smp", address, result, log_result=not result.get("logged_by_engine", False))
 
     # -------------------------------------------------------------------
     # blue-tap fuzz bnep
@@ -533,16 +719,12 @@ def register_extra_commands(fuzz_group):
 
             info(f"Generated {len(cases)} BNEP fuzz cases")
 
-            # BNEP runs on L2CAP PSM 15
-            def transport_factory(addr):
-                return L2CAPTransport(addr, psm=15)
-
-            result = _run_fuzz_cases(
-                address, "bnep", cases, transport_factory,
+            result = _run_via_engine(
+                address, "bnep", cases,
                 delay=delay, timeout=5.0,
             )
 
-        _show_fuzz_summary("bnep", address, result)
+        _show_fuzz_summary("bnep", address, result, log_result=not result.get("logged_by_engine", False))
 
     # -------------------------------------------------------------------
     # blue-tap fuzz rfcomm-raw
@@ -598,16 +780,12 @@ def register_extra_commands(fuzz_group):
 
             info(f"Generated {len(cases)} RFCOMM fuzz cases")
 
-            # Raw RFCOMM via L2CAP PSM 3
-            def transport_factory(addr):
-                return L2CAPTransport(addr, psm=3)
-
-            result = _run_fuzz_cases(
-                address, "rfcomm", cases, transport_factory,
+            result = _run_via_engine(
+                address, "rfcomm", cases,
                 delay=delay, timeout=5.0,
             )
 
-        _show_fuzz_summary("rfcomm", address, result)
+        _show_fuzz_summary("rfcomm", address, result, log_result=not result.get("logged_by_engine", False))
 
     # -------------------------------------------------------------------
     # blue-tap fuzz sdp-deep
@@ -677,16 +855,12 @@ def register_extra_commands(fuzz_group):
 
             info(f"Generated {len(cases)} SDP fuzz cases")
 
-            # SDP runs on L2CAP PSM 1
-            def transport_factory(addr):
-                return L2CAPTransport(addr, psm=1)
-
-            result = _run_fuzz_cases(
-                address, "sdp", cases, transport_factory,
+            result = _run_via_engine(
+                address, "sdp", cases,
                 delay=delay, timeout=5.0,
             )
 
-        _show_fuzz_summary("sdp", address, result)
+        _show_fuzz_summary("sdp", address, result, log_result=not result.get("logged_by_engine", False))
 
     # -------------------------------------------------------------------
     # blue-tap fuzz at-deep
@@ -694,14 +868,21 @@ def register_extra_commands(fuzz_group):
     @fuzz_group.command("at-deep")
     @click.argument("address", required=False, default=None)
     @click.option("--channel", default=1, type=int,
-                  help="RFCOMM channel for HFP AG.")
+                  help="Fallback RFCOMM channel when autodiscovery does not find an AT surface.")
+    @click.option("--hfp-channel", default=None, type=int, help="Override HFP/AG AT control channel.")
+    @click.option("--phonebook-channel", default=None, type=int, help="Override AT phonebook channel.")
+    @click.option("--sms-channel", default=None, type=int, help="Override AT SMS channel.")
+    @click.option("--injection-channel", default=None, type=int,
+                  help="Override channel for injection fan-out when not reusing discovered surfaces.")
+    @click.option("--autodiscover/--no-autodiscover", default=True,
+                  help="Probe RFCOMM channels and map AT-capable surfaces before fuzzing.")
     @click.option("--category", default="all",
                   type=click.Choice(["hfp-slc", "hfp-call", "hfp-query",
                                      "phonebook", "sms", "injection",
                                      "device-info", "all"]),
                   help="AT command category to fuzz.")
     @click.option("--delay", default=0.3, type=float, help="Delay between test cases.")
-    def fuzz_at_deep(address, channel, category, delay):
+    def fuzz_at_deep(address, channel, hfp_channel, phonebook_channel, sms_channel, injection_channel, autodiscover, category, delay):
         """Deep AT command fuzzing (372+ patterns).
 
         Sends the full AT command corpus targeting HFP Service Level
@@ -715,7 +896,6 @@ def register_extra_commands(fuzz_group):
           blue-tap fuzz at-deep --channel 3 --category hfp-slc
         """
         from blue_tap.fuzz.protocols.at_commands import ATCorpus
-        from blue_tap.fuzz.transport import RFCOMMTransport
 
         address = resolve_address(address)
         if not address:
@@ -723,6 +903,22 @@ def register_extra_commands(fuzz_group):
 
         with phase("AT Command Deep Fuzzing"):
             info(f"Target: {style_target(address)} | Channel: {channel} | Category: {category}")
+            discovered_channels = _discover_at_surface_channels(address, channel) if autodiscover else {
+                "hfp": channel,
+                "phonebook": channel,
+                "sms": channel,
+                "injection": channel,
+            }
+            surface_channels = {
+                "hfp": int(hfp_channel if hfp_channel is not None else discovered_channels["hfp"]),
+                "phonebook": int(phonebook_channel if phonebook_channel is not None else discovered_channels["phonebook"]),
+                "sms": int(sms_channel if sms_channel is not None else discovered_channels["sms"]),
+                "injection": int(injection_channel if injection_channel is not None else discovered_channels["injection"]),
+            }
+            verbose(
+                "AT surface channels: "
+                + ", ".join(f"{name}={value}" for name, value in surface_channels.items())
+            )
 
             category_generators = {
                 "hfp-slc": ATCorpus.generate_hfp_slc_corpus,
@@ -734,13 +930,10 @@ def register_extra_commands(fuzz_group):
                 "device-info": ATCorpus.generate_device_info_corpus,
             }
 
-            if category == "all":
-                cases = ATCorpus.generate_all()
-            else:
+            if category != "all":
                 gen = category_generators.get(category)
                 cases = gen() if gen else ATCorpus.generate_all()
-
-            info(f"Generated {len(cases)} AT command fuzz cases")
+                info(f"Generated {len(cases)} AT command fuzz cases")
 
             # Show corpus stats
             if category == "all":
@@ -755,15 +948,118 @@ def register_extra_commands(fuzz_group):
                     f"Device={stats.get('device_info', 0)}"
                 )
 
-            def transport_factory(addr):
-                return RFCOMMTransport(addr, channel)
+            protocol_map = {
+                "hfp-slc": "at-hfp",
+                "hfp-call": "at-hfp",
+                "hfp-query": "at-hfp",
+                "device-info": "at-hfp",
+                "phonebook": "at-phonebook",
+                "sms": "at-sms",
+                "injection": "at-injection",
+            }
+            if category == "all":
+                runs = [
+                    {"name": "hfp-slc", "protocol": "at-hfp", "surface": "hfp", "cases": ATCorpus.generate_hfp_slc_corpus(), "transport_override": {"channel": surface_channels["hfp"]}},
+                    {"name": "hfp-call", "protocol": "at-hfp", "surface": "hfp", "cases": ATCorpus.generate_hfp_call_corpus(), "transport_override": {"channel": surface_channels["hfp"]}},
+                    {"name": "hfp-query", "protocol": "at-hfp", "surface": "hfp", "cases": ATCorpus.generate_hfp_query_corpus(), "transport_override": {"channel": surface_channels["hfp"]}},
+                    {"name": "device-info", "protocol": "at-hfp", "surface": "hfp", "cases": ATCorpus.generate_device_info_corpus(), "transport_override": {"channel": surface_channels["hfp"]}},
+                    {"name": "phonebook", "protocol": "at-phonebook", "surface": "phonebook", "cases": ATCorpus.generate_phonebook_corpus(), "transport_override": {"channel": surface_channels["phonebook"]}},
+                    {"name": "sms", "protocol": "at-sms", "surface": "sms", "cases": ATCorpus.generate_sms_corpus(), "transport_override": {"channel": surface_channels["sms"]}},
+                    {"name": "injection-hfp", "protocol": "at-hfp", "surface": "hfp", "cases": ATCorpus.generate_surface_injection_corpus("hfp"), "transport_override": {"channel": surface_channels["hfp"]}},
+                    {"name": "injection-phonebook", "protocol": "at-phonebook", "surface": "phonebook", "cases": ATCorpus.generate_surface_injection_corpus("phonebook"), "transport_override": {"channel": surface_channels["phonebook"]}},
+                    {"name": "injection-sms", "protocol": "at-sms", "surface": "sms", "cases": ATCorpus.generate_surface_injection_corpus("sms"), "transport_override": {"channel": surface_channels["sms"]}},
+                ]
+                result = _run_protocol_batch(
+                    address,
+                    runs=runs,
+                    delay=delay,
+                    timeout=5.0,
+                )
+                from blue_tap.core.fuzz_framework import build_fuzz_operation_result
 
-            result = _run_fuzz_cases(
-                address, "at", cases, transport_factory,
-                delay=delay, timeout=5.0,
+                envelope = build_fuzz_operation_result(
+                    target=address,
+                    adapter=_current_adapter(),
+                    operation="fuzz_at_deep",
+                    title="AT Deep Fuzz Batch",
+                    protocol="multi",
+                    summary_data={
+                        "operation": "fuzz_at_deep",
+                        "protocol": "multi",
+                        "sent": result["sent"],
+                        "crashes": result["crashes"],
+                        "errors": result["errors"],
+                    },
+                    observations=[
+                        f"category=all",
+                        f"sent={result['sent']}",
+                        f"crashes={result['crashes']}",
+                        f"errors={result['errors']}",
+                        f"protocol_count={len(result['protocols'])}",
+                    ],
+                    module_data=result,
+                    module_outcome="crash_detected" if result["crashes"] else "completed",
+                )
+                log_command("fuzz_at_deep", envelope, category="fuzz", target=address)
+                _show_fuzz_summary("at-multi", address, result, log_result=False)
+                return
+
+            if category == "injection":
+                result = _run_protocol_batch(
+                    address,
+                    runs=[
+                        {"name": "injection-hfp", "protocol": "at-hfp", "surface": "hfp", "cases": ATCorpus.generate_surface_injection_corpus("hfp"), "transport_override": {"channel": surface_channels["hfp"]}},
+                        {"name": "injection-phonebook", "protocol": "at-phonebook", "surface": "phonebook", "cases": ATCorpus.generate_surface_injection_corpus("phonebook"), "transport_override": {"channel": surface_channels["phonebook"]}},
+                        {"name": "injection-sms", "protocol": "at-sms", "surface": "sms", "cases": ATCorpus.generate_surface_injection_corpus("sms"), "transport_override": {"channel": surface_channels["sms"]}},
+                    ],
+                    delay=delay,
+                    timeout=5.0,
+                )
+                from blue_tap.core.fuzz_framework import build_fuzz_operation_result
+
+                envelope = build_fuzz_operation_result(
+                    target=address,
+                    adapter=_current_adapter(),
+                    operation="fuzz_at_deep",
+                    title="AT Injection Batch",
+                    protocol="multi",
+                    summary_data={
+                        "operation": "fuzz_at_deep",
+                        "protocol": "multi",
+                        "sent": result["sent"],
+                        "crashes": result["crashes"],
+                        "errors": result["errors"],
+                    },
+                    observations=[
+                        "category=injection",
+                        f"sent={result['sent']}",
+                        f"crashes={result['crashes']}",
+                        f"errors={result['errors']}",
+                        f"surface_count={len(result['protocols'])}",
+                    ],
+                    module_data=result,
+                    module_outcome="crash_detected" if result["crashes"] else "completed",
+                )
+                log_command("fuzz_at_deep", envelope, category="fuzz", target=address)
+                _show_fuzz_summary("at-injection", address, result, log_result=False)
+                return
+
+            surface_map = {
+                "hfp-slc": "hfp",
+                "hfp-call": "hfp",
+                "hfp-query": "hfp",
+                "device-info": "hfp",
+                "phonebook": "phonebook",
+                "sms": "sms",
+            }
+            surface = surface_map[category]
+            override = {"channel": surface_channels[surface]}
+            result = _run_via_engine(
+                address, protocol_map[category], cases,
+                delay=delay, timeout=5.0, transport_override=override,
             )
 
-        _show_fuzz_summary("at", address, result)
+        _show_fuzz_summary(protocol_map[category], address, result, log_result=not result.get("logged_by_engine", False))
 
     # -------------------------------------------------------------------
     # blue-tap fuzz cve
@@ -892,7 +1188,7 @@ def register_extra_commands(fuzz_group):
                 delay=delay, timeout=5.0,
             )
 
-        _show_fuzz_summary("cve", address, result)
+        _show_fuzz_summary("cve", address, result, log_result=not result.get("logged_by_engine", False))
 
     # ===================================================================
     # TASK 6.2: Replay, Minimize, and L2CAP Signaling Commands
@@ -927,6 +1223,16 @@ def register_extra_commands(fuzz_group):
         target = resolve_address(target)
         if not target:
             return
+
+        run_id = make_fuzz_run_id()
+        emit_cli_event(
+            event_type="run_started",
+            module="fuzz",
+            run_id=run_id,
+            target=target,
+            message=f"Starting pcap replay: {capture_file} → {target}",
+            details={"capture_file": capture_file, "protocol": protocol, "mutate": mutate},
+        )
 
         with phase("Capture Replay"):
             info(f"Loading capture: {capture_file}")
@@ -1031,14 +1337,65 @@ def register_extra_commands(fuzz_group):
         style = "red" if result.get("errors", 0) > 0 else "green"
         summary_panel("Replay Results", replay_items, style=style)
 
-        log_command("fuzz_replay", {
-            "capture_file": capture_file,
-            "target": target,
-            "protocol": protocol,
-            "mutate": mutate,
-            "sent": result.get("sent", 0),
-            "errors": result.get("errors", 0),
-        }, category="fuzz", target=target)
+        emit_cli_event(
+            event_type="execution_result",
+            module="fuzz",
+            run_id=run_id,
+            target=target,
+            message=(
+                f"Replay complete: sent={result.get('sent', 0)} "
+                f"errors={result.get('errors', 0)}"
+                + (f" mutations={mutations}" if mutate else "")
+            ),
+            details={
+                "capture_file": capture_file,
+                "protocol": protocol,
+                "sent": result.get("sent", 0),
+                "errors": result.get("errors", 0),
+                "mutations": mutations,
+                "protocols": result.get("protocols", {}),
+            },
+        )
+        emit_cli_event(
+            event_type="run_completed",
+            module="fuzz",
+            run_id=run_id,
+            target=target,
+            message=f"Pcap replay complete: {capture_file}",
+            details={"sent": result.get("sent", 0), "errors": result.get("errors", 0)},
+        )
+
+        from blue_tap.core.fuzz_framework import build_fuzz_operation_result
+
+        envelope = build_fuzz_operation_result(
+            target=target,
+            adapter=_current_adapter(),
+            operation="fuzz_replay",
+            title="Replay Fuzz Operation",
+            protocol=protocol or "",
+            summary_data={
+                "operation": "fuzz_replay",
+                "protocol": protocol or "",
+                "sent": result.get("sent", 0),
+                "errors": result.get("errors", 0),
+                "crashes": 0,
+            },
+            observations=[
+                f"capture_file={capture_file}",
+                f"mutate={mutate}",
+                f"protocol={protocol or 'all'}",
+                f"sent={result.get('sent', 0)}",
+                f"errors={result.get('errors', 0)}",
+            ],
+            module_data={
+                "capture_file": capture_file,
+                "target": target,
+                "protocol": protocol,
+                "mutate": mutate,
+                "result": dict(result),
+            },
+        )
+        log_command("fuzz_replay", envelope, category="fuzz", target=target)
 
     # -------------------------------------------------------------------
     # blue-tap fuzz minimize
@@ -1134,6 +1491,16 @@ def register_extra_commands(fuzz_group):
             error(f"Crash {crash_id} has no target address")
             return
 
+        run_id = make_fuzz_run_id()
+        emit_cli_event(
+            event_type="run_started",
+            module="fuzz",
+            run_id=run_id,
+            target=target,
+            message=f"Starting crash minimization for crash_id={crash_id} protocol={protocol}",
+            details={"crash_id": crash_id, "protocol": protocol, "strategy": strategy},
+        )
+
         with phase("Crash Minimization"):
             info(f"Crash {crash_id}: {protocol} protocol, target {style_target(target)}")
             info(f"Strategy: {strategy} | Timeout: {timeout}s | Cooldown: {cooldown}s")
@@ -1161,6 +1528,11 @@ def register_extra_commands(fuzz_group):
                     _addr_type = BLETransport._detect_address_type(target)
                     def transport_factory():
                         return BLETransport(target, cid=_cid, address_type=_addr_type)
+                elif ttype == "raw-acl":
+                    from blue_tap.fuzz.transport import RawACLTransport
+                    _hci_dev = spec.get("hci_dev", 1)
+                    def transport_factory():
+                        return RawACLTransport(target, hci_dev=_hci_dev)
                 else:
                     _psm = spec.get("psm", 1)
                     def transport_factory():
@@ -1181,6 +1553,15 @@ def register_extra_commands(fuzz_group):
                 timeout=timeout,
                 cooldown=cooldown,
                 max_retries=retries,
+            )
+
+            emit_cli_event(
+                event_type="phase_started",
+                module="fuzz",
+                run_id=run_id,
+                target=target,
+                message=f"Running {strategy} reduction strategy on crash_id={crash_id}",
+                details={"strategy": strategy, "crash_id": crash_id},
             )
 
             # Open DB for saving results
@@ -1212,15 +1593,68 @@ def register_extra_commands(fuzz_group):
                 "Tests performed": str(result.tests_performed),
             }, style="red")
 
-        log_command("fuzz_minimize", {
-            "crash_id": crash_id,
-            "strategy": strategy,
-            "success": result.success,
-            "original_size": result.original_size,
-            "minimized_size": result.minimized_size,
-            "reduction_percent": result.reduction_percent,
-            "tests_performed": result.tests_performed,
-        }, category="fuzz", target=target)
+        emit_cli_event(
+            event_type="execution_result",
+            module="fuzz",
+            run_id=run_id,
+            target=target,
+            message=(
+                f"Minimization {'succeeded' if result.success else 'failed'}: "
+                f"{result.original_size}B → {result.minimized_size}B "
+                f"({result.reduction_percent:.1f}% reduction, {result.tests_performed} tests)"
+            ),
+            details={
+                "crash_id": crash_id,
+                "strategy_used": result.strategy_used,
+                "success": result.success,
+                "original_size": result.original_size,
+                "minimized_size": result.minimized_size,
+                "reduction_percent": result.reduction_percent,
+                "tests_performed": result.tests_performed,
+            },
+        )
+        emit_cli_event(
+            event_type="run_completed",
+            module="fuzz",
+            run_id=run_id,
+            target=target,
+            message=f"Crash minimization complete for crash_id={crash_id}",
+            details={"crash_id": crash_id, "success": result.success},
+        )
+
+        from blue_tap.core.fuzz_framework import build_fuzz_operation_result
+
+        envelope = build_fuzz_operation_result(
+            target=target,
+            adapter=_current_adapter(),
+            operation="fuzz_minimize",
+            title="Crash Payload Minimization",
+            protocol=protocol,
+            module_outcome="completed" if result.success else "failed",
+            summary_data={
+                "operation": "fuzz_minimize",
+                "protocol": protocol,
+                "sent": 0,
+                "crashes": 0,
+                "errors": 0 if result.success else 1,
+            },
+            observations=[
+                f"crash_id={crash_id}",
+                f"strategy={strategy}",
+                f"success={result.success}",
+                f"tests_performed={result.tests_performed}",
+            ],
+            module_data={
+                "crash_id": crash_id,
+                "strategy": strategy,
+                "success": result.success,
+                "original_size": result.original_size,
+                "minimized_size": result.minimized_size,
+                "reduction_percent": result.reduction_percent,
+                "tests_performed": result.tests_performed,
+            },
+        )
+        log_command("fuzz_minimize", envelope, category="fuzz", target=target)
 
     # -------------------------------------------------------------------
     # blue-tap fuzz l2cap-sig
@@ -1231,30 +1665,29 @@ def register_extra_commands(fuzz_group):
                   type=click.Choice(["config", "cid", "echo", "info", "all"]),
                   help="L2CAP signaling fuzz category.")
     @click.option("--delay", default=0.5, type=float, help="Delay between test cases.")
-    def fuzz_l2cap_sig(address, mode, delay):
-        """Fuzz L2CAP signaling commands via raw injection.
+    @click.option("--hci", default="hci1", help="DarkFirmware adapter for raw ACL signaling fuzzing.")
+    def fuzz_l2cap_sig(address, mode, delay, hci):
+        """Fuzz L2CAP signaling commands via DarkFirmware raw ACL injection.
 
         Sends protocol-aware L2CAP signaling fuzz cases targeting
         configuration option parsing, CID manipulation, Echo flooding,
         and Information request probing.
 
-        Requires Scapy for raw L2CAP injection. If Scapy is not installed,
-        falls back to kernel L2CAP PSM 1 transport (limited to well-formed
-        L2CAP framing).
+        Uses DarkFirmware raw ACL injection so malformed CID 0x0001 signaling
+        frames can leave the host below the kernel's L2CAP validation path.
 
         \b
         Examples:
           blue-tap fuzz l2cap-sig AA:BB:CC:DD:EE:FF
           blue-tap fuzz l2cap-sig AA:BB:CC:DD:EE:FF --mode config
+          blue-tap fuzz l2cap-sig AA:BB:CC:DD:EE:FF --hci hci1
           blue-tap fuzz l2cap-sig AA:BB:CC:DD:EE:FF --mode echo --delay 0.1
         """
-        from blue_tap.fuzz.protocols.l2cap import (
-            generate_all_l2cap_fuzz_cases,
-            fuzz_config_options, fuzz_cid_manipulation,
-            fuzz_echo_requests, fuzz_info_requests,
-            ScapyL2CAPTransport,
+        from blue_tap.fuzz.protocols.l2cap_raw import (
+            generate_all_l2cap_sig_fuzz_cases,
+            fuzz_raw_config_signaling, fuzz_raw_cid_manipulation,
+            fuzz_raw_echo_requests, fuzz_raw_info_requests,
         )
-        from blue_tap.fuzz.transport import L2CAPTransport
 
         address = resolve_address(address)
         if not address:
@@ -1264,45 +1697,30 @@ def register_extra_commands(fuzz_group):
             info(f"Target: {style_target(address)} | Mode: {mode}")
 
             mode_generators = {
-                "config": fuzz_config_options,
-                "cid": fuzz_cid_manipulation,
-                "echo": fuzz_echo_requests,
-                "info": fuzz_info_requests,
+                "config": fuzz_raw_config_signaling,
+                "cid": fuzz_raw_cid_manipulation,
+                "echo": fuzz_raw_echo_requests,
+                "info": fuzz_raw_info_requests,
             }
 
             if mode == "all":
-                cases = generate_all_l2cap_fuzz_cases()
+                cases = generate_all_l2cap_sig_fuzz_cases()
             else:
                 gen = mode_generators.get(mode)
-                cases = gen() if gen else generate_all_l2cap_fuzz_cases()
+                cases = gen() if gen else generate_all_l2cap_sig_fuzz_cases()
 
             info(f"Generated {len(cases)} L2CAP signaling fuzz cases")
-
-            # Check Scapy availability
-            if ScapyL2CAPTransport.AVAILABLE:
-                info("Scapy available -- using raw L2CAP injection")
-                # Note: Scapy transport requires root and direct HCI access.
-                # Fall back to kernel transport if connection fails.
-                def transport_factory(addr):
-                    return L2CAPTransport(addr, psm=1)
-                warning(
-                    "Raw Scapy injection requires root privileges. "
-                    "Using kernel L2CAP transport as primary sender."
-                )
-            else:
-                warning(
-                    "Scapy not installed -- using kernel L2CAP transport. "
-                    "Install for raw injection: pip install 'blue-tap[fuzz]'"
-                )
-                def transport_factory(addr):
-                    return L2CAPTransport(addr, psm=1)
-
-            result = _run_fuzz_cases(
-                address, "l2cap-sig", cases, transport_factory,
-                delay=delay, timeout=5.0,
+            hci_dev = int(str(hci).replace("hci", ""))
+            result = _run_via_engine(
+                address,
+                "l2cap-sig",
+                cases,
+                delay=delay,
+                timeout=5.0,
+                transport_override={"hci_dev": hci_dev},
             )
 
-        _show_fuzz_summary("l2cap-sig", address, result)
+        _show_fuzz_summary("l2cap-sig", address, result, log_result=not result.get("logged_by_engine", False))
 
     # ===================================================================
     # TASK 4.4: Corpus Management Commands
@@ -1353,7 +1771,16 @@ def register_extra_commands(fuzz_group):
             else:
                 corpus_dir = os.path.join("sessions", "fuzz_adhoc", "corpus")
 
+        run_id = make_fuzz_run_id()
         corpus = Corpus(corpus_dir)
+
+        emit_cli_event(
+            event_type="run_started",
+            module="fuzz",
+            run_id=run_id,
+            message=f"Generating corpus for protocol={protocol}",
+            details={"protocol": protocol, "corpus_dir": corpus_dir},
+        )
 
         with phase("Corpus Generation"):
             short_names = _ALL_PROTOCOLS if protocol == "all" else [protocol]
@@ -1399,12 +1826,49 @@ def register_extra_commands(fuzz_group):
             console.print()
 
         success(f"Generated {total_seeds} seeds in {corpus_dir}")
-        log_command("fuzz_corpus_generate", {
-            "protocols": protocols,
-            "total_seeds": total_seeds,
-            "total_bytes": total_bytes,
-            "corpus_dir": corpus_dir,
-        }, category="fuzz")
+
+        emit_cli_event(
+            event_type="artifact_saved",
+            module="fuzz",
+            run_id=run_id,
+            message=f"Corpus written to {corpus_dir} ({total_seeds} seeds)",
+            details={"corpus_dir": corpus_dir, "total_seeds": total_seeds, "total_bytes": total_bytes},
+        )
+        emit_cli_event(
+            event_type="run_completed",
+            module="fuzz",
+            run_id=run_id,
+            message=f"Corpus generation complete: {total_seeds} seeds across {len(protocols)} protocols",
+            details={"total_seeds": total_seeds, "protocol_count": len(protocols)},
+        )
+
+        from blue_tap.core.fuzz_framework import build_fuzz_operation_result
+
+        envelope = build_fuzz_operation_result(
+            target="",
+            adapter=_current_adapter(),
+            operation="fuzz_corpus_generate",
+            title="Fuzz Corpus Generation",
+            summary_data={
+                "operation": "fuzz_corpus_generate",
+                "protocol": "multi",
+                "sent": 0,
+                "crashes": 0,
+                "errors": 0,
+            },
+            observations=[
+                f"protocol_count={len(protocols)}",
+                f"total_seeds={total_seeds}",
+                f"total_bytes={total_bytes}",
+            ],
+            module_data={
+                "protocols": protocols,
+                "total_seeds": total_seeds,
+                "total_bytes": total_bytes,
+                "corpus_dir": corpus_dir,
+            },
+        )
+        log_command("fuzz_corpus_generate", envelope, category="fuzz")
 
     # -------------------------------------------------------------------
     # blue-tap fuzz corpus list
@@ -1536,12 +2000,21 @@ def register_extra_commands(fuzz_group):
             warning(f"No corpus found at {corpus_dir}")
             return
 
+        run_id = make_fuzz_run_id()
         corpus = Corpus(corpus_dir)
         loaded = corpus.load_from_directory(corpus_dir)
 
         if loaded == 0:
             info("Corpus is empty. Nothing to minimize.")
             return
+
+        emit_cli_event(
+            event_type="run_started",
+            module="fuzz",
+            run_id=run_id,
+            message=f"Minimizing corpus at {corpus_dir}",
+            details={"corpus_dir": corpus_dir},
+        )
 
         with phase("Corpus Minimization"):
             before_count = corpus.seed_count()
@@ -1596,12 +2069,41 @@ def register_extra_commands(fuzz_group):
         else:
             info("No duplicates found. Corpus is already minimal.")
 
-        log_command("fuzz_corpus_minimize", {
-            "before": before_count,
-            "after": corpus.seed_count(),
-            "removed": removed,
-            "corpus_dir": corpus_dir,
-        }, category="fuzz")
+        emit_cli_event(
+            event_type="run_completed",
+            module="fuzz",
+            run_id=run_id,
+            message=f"Corpus minimization complete: removed {removed} duplicates",
+            details={"before": before_count, "after": corpus.seed_count(), "removed": removed},
+        )
+
+        from blue_tap.core.fuzz_framework import build_fuzz_operation_result
+
+        envelope = build_fuzz_operation_result(
+            target="",
+            adapter=_current_adapter(),
+            operation="fuzz_corpus_minimize",
+            title="Fuzz Corpus Minimization",
+            summary_data={
+                "operation": "fuzz_corpus_minimize",
+                "protocol": "multi",
+                "sent": 0,
+                "crashes": 0,
+                "errors": 0,
+            },
+            observations=[
+                f"before={before_count}",
+                f"after={corpus.seed_count()}",
+                f"removed={removed}",
+            ],
+            module_data={
+                "before": before_count,
+                "after": corpus.seed_count(),
+                "removed": removed,
+                "corpus_dir": corpus_dir,
+            },
+        )
+        log_command("fuzz_corpus_minimize", envelope, category="fuzz")
 
 
 # ---------------------------------------------------------------------------

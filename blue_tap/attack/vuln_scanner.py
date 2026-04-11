@@ -26,6 +26,8 @@ from blue_tap.attack.cve_framework import (
     summarize_check,
     summarize_findings,
 )
+from blue_tap.core.cli_events import emit_cli_event
+from blue_tap.core.result_schema import make_run_id
 from blue_tap.recon.sdp import browse_services, check_ssp, get_raw_sdp
 from blue_tap.recon.rfcomm_scan import RFCOMMScanner
 from blue_tap.utils.bt_helpers import run_cmd, check_tool
@@ -916,6 +918,16 @@ def run_vulnerability_scan(address: str, hci: str = "hci0", active: bool = False
     without active exploit verification.
     """
     started_at = datetime.now(timezone.utc).isoformat()
+    run_id = make_run_id("vulnscan")
+    emit_cli_event(
+        event_type="run_started",
+        module="vulnscan",
+        run_id=run_id,
+        target=address,
+        adapter=hci,
+        message=f"Vulnerability scan started against {address}",
+        details={"active": active, "phone_address": phone_address or ""},
+    )
     info(f"Scanning {address} for vulnerabilities and attack-surface indicators...")
     findings: list[dict] = []
     cve_check_log: list[dict] = []
@@ -924,7 +936,7 @@ def run_vulnerability_scan(address: str, hci: str = "hci0", active: bool = False
     from blue_tap.utils.bt_helpers import ensure_adapter_ready
     if not ensure_adapter_ready(hci):
         error("Adapter not ready — cannot scan")
-        return build_vulnscan_result(
+        result = build_vulnscan_result(
             target=address,
             adapter=hci,
             active=active,
@@ -932,7 +944,17 @@ def run_vulnerability_scan(address: str, hci: str = "hci0", active: bool = False
             cve_checks=cve_check_log,
             non_cve_checks=non_cve_check_log,
             started_at=started_at,
+            run_id=run_id,
         )
+        emit_cli_event(
+            event_type="run_error",
+            module="vulnscan",
+            run_id=run_id,
+            target=address,
+            adapter=hci,
+            message=f"Vulnerability scan aborted: adapter {hci} not ready",
+        )
+        return result
 
     section("Check 1: Secure Simple Pairing", style="bt.cyan")
     ssp = check_ssp(address, hci)
@@ -955,7 +977,7 @@ def run_vulnerability_scan(address: str, hci: str = "hci0", active: bool = False
     else:
         warning("Could not determine SSP support")
 
-    services = browse_services(address)
+    services = browse_services(address, hci=hci)
 
     section("Check 3: Reachability", style="bt.cyan")
     if check_tool("l2ping"):
@@ -1001,7 +1023,7 @@ def run_vulnerability_scan(address: str, hci: str = "hci0", active: bool = False
     name_result = run_cmd(["hcitool", "-i", hci, "name", address], timeout=8)
     if name_result.returncode == 0:
         device_name = name_result.stdout.strip()
-    sdp_raw = get_raw_sdp(address)
+    sdp_raw = get_raw_sdp(address, hci=hci)
     # Extract manufacturer from hcitool info
     info_result = _run_hcitool_info(address, hci)
     if info_result.returncode == 0:
@@ -1012,6 +1034,16 @@ def run_vulnerability_scan(address: str, hci: str = "hci0", active: bool = False
     def _run_non_cve_check(spec: ScanCheck, section_title: str):
         results = []
         verbose(f"[NON-CVE] {spec.check_id} — {spec.title}")
+        emit_cli_event(
+            event_type="execution_started",
+            module="vulnscan",
+            run_id=run_id,
+            execution_id=spec.check_id,
+            target=address,
+            adapter=hci,
+            message=f"Non-CVE check started: {spec.check_id}",
+            details={"section": section_title},
+        )
         try:
             results = spec.runner(*spec.args)
         except Exception as exc:
@@ -1026,6 +1058,15 @@ def run_vulnerability_scan(address: str, hci: str = "hci0", active: bool = False
                 "status_counts": {"error": 1},
                 "evidence_samples": [],
             })
+            emit_cli_event(
+                event_type="run_error",
+                module="vulnscan",
+                run_id=run_id,
+                execution_id=spec.check_id,
+                target=address,
+                adapter=hci,
+                message=f"Non-CVE check failed: {spec.check_id} ({exc})",
+            )
             return
         for result in results:
             result.setdefault("check_title", spec.title)
@@ -1044,6 +1085,17 @@ def run_vulnerability_scan(address: str, hci: str = "hci0", active: bool = False
             "section": section_title,
             **summarize_check(results),
         })
+        primary_status = non_cve_check_log[-1]["primary_status"]
+        emit_cli_event(
+            event_type="execution_result" if primary_status != "not_applicable" else "execution_skipped",
+            module="vulnscan",
+            run_id=run_id,
+            execution_id=spec.check_id,
+            target=address,
+            adapter=hci,
+            message=f"Non-CVE check finished: {spec.check_id} -> {primary_status}",
+            details={"status": primary_status},
+        )
         findings.extend(results)
 
     # --- Local analysis checks (parallel, no active connections needed) ---
@@ -1061,13 +1113,31 @@ def run_vulnerability_scan(address: str, hci: str = "hci0", active: bool = False
         lambda: _check_blueborne(address),
     ]
 
+    local_analysis_findings = []
     with ThreadPoolExecutor(max_workers=4) as pool:
         futures = [pool.submit(fn) for fn in local_checks]
         for future in as_completed(futures):
             try:
-                findings.extend(future.result())
+                local_analysis_findings.extend(future.result())
             except Exception as e:
                 warning(f"Check failed: {e}")
+    findings.extend(local_analysis_findings)
+    non_cve_check_log.append({
+        "check_id": "local_analysis",
+        "title": "Local Analysis",
+        "section": "Check 4a: Local Analysis (version/feature checks)",
+        **summarize_check(local_analysis_findings),
+    })
+    emit_cli_event(
+        event_type="execution_result",
+        module="vulnscan",
+        run_id=run_id,
+        execution_id="local_analysis",
+        target=address,
+        adapter=hci,
+        message=f"Non-CVE check finished: local_analysis -> {non_cve_check_log[-1]['primary_status']}",
+        details={"status": non_cve_check_log[-1]["primary_status"]},
+    )
 
     non_cve_sections = [
         ScanSection(
@@ -1105,11 +1175,29 @@ def run_vulnerability_scan(address: str, hci: str = "hci0", active: bool = False
 
     if active:
         section("Active Check: BIAS Vulnerability Probe")
-        findings.extend(_check_bias_active(address, hci, ssp, phone_address))
+        bias_active_results = _check_bias_active(address, hci, ssp, phone_address)
+        findings.extend(bias_active_results)
+        non_cve_check_log.append({
+            "check_id": "bias_active",
+            "title": "Active BIAS Probe",
+            "section": "Active Check: BIAS Vulnerability Probe",
+            **summarize_check(bias_active_results),
+        })
+        emit_cli_event(
+            event_type="execution_result",
+            module="vulnscan",
+            run_id=run_id,
+            execution_id="bias_active",
+            target=address,
+            adapter=hci,
+            message=f"Non-CVE check finished: bias_active -> {non_cve_check_log[-1]['primary_status']}",
+            details={"status": non_cve_check_log[-1]["primary_status"]},
+        )
 
     # DarkFirmware-enhanced active KNOB probe
     if _check_darkfirmware_available(hci) and active:
         section("Active Check: DarkFirmware KNOB Probe", style="bt.cyan")
+        darkfirmware_knob_results = []
         try:
             from blue_tap.core.hci_vsc import HCIVSCSocket
             from blue_tap.fuzz.protocols.lmp import build_enc_key_size_req
@@ -1126,7 +1214,7 @@ def run_vulnerability_scan(address: str, hci: str = "hci0", active: bool = False
                 vsc.stop_lmp_monitor()
 
                 if lmp_responses:
-                    findings.append(
+                    darkfirmware_knob_results.append(
                         _finding(
                             "HIGH",
                             "KNOB: DarkFirmware Active Probe Response (CVE-2019-9506)",
@@ -1146,9 +1234,43 @@ def run_vulnerability_scan(address: str, hci: str = "hci0", active: bool = False
                     info("DarkFirmware KNOB probe: no LMP response (target may enforce key size)")
         except Exception as exc:
             verbose(f"DarkFirmware KNOB probe failed: {exc}")
+        findings.extend(darkfirmware_knob_results)
+        non_cve_check_log.append({
+            "check_id": "darkfirmware_knob_probe",
+            "title": "DarkFirmware KNOB Probe",
+            "section": "Active Check: DarkFirmware KNOB Probe",
+            **summarize_check(darkfirmware_knob_results),
+        })
+        emit_cli_event(
+            event_type="execution_result",
+            module="vulnscan",
+            run_id=run_id,
+            execution_id="darkfirmware_knob_probe",
+            target=address,
+            adapter=hci,
+            message=f"Non-CVE check finished: darkfirmware_knob_probe -> {non_cve_check_log[-1]['primary_status']}",
+            details={"status": non_cve_check_log[-1]["primary_status"]},
+        )
 
     section("Check 8: PerfektBlue (OpenSynergy BlueSDK)", style="bt.cyan")
-    findings.extend(_check_perfektblue(address, services, device_name, manufacturer, sdp_raw))
+    perfektblue_results = _check_perfektblue(address, services, device_name, manufacturer, sdp_raw)
+    findings.extend(perfektblue_results)
+    non_cve_check_log.append({
+        "check_id": "perfektblue",
+        "title": "PerfektBlue OpenSynergy BlueSDK Probe",
+        "section": "Check 8: PerfektBlue (OpenSynergy BlueSDK)",
+        **summarize_check(perfektblue_results),
+    })
+    emit_cli_event(
+        event_type="execution_result",
+        module="vulnscan",
+        run_id=run_id,
+        execution_id="perfektblue",
+        target=address,
+        adapter=hci,
+        message=f"Non-CVE check finished: perfektblue -> {non_cve_check_log[-1]['primary_status']}",
+        details={"status": non_cve_check_log[-1]["primary_status"]},
+    )
 
     # -----------------------------------------------------------------------
     # CVE Behavioral Differential Probes
@@ -1205,6 +1327,16 @@ def run_vulnerability_scan(address: str, hci: str = "hci0", active: bool = False
         """Run a CVE check, emit structured logs, and record a reportable result."""
         results = []
         verbose(f"[CVE] {spec.cve} — {spec.title}")
+        emit_cli_event(
+            event_type="execution_started",
+            module="vulnscan",
+            run_id=run_id,
+            execution_id=spec.cve,
+            target=address,
+            adapter=hci,
+            message=f"CVE check started: {spec.cve}",
+            details={"section": section_title, "title": spec.title},
+        )
         try:
             results = spec.runner(*spec.args)
         except Exception as exc:
@@ -1219,6 +1351,15 @@ def run_vulnerability_scan(address: str, hci: str = "hci0", active: bool = False
                 "status_counts": {"error": 1},
                 "evidence_samples": [],
             })
+            emit_cli_event(
+                event_type="run_error",
+                module="vulnscan",
+                run_id=run_id,
+                execution_id=spec.cve,
+                target=address,
+                adapter=hci,
+                message=f"CVE check failed: {spec.cve} ({exc})",
+            )
             return
         for r in results:
             r.setdefault("check_title", spec.title)
@@ -1240,6 +1381,21 @@ def run_vulnerability_scan(address: str, hci: str = "hci0", active: bool = False
             "section": section_title,
             **check_summary,
         })
+        primary_status = check_summary["primary_status"]
+        emit_cli_event(
+            event_type=(
+                "pairing_required" if primary_status == "pairing_required"
+                else "execution_skipped" if primary_status == "not_applicable"
+                else "execution_result"
+            ),
+            module="vulnscan",
+            run_id=run_id,
+            execution_id=spec.cve,
+            target=address,
+            adapter=hci,
+            message=f"CVE check finished: {spec.cve} -> {primary_status}",
+            details={"status": primary_status},
+        )
         findings.extend(results)
 
     cve_sections = [
@@ -1330,7 +1486,7 @@ def run_vulnerability_scan(address: str, hci: str = "hci0", active: bool = False
         info("Tip: Use --active to enable additional invasive checks (BIAS probe, PIN lockout)")
 
     _print_findings(address, findings)
-    return build_vulnscan_result(
+    result = build_vulnscan_result(
         target=address,
         adapter=hci,
         active=active,
@@ -1338,13 +1494,26 @@ def run_vulnerability_scan(address: str, hci: str = "hci0", active: bool = False
         cve_checks=cve_check_log,
         non_cve_checks=non_cve_check_log,
         started_at=started_at,
+        run_id=run_id,
     )
+    emit_cli_event(
+        event_type="run_completed",
+        module="vulnscan",
+        run_id=run_id,
+        target=address,
+        adapter=hci,
+        message=(
+            f"Vulnerability scan completed: {len(findings)} findings, "
+            f"{sum(1 for f in findings if f.get('status') == 'confirmed')} confirmed"
+        ),
+    )
+    return result
 
 
 def scan_vulnerabilities(address: str, hci: str = "hci0", active: bool = False,
                          phone_address: str | None = None) -> list[dict]:
     """Compatibility wrapper returning only the vulnerability findings list."""
-    return run_vulnerability_scan(address, hci=hci, active=active, phone_address=phone_address)["findings"]
+    return run_vulnerability_scan(address, hci=hci, active=active, phone_address=phone_address).get("module_data", {}).get("findings", [])
 
 
 def _print_findings(address: str, findings: list[dict]):

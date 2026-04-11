@@ -431,7 +431,8 @@ class DarkFirmwareSniffer:
             from blue_tap.core.firmware import DarkFirmwareManager
             fw = DarkFirmwareManager()
             return fw.is_darkfirmware_loaded(f"hci{self.hci_dev}")
-        except Exception:
+        except Exception as exc:
+            warning(f"DarkFirmware availability check failed on hci{self.hci_dev}: {exc}")
             return False
 
     def start_capture(
@@ -545,6 +546,9 @@ class DarkFirmwareSniffer:
             callback: Optional callback for each packet.
             lmp_filter: Optional LMPFilter to restrict displayed opcodes.
             dashboard: If True, use Rich Live dashboard display.
+
+        Returns:
+            dict with success, packets count, target, duration, and dashboard/filter metadata.
         """
         from blue_tap.core.hci_vsc import HCIVSCSocket
 
@@ -605,13 +609,14 @@ class DarkFirmwareSniffer:
              " (Ctrl-C to stop)")
 
         start = time.time()
+        interrupted = False
         try:
             while self._monitoring:
                 if duration > 0 and time.time() - start >= duration:
                     break
                 time.sleep(0.1)
         except KeyboardInterrupt:
-            pass
+            interrupted = True
         finally:
             if _dashboard:
                 try:
@@ -626,7 +631,20 @@ class DarkFirmwareSniffer:
                 except Exception:
                     pass
                 self._vsc = None
+        elapsed = round(time.time() - start, 1)
         info(f"Captured {len(self._packets)} LMP packets")
+        filter_value = None
+        if lmp_filter is not None and getattr(lmp_filter, "opcodes", None) is not None:
+            filter_value = sorted(int(op) for op in lmp_filter.opcodes)
+        return {
+            "success": True,
+            "packets": len(self._packets),
+            "duration": elapsed,
+            "target": target,
+            "dashboard": bool(dashboard),
+            "filter_opcodes": filter_value,
+            "interrupted": interrupted,
+        }
 
     def stop(self):
         """Stop ongoing capture/monitor."""
@@ -1117,7 +1135,7 @@ class LinkKeyExtractor:
         remote_mac: str,
         link_key: str,
         key_type: int = 4,
-    ) -> bool:
+    ) -> dict:
         """Inject a link key into BlueZ storage for a remote device.
 
         This allows bluetoothctl to connect to the remote device using the
@@ -1131,13 +1149,15 @@ class LinkKeyExtractor:
         """
         if len(link_key) != 32:
             error(f"Link key must be 32 hex chars, got {len(link_key)}")
-            return False
+            return {"success": False, "error": f"invalid link key length {len(link_key)}"}
 
         adapter_dir = adapter_mac.upper().replace("-", ":")
         remote_dir = remote_mac.upper().replace("-", ":")
 
         info_dir = os.path.join(self.BLUEZ_BT_DIR, adapter_dir, remote_dir)
         info_file = os.path.join(info_dir, "info")
+        restart_succeeded = False
+        restart_attempted = False
 
         with phase("Link Key Injection"):
             with step(f"Injecting key into BlueZ for {remote_mac}"):
@@ -1187,14 +1207,24 @@ class LinkKeyExtractor:
 
             # Restart BlueZ to pick up the new key
             with step("Restarting BlueZ daemon"):
+                restart_attempted = True
                 result = run_cmd(["sudo", "systemctl", "restart", "bluetooth"], timeout=10)
                 if result.returncode == 0:
+                    restart_succeeded = True
                     success("BlueZ restarted — link key active")
                     time.sleep(2)  # Wait for daemon
                 else:
                     warning("Could not restart BlueZ (may need manual restart)")
 
-        return True
+        return {
+            "success": True,
+            "adapter_mac": adapter_dir,
+            "remote_mac": remote_dir,
+            "info_file": info_file,
+            "key_type": key_type,
+            "bluez_restart_attempted": restart_attempted,
+            "bluez_restart_succeeded": restart_succeeded,
+        }
 
     def get_adapter_mac(self, hci: str = "hci0") -> str | None:
         """Get the current MAC address of the local adapter."""

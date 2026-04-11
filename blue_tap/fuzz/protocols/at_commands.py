@@ -99,6 +99,11 @@ def at_cmd(cmd: str) -> bytes:
     return f"{cmd}\r".encode("utf-8", errors="surrogateescape")
 
 
+def _at_bytes(prefix: str, data: bytes, suffix: str = "") -> bytes:
+    """Build an AT command around arbitrary bytes without sanitizing them."""
+    return prefix.encode("utf-8", errors="surrogateescape") + data + suffix.encode("utf-8", errors="surrogateescape")
+
+
 class ATCorpus:
     """Generate protocol-aware AT command fuzzing payloads.
 
@@ -639,6 +644,56 @@ class ATCorpus:
             corpus.append(at_cmd(f"AT+CPBF=\"{esc}\""))
 
         return corpus
+
+    @staticmethod
+    def generate_surface_injection_corpus(surface: str) -> list[bytes]:
+        """Generate injection payloads wrapped in a surface-appropriate command context."""
+        generic = ATCorpus.generate_injection_corpus()
+        surface = surface.lower().replace("-", "_")
+
+        wrappers: dict[str, list[tuple[str, str]]] = {
+            "hfp": [
+                ("AT+BRSF=", "\r"),
+                ("AT+CMER=", "\r"),
+                ("AT+CHLD=", "\r"),
+                ("AT+VTS=\"", "\"\r"),
+            ],
+            "phonebook": [
+                ("AT+CPBS=\"", "\"\r"),
+                ("AT+CPBR=", "\r"),
+                ("AT+CPBF=\"", "\"\r"),
+                ("AT+CPBW=1,\"", "\"\r"),
+            ],
+            "sms": [
+                ("AT+CMGF=", "\r"),
+                ("AT+CMGL=\"", "\"\r"),
+                ("AT+CMGS=\"", "\"\r"),
+                ("AT+CNMI=", "\r"),
+            ],
+            "device_info": [
+                ("ATI", "\r"),
+                ("AT+CGSN", "\r"),
+                ("AT+COPS=", "\r"),
+            ],
+        }
+
+        fragments = [
+            b"%n%n%x%x",
+            b"\x00",
+            b"AT+CHUP\r\n",
+            b"A" * 256,
+            "é".encode("utf-8"),
+            b"\xff\xfe",
+        ]
+        contextual: list[bytes] = []
+        seen = set(generic)
+        for prefix, suffix in wrappers.get(surface, []):
+            for fragment in fragments:
+                payload = _at_bytes(prefix, fragment, suffix)
+                if payload not in seen:
+                    seen.add(payload)
+                    contextual.append(payload)
+        return generic + contextual
 
     # ------------------------------------------------------------------
     # Device Identification Commands

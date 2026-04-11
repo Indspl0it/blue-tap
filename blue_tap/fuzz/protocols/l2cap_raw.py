@@ -155,3 +155,68 @@ L2CAP_RAW_FUZZ_TESTS: list[dict] = [
         "frame": build_l2cap_disconn_req(dcid=0xFFFF, scid=0xFFFF),
     },
 ]
+
+
+def _frames_matching(prefixes: tuple[str, ...]) -> list[bytes]:
+    """Return raw L2CAP frames whose test names begin with *prefixes*."""
+    frames: list[bytes] = []
+    for case in L2CAP_RAW_FUZZ_TESTS:
+        name = str(case.get("name", ""))
+        if any(name.startswith(prefix) for prefix in prefixes):
+            frame = case.get("frame", b"")
+            if isinstance(frame, bytes):
+                frames.append(frame)
+    return frames
+
+
+def fuzz_raw_cid_manipulation() -> list[bytes]:
+    """Malformed raw frames that target CID parsing and dispatch."""
+    return _frames_matching(
+        (
+            "zero_length_l2cap",
+            "max_length_l2cap",
+            "bad_cid_",
+            "smp_on_classic",
+            "truncated_l2cap_header",
+        )
+    )
+
+
+def fuzz_raw_config_signaling() -> list[bytes]:
+    """Connection/config/disconnect state-machine frames on CID 0x0001."""
+    return _frames_matching(("conn_req_", "config_req_", "disconnect_req_"))
+
+
+def fuzz_raw_echo_requests() -> list[bytes]:
+    """Echo/signaling header mismatch cases for the raw ACL path."""
+    cases = _frames_matching(("echo_", "signaling_truncated"))
+    cases.extend(
+        [
+            build_l2cap(CID_SIGNALING, struct.pack("<BBH", 0x08, 0x01, 0xFFFF) + b"PING"),
+            build_l2cap(CID_SIGNALING, struct.pack("<BBH", 0x08, 0x01, 0x0000) + b"PING"),
+        ]
+    )
+    return cases
+
+
+def fuzz_raw_info_requests() -> list[bytes]:
+    """Information-request oriented raw signaling frames."""
+    return _frames_matching(("info_req_",))
+
+
+def generate_all_l2cap_sig_fuzz_cases() -> list[bytes]:
+    """Return full BR/EDR signaling-channel L2CAP frames for raw ACL injection."""
+    cases: list[bytes] = []
+    seen: set[bytes] = set()
+    for group in (
+        fuzz_raw_cid_manipulation(),
+        fuzz_raw_config_signaling(),
+        fuzz_raw_echo_requests(),
+        fuzz_raw_info_requests(),
+        [case["frame"] for case in L2CAP_RAW_FUZZ_TESTS if isinstance(case.get("frame"), bytes)],
+    ):
+        for frame in group:
+            if frame not in seen:
+                seen.add(frame)
+                cases.append(frame)
+    return cases

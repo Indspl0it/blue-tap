@@ -7,7 +7,10 @@ Can be used to inject contacts, calendar entries, or test file handling.
 import os
 import socket
 import struct
+import mimetypes
 
+from blue_tap.core.obex_client import OPPSession, ObexError
+from blue_tap.utils.bt_helpers import normalize_mac
 from blue_tap.utils.output import info, success, error
 
 
@@ -16,6 +19,7 @@ OBEX_PUT = 0x02
 OBEX_RESPONSE_SUCCESS = 0xA0
 OBEX_RESPONSE_CONTINUE = 0x90
 OBEX_HEADER_NAME = 0x01
+OBEX_HEADER_TYPE = 0x42
 OBEX_HEADER_LENGTH = 0xC3
 OBEX_HEADER_BODY = 0x48
 OBEX_HEADER_END_OF_BODY = 0x49
@@ -32,11 +36,35 @@ class OPPClient:
     """
 
     def __init__(self, address: str, channel: int):
-        self.address = address
+        self.address = normalize_mac(address)
         self.channel = channel
         self.sock = None
+        self._obex_session: OPPSession | None = None
+        self.last_backend = ""
+        self.last_connect_error = ""
+        self.last_transfer: dict[str, object] = {}
 
     def connect(self) -> bool:
+        try:
+            self._obex_session = OPPSession(self.address, channel=self.channel)
+            if self._obex_session.connect():
+                self.last_backend = "dbus"
+                self.last_connect_error = ""
+                success("OPP D-Bus session established")
+                return True
+        except ObexError as exc:
+            self.last_connect_error = str(exc)
+            info(f"OPP D-Bus session unavailable, falling back to raw OBEX: {exc}")
+            self._obex_session = None
+
+        return self._connect_raw_obex()
+
+    def _connect_raw_obex(self) -> bool:
+        # TODO: Re-evaluate whether this raw RFCOMM/OBEX fallback still needs to
+        # exist after broader hardware validation of the BlueZ obexd path. It
+        # remains in place because some user environments and targets may still
+        # require a direct socket fallback when the shared D-Bus path is absent
+        # or rejected, and removing it now would be an overclaim.
         try:
             self.sock = socket.socket(
                 socket.AF_BLUETOOTH, socket.SOCK_STREAM, socket.BTPROTO_RFCOMM
@@ -49,15 +77,24 @@ class OPPClient:
             self.sock.send(packet)
             response = self._recv()
             if response and response[0] == OBEX_RESPONSE_SUCCESS:
+                self.last_backend = "raw"
+                self.last_connect_error = ""
                 success("OPP connected")
                 return True
+            self.last_connect_error = "OPP connect rejected"
             error("OPP connect rejected")
             return False
         except OSError as e:
+            self.last_connect_error = str(e)
             error(f"OPP connect failed: {e}")
             return False
 
     def disconnect(self):
+        if self._obex_session is not None:
+            self._obex_session.disconnect()
+            self._obex_session = None
+            info("OPP disconnected")
+            return
         if self.sock:
             try:
                 # Send OBEX Disconnect
@@ -76,15 +113,57 @@ class OPPClient:
 
     def push_file(self, filepath: str) -> bool:
         """Push a file to the remote device via OPP."""
+        filename = os.path.basename(filepath)
+        mime_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        self.last_transfer = {
+            "filepath": filepath,
+            "filename": filename,
+            "mime_type": mime_type,
+            "backend": self.last_backend,
+            "channel": self.channel,
+            "bytes": 0,
+            "status": "failed",
+            "transfer_path": "",
+            "transfer_properties": {},
+            "error": "",
+        }
         if not os.path.exists(filepath):
+            self.last_transfer["error"] = f"File not found: {filepath}"
             error(f"File not found: {filepath}")
             return False
 
-        filename = os.path.basename(filepath)
         with open(filepath, "rb") as f:
             data = f.read()
+        self.last_transfer["bytes"] = len(data)
 
         info(f"Pushing {filename} ({len(data)} bytes)...")
+
+        if self._obex_session is not None:
+            try:
+                transfer_path, transfer_props = self._obex_session.send_file(filepath)
+                transfer_final = self._obex_session.wait_for_transfer(transfer_path)
+                self.last_transfer["transfer_path"] = transfer_path
+                self.last_transfer["transfer_properties"] = transfer_final
+                if str(transfer_final.get("Status", "complete")).lower() == "complete":
+                    self.last_transfer["status"] = "complete"
+                    success(f"Pushed: {filename}")
+                    return True
+                self.last_transfer["error"] = f"OPP D-Bus transfer incomplete: {transfer_props}"
+                error(f"OPP D-Bus transfer did not complete cleanly: {transfer_props}")
+                return False
+            except ObexError as exc:
+                self.last_transfer["error"] = str(exc)
+                error(f"OPP D-Bus transfer failed, using raw OBEX fallback: {exc}")
+                # TODO: If a real target requires raw OBEX retry after a BlueZ
+                # D-Bus transfer failure, add an explicit reconnect-and-retry
+                # path here. Falling through today would crash because no raw
+                # RFCOMM socket exists when the D-Bus session was primary.
+                return False
+
+        if self.sock is None:
+            self.last_transfer["error"] = "No raw OPP socket available"
+            error("No raw OPP socket available")
+            return False
 
         # Build PUT request
         headers = b""
@@ -92,6 +171,9 @@ class OPPClient:
         # Name header
         name_bytes = filename.encode("utf-16-be") + b"\x00\x00"
         headers += struct.pack(">BH", OBEX_HEADER_NAME, len(name_bytes) + 3) + name_bytes
+
+        type_bytes = mime_type.encode("ascii", errors="ignore") + b"\x00"
+        headers += struct.pack(">BH", OBEX_HEADER_TYPE, len(type_bytes) + 3) + type_bytes
 
         # Length header
         headers += struct.pack(">BI", OBEX_HEADER_LENGTH, len(data))
@@ -113,6 +195,7 @@ class OPPClient:
 
             response = self._recv()
             if not response or response[0] != OBEX_RESPONSE_CONTINUE:
+                self.last_transfer["error"] = "PUT rejected during transfer"
                 error("PUT rejected during transfer")
                 return False
 
@@ -130,16 +213,20 @@ class OPPClient:
                 response = self._recv()
                 expected = OBEX_RESPONSE_SUCCESS if is_final else OBEX_RESPONSE_CONTINUE
                 if not response or response[0] != expected:
+                    self.last_transfer["error"] = "PUT failed mid-transfer"
                     error("PUT failed mid-transfer")
                     return False
 
+            self.last_transfer["status"] = "complete"
             success(f"Pushed: {filename}")
             return True
 
         response = self._recv()
         if response and response[0] == OBEX_RESPONSE_SUCCESS:
+            self.last_transfer["status"] = "complete"
             success(f"Pushed: {filename}")
             return True
+        self.last_transfer["error"] = "PUT final response not OK"
         error("PUT final response not OK")
         return False
 

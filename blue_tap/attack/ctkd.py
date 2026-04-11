@@ -18,7 +18,13 @@ from __future__ import annotations
 
 import time
 
+from blue_tap.utils.bt_helpers import normalize_mac
 from blue_tap.utils.output import error, info, success, warning
+from blue_tap.core.result_schema import (
+    EXECUTION_COMPLETED, EXECUTION_FAILED, EXECUTION_ERROR,
+    build_run_envelope, make_execution, make_evidence, make_run_id, now_iso,
+)
+from blue_tap.core.cli_events import emit_cli_event
 
 
 class CTKDAttack:
@@ -30,8 +36,20 @@ class CTKDAttack:
     """
 
     def __init__(self, target: str, hci: str = "hci1") -> None:
-        self.target = target
+        self.target = normalize_mac(target)
         self.hci = hci
+        self.run_id = make_run_id("ctkd")
+        self._started_at = now_iso()
+        self._cli_events: list[dict] = []
+        self._executions: list[dict] = []
+
+    def _emit(self, event_type: str, message: str, **details):
+        evt = emit_cli_event(
+            event_type=event_type, module="attack", run_id=self.run_id,
+            target=self.target, adapter=self.hci, message=message,
+            details=details,
+        )
+        self._cli_events.append(evt)
 
     def probe(self) -> dict:
         """Probe for CTKD vulnerability.
@@ -52,6 +70,9 @@ class CTKDAttack:
         from blue_tap.core.firmware import ConnectionInspector, DarkFirmwareManager
         from blue_tap.core.hci_vsc import HCIVSCSocket
 
+        phase_start = now_iso()
+        self._emit("run_started", "CTKD probe starting")
+
         result: dict = {
             "target": self.target,
             "vulnerable": False,
@@ -65,6 +86,24 @@ class CTKDAttack:
         if not fw.is_darkfirmware_loaded(self.hci):
             result["error"] = "DarkFirmware not loaded"
             error(f"DarkFirmware not detected on {self.hci}")
+            self._executions.append(make_execution(
+                kind="check",
+                id="ctkd-darkfirmware-check",
+                title="CTKD DarkFirmware Check",
+                module="attack",
+                protocol="BR/EDR",
+                execution_status=EXECUTION_FAILED,
+                module_outcome="failed",
+                started_at=phase_start,
+                completed_at=now_iso(),
+                evidence=make_evidence(
+                    summary="DarkFirmware not loaded on adapter",
+                    confidence="high",
+                    observations=["DarkFirmware not detected on adapter"],
+                ),
+                tags=["cve", "CVE-2020-15802", "ctkd", "blurtooth"],
+            ))
+            self._emit("run_completed", "CTKD probe skipped: DarkFirmware not loaded")
             return result
 
         hci_idx = int(self.hci.replace("hci", ""))
@@ -161,14 +200,121 @@ class CTKDAttack:
         except PermissionError:
             result["error"] = "need root or CAP_NET_RAW"
             error(f"Cannot open HCI socket on {self.hci}")
+            self._executions.append(make_execution(
+                kind="check",
+                id="ctkd-probe",
+                title="CTKD Probe",
+                module="attack",
+                protocol="BR/EDR",
+                execution_status=EXECUTION_ERROR,
+                module_outcome="error",
+                started_at=phase_start,
+                completed_at=now_iso(),
+                evidence=make_evidence(
+                    summary="need root or CAP_NET_RAW",
+                    confidence="high",
+                    observations=["Permission denied opening HCI socket"],
+                ),
+                tags=["cve", "CVE-2020-15802", "ctkd", "blurtooth"],
+            ))
+            self._emit("run_completed", "CTKD probe failed: permission denied")
+            return result
         except OSError as exc:
             result["error"] = str(exc)
             error(f"HCI socket error: {exc}")
+            self._executions.append(make_execution(
+                kind="check",
+                id="ctkd-probe",
+                title="CTKD Probe",
+                module="attack",
+                protocol="BR/EDR",
+                execution_status=EXECUTION_ERROR,
+                module_outcome="error",
+                started_at=phase_start,
+                completed_at=now_iso(),
+                evidence=make_evidence(
+                    summary=str(exc),
+                    confidence="high",
+                    observations=["HCI socket error during probe"],
+                ),
+                tags=["cve", "CVE-2020-15802", "ctkd", "blurtooth"],
+            ))
+            self._emit("run_completed", f"CTKD probe failed: HCI socket error: {exc}")
+            return result
         except Exception as exc:
             result["error"] = str(exc)
             error(f"CTKD probe failed: {exc}")
+            self._executions.append(make_execution(
+                kind="check",
+                id="ctkd-probe",
+                title="CTKD Probe",
+                module="attack",
+                protocol="BR/EDR",
+                execution_status=EXECUTION_ERROR,
+                module_outcome="error",
+                started_at=phase_start,
+                completed_at=now_iso(),
+                evidence=make_evidence(
+                    summary=str(exc),
+                    confidence="high",
+                    observations=["Unexpected error during CTKD probe"],
+                ),
+                tags=["cve", "CVE-2020-15802", "ctkd", "blurtooth"],
+            ))
+            self._emit("run_completed", f"CTKD probe failed: {exc}")
+            return result
 
+        # Success path
+        outcome = "confirmed" if result["vulnerable"] else "not_applicable"
+        self._executions.append(make_execution(
+            kind="check",
+            id="ctkd-probe",
+            title="CTKD Probe",
+            module="attack",
+            protocol="BR/EDR",
+            execution_status=EXECUTION_COMPLETED,
+            module_outcome=outcome,
+            started_at=phase_start,
+            completed_at=now_iso(),
+            evidence=make_evidence(
+                summary="CTKD key material comparison completed",
+                confidence="high",
+                observations=[
+                    f"key_changed={result['key_changed']}",
+                    f"shared_slots={len(result['shared_slots'])}",
+                ],
+                module_evidence={
+                    "key_material_before": result.get("before", {}),
+                    "key_material_after": result.get("after", {}),
+                    "shared_slots": result.get("shared_slots", []),
+                },
+            ),
+            tags=["cve", "CVE-2020-15802", "ctkd", "blurtooth"],
+        ))
+        self._emit("run_completed", f"CTKD probe finished: {outcome}")
         return result
+
+    def build_envelope(self) -> dict:
+        capability_limitations = [
+            "Requires DarkFirmware connection-table inspection; CTKD probe cannot run through host-side BlueZ data alone."
+        ]
+        return build_run_envelope(
+            schema="blue_tap.attack.result",
+            module="attack",
+            target=self.target,
+            adapter=self.hci,
+            operator_context={"command": "ctkd", "cve": "CVE-2020-15802"},
+            summary={
+                "operation": "ctkd",
+                "cve": "CVE-2020-15802",
+                "vulnerable": any(e.get("module_outcome") == "confirmed" for e in self._executions),
+                "capability_limitations": capability_limitations,
+            },
+            executions=self._executions,
+            module_data={"cli_events": self._cli_events, "capability_limitations": capability_limitations},
+            started_at=self._started_at,
+            run_id=self.run_id,
+        )
 
     def monitor(self, interval: float = 3.0) -> None:
         """Continuously monitor key material changes across all connection slots.

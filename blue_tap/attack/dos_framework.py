@@ -5,9 +5,16 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import Any, Callable
 
+from blue_tap.core.result_schema import (
+    EXECUTION_COMPLETED,
+    EXECUTION_ERROR,
+    build_run_envelope,
+    make_evidence,
+    make_execution,
+    now_iso,
+)
 from blue_tap.fuzz.protocols.att import build_find_info_req
 from blue_tap.fuzz.transport import BLETransport
 from blue_tap.utils.bt_helpers import check_tool, run_cmd
@@ -20,6 +27,10 @@ DOS_STATUS_FAILED = "failed"
 DOS_STATUS_ERROR = "error"
 DOS_STATUS_NOT_APPLICABLE = "not_applicable"
 DOS_STATUS_SKIPPED = "skipped"
+
+# Probe timeouts (seconds) — kept as named constants so they're tunable in one place
+_L2PING_PROBE_TIMEOUT = 10   # hcitool/l2ping round-trip probe timeout
+_NAME_PROBE_TIMEOUT = 8      # hcitool name lookup timeout
 
 RECOVERY_PROBE_CLASSIC_L2PING = "classic_l2ping"
 RECOVERY_PROBE_CLASSIC_NAME = "classic_name"
@@ -44,11 +55,6 @@ class DosCheck:
     requires_pairing: bool = False
     category: str = "protocol"
     recovery_probes: tuple[str, ...] = field(default_factory=tuple)
-
-
-def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
 
 def _detect_unresponsive_text(text: str) -> bool:
     lowered = text.lower()
@@ -111,7 +117,7 @@ def default_recovery_probes(protocol: str) -> tuple[str, ...]:
 def _probe_classic_l2ping(address: str, hci: str) -> tuple[bool, str]:
     if not check_tool("l2ping"):
         return False, "classic_l2ping unavailable"
-    result = run_cmd(["l2ping", "-i", hci, "-c", "1", "-t", "3", address], timeout=10)
+    result = run_cmd(["l2ping", "-i", hci, "-c", "1", "-t", "3", address], timeout=_L2PING_PROBE_TIMEOUT)
     if result.returncode == 0:
         line = result.stdout.strip().splitlines()
         return True, line[-1] if line else "classic_l2ping success"
@@ -122,7 +128,7 @@ def _probe_classic_l2ping(address: str, hci: str) -> tuple[bool, str]:
 def _probe_classic_name(address: str, hci: str) -> tuple[bool, str]:
     if not check_tool("hcitool"):
         return False, "classic_name unavailable"
-    result = run_cmd(["hcitool", "-i", hci, "name", address], timeout=8)
+    result = run_cmd(["hcitool", "-i", hci, "name", address], timeout=_NAME_PROBE_TIMEOUT)
     if result.returncode == 0 and result.stdout.strip():
         return True, f"classic_name responded: {result.stdout.strip()}"
     stderr = (result.stderr or "").strip()
@@ -280,23 +286,70 @@ def build_dos_run_result(
     recovery_timeout: int | None = None,
     interrupted_on: str | None = None,
     abort_reason: str | None = None,
+    run_id: str | None = None,
 ) -> dict[str, Any]:
     summary = summarize_dos_checks(checks)
-    return {
-        "schema": "blue_tap.dos.result",
-        "schema_version": 1,
-        "target": target,
-        "adapter": adapter,
-        "mode": mode,
-        "selected_checks": list(selected_checks or []),
-        "started_at": started_at,
-        "completed_at": completed_at or now_iso(),
-        "recovery_timeout": recovery_timeout,
-        "interrupted_on": interrupted_on,
-        "abort_reason": abort_reason,
-        "summary": summary,
-        "checks": checks,
-    }
+    finished = completed_at or now_iso()
+    executions = []
+    for check in checks:
+        raw_status = str(check.get("status", DOS_STATUS_ERROR))
+        evidence = make_evidence(
+            summary=str(check.get("evidence", "")) or f"{check.get('title', 'DoS check')} completed",
+            confidence="high" if raw_status in {DOS_STATUS_UNRESPONSIVE, DOS_STATUS_RECOVERED} else "medium",
+            observations=[str(check.get("evidence", ""))] if check.get("evidence") else [],
+            state_changes=[
+                f"recovered={check.get('recovery', {}).get('recovered')}",
+                f"waited_seconds={check.get('recovery', {}).get('waited_seconds', 0)}",
+            ] if check.get("recovery") else [],
+            module_evidence={
+                "recovery": check.get("recovery", {}),
+                "cves": check.get("cves", []),
+                "params": check.get("params", {}),
+            },
+        )
+        executions.append(
+            make_execution(
+                kind="check",
+                id=check.get("check_id", "dos_check"),
+                title=check.get("title", "DoS Check"),
+                module="dos",
+                protocol=check.get("protocol", "unknown"),
+                execution_status=EXECUTION_ERROR if raw_status == DOS_STATUS_ERROR else EXECUTION_COMPLETED,
+                module_outcome=raw_status,
+                severity=None,
+                destructive=bool(check.get("destructive", True)),
+                requires_pairing=bool(check.get("requires_pairing", False)),
+                started_at=check.get("started_at", started_at),
+                completed_at=check.get("completed_at", finished),
+                evidence=evidence,
+                tags=["dos", check.get("category", "protocol")],
+                module_data=dict(check),
+            )
+        )
+    return build_run_envelope(
+        schema="blue_tap.dos.result",
+        module="dos",
+        target=target,
+        adapter=adapter,
+        operator_context={
+            "mode": mode,
+            "selected_checks": list(selected_checks or []),
+            "recovery_timeout": recovery_timeout,
+        },
+        summary=summary,
+        executions=executions,
+        module_data={
+            "mode": mode,
+            "selected_checks": list(selected_checks or []),
+            "recovery_timeout": recovery_timeout,
+            "interrupted_on": interrupted_on,
+            "abort_reason": abort_reason,
+            "checks": checks,
+        },
+        started_at=started_at,
+        completed_at=finished,
+        run_id=run_id,
+    )
 
 
 def summarize_dos_checks(checks: list[dict]) -> dict[str, Any]:
@@ -315,3 +368,53 @@ def summarize_dos_checks(checks: list[dict]) -> dict[str, Any]:
         "not_applicable": counts.get(DOS_STATUS_NOT_APPLICABLE, 0),
         "skipped": counts.get(DOS_STATUS_SKIPPED, 0),
     }
+
+
+def build_dos_operation_result(
+    *,
+    target: str,
+    adapter: str,
+    operation: str,
+    title: str,
+    protocol: str,
+    raw_result: dict[str, Any],
+    started_at: str,
+    observations: list[str] | None = None,
+    destructive: bool = True,
+    requires_pairing: bool = False,
+    category: str = "protocol",
+    run_id: str | None = None,
+) -> dict[str, Any]:
+    """Wrap a legacy standalone DoS command in the standardized DoS envelope."""
+
+    raw = dict(raw_result or {})
+    status = infer_dos_status(raw)
+    evidence_summary = next(
+        (str(raw.get(key)) for key in ("notes", "error", "result", "target_status") if raw.get(key)),
+        f"{title} completed",
+    )
+    check = {
+        "check_id": operation,
+        "title": title,
+        "protocol": protocol,
+        "status": status,
+        "params": {},
+        "requires_pairing": requires_pairing,
+        "destructive": destructive,
+        "category": category,
+        "evidence": evidence_summary,
+        "raw_result": raw,
+        "recovery": {},
+        "started_at": started_at,
+        "completed_at": now_iso(),
+    }
+    return build_dos_run_result(
+        target=target,
+        adapter=adapter,
+        mode="single_operation",
+        checks=[check],
+        started_at=started_at,
+        completed_at=now_iso(),
+        selected_checks=[operation],
+        run_id=run_id,
+    )

@@ -3,6 +3,7 @@
 import errno
 import socket
 
+from blue_tap.recon.spec_interpretation import interpret_l2cap_probe
 from blue_tap.utils.output import info, success, error, warning, verbose
 
 
@@ -197,10 +198,17 @@ class L2CAPScanner:
 
         Returns dict with psm, status (open/closed/auth_required/host_unreachable), name.
         """
+        import time
+
         result = {
             "psm": psm,
             "status": "closed",
             "name": KNOWN_PSMS.get(psm, f"Dynamic/Vendor (0x{psm:04x})"),
+            "protocol_family": _protocol_family(psm),
+            "behavior_hint": "",
+            "evidence": "",
+            "connect_latency_ms": None,
+            "status_reason": "",
         }
 
         sock = socket.socket(
@@ -211,20 +219,77 @@ class L2CAPScanner:
             sock.bind((self._local_addr, 0))
 
         try:
+            connect_started = time.time()
             sock.connect((self.address, psm))
+            result["connect_latency_ms"] = round((time.time() - connect_started) * 1000, 1)
             result["status"] = "open"
+            result["behavior_hint"] = _classify_l2cap_behavior(psm, "open")
+            result["status_reason"] = "remote accepted l2cap connection"
+            result["evidence"] = f"l2cap connect accepted on psm 0x{psm:04x}"
         except OSError as exc:
             if exc.errno == errno.ECONNREFUSED:
                 result["status"] = "closed"
+                result["behavior_hint"] = _classify_l2cap_behavior(psm, "closed")
+                result["status_reason"] = "actively refused"
+                result["evidence"] = "remote refused l2cap connection"
             elif exc.errno == errno.EACCES:
                 result["status"] = "auth_required"
+                result["behavior_hint"] = _classify_l2cap_behavior(psm, "auth_required")
+                result["status_reason"] = "authentication gate"
+                result["evidence"] = "remote requires authentication or pairing"
             elif exc.errno in (errno.EHOSTDOWN, errno.EHOSTUNREACH, errno.ENETDOWN):
                 result["status"] = "host_unreachable"
+                result["behavior_hint"] = _classify_l2cap_behavior(psm, "host_unreachable")
+                result["status_reason"] = "transport unreachable"
+                result["evidence"] = "host unreachable during l2cap connect"
             elif isinstance(exc, socket.timeout):
                 result["status"] = "timeout"
+                result["behavior_hint"] = _classify_l2cap_behavior(psm, "timeout")
+                result["status_reason"] = "no response"
+                result["evidence"] = "l2cap connect timed out"
             else:
                 result["status"] = "closed"
+                result["behavior_hint"] = _classify_l2cap_behavior(psm, "closed")
+                result["status_reason"] = "generic failure"
+                result["evidence"] = str(exc)
         finally:
             sock.close()
 
+        result["spec_interpretation"] = interpret_l2cap_probe(result, advertised=False)
         return result
+
+
+def _protocol_family(psm: int) -> str:
+    if psm in {1, 3, 5, 7}:
+        return "classic_core"
+    if psm in {15, 17}:
+        return "hid"
+    if psm in {23, 25, 27}:
+        return "media_control"
+    if psm in {31, 35, 37}:
+        return "ble_or_ip"
+    if psm >= 4097:
+        return "dynamic_vendor"
+    return "other"
+
+
+def _classify_l2cap_behavior(psm: int, status: str) -> str:
+    if status == "open":
+        if psm == 1:
+            return "sdp_reachable"
+        if psm == 31:
+            return "att_or_ble_att"
+        if psm in {15, 17}:
+            return "hid_surface"
+        if psm in {23, 25, 27}:
+            return "media_surface"
+        if psm >= 4097:
+            return "vendor_dynamic_surface"
+        return "service_reachable"
+    if status == "auth_required":
+        return "protected_surface"
+    if status == "timeout":
+        return "slow_or_filtered"
+    if status == "host_unreachable":
+        return "link_unreachable"
+    return "refused_surface"

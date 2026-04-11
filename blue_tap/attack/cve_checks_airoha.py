@@ -222,6 +222,7 @@ def _check_airoha_race_bredr(address: str, services: list[dict]) -> list[dict]:
 
     AF_BLUETOOTH = getattr(socket, "AF_BLUETOOTH", 31)
     BTPROTO_RFCOMM = getattr(socket, "BTPROTO_RFCOMM", 3)
+    sock = None
     try:
         sock = socket.socket(AF_BLUETOOTH, socket.SOCK_STREAM, BTPROTO_RFCOMM)
         sock.settimeout(5.0)
@@ -231,6 +232,11 @@ def _check_airoha_race_bredr(address: str, services: list[dict]) -> list[dict]:
         except Exception:
             pass
     except OSError as exc:
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
         return [_finding(
             "MEDIUM", "CVE-2025-20701: Inconclusive",
             "Known Airoha target did not cleanly accept the unauthenticated RFCOMM probe, "
@@ -239,6 +245,11 @@ def _check_airoha_race_bredr(address: str, services: list[dict]) -> list[dict]:
             evidence=f"RFCOMM channel {channel} connect failed: {exc}",
         )]
     except Exception as exc:
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
         return [_finding(
             "MEDIUM", "CVE-2025-20701: Inconclusive",
             "Unauthenticated RFCOMM probe did not complete cleanly on the identified Airoha target.",

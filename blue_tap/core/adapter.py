@@ -1,10 +1,13 @@
 """HCI Bluetooth adapter management and capability detection."""
 
+import logging
 import os
 import re
 
 from blue_tap.utils.bt_helpers import run_cmd, get_hci_adapters
 from blue_tap.utils.output import info, success, error, warning
+
+logger = logging.getLogger(__name__)
 
 
 def _adapter_exists(hci: str) -> bool:
@@ -129,8 +132,12 @@ def get_adapter_info(hci: str) -> dict:
                 ext["capabilities"]["memory_rw"] = True
                 if "DarkFirmware" not in ext.get("features", []):
                     ext.setdefault("features", []).append("DarkFirmware")
-        except Exception:
-            pass  # DarkFirmware check failed, non-fatal
+        except Exception as exc:
+            logger.warning(
+                "DarkFirmware detection skipped: %s: %s",
+                type(exc).__name__, exc,
+                extra={"hci": hci},
+            )
 
     # --- btmgmt info for management-level details ---
     idx = hci.replace("hci", "")
@@ -305,37 +312,52 @@ def _hci_cmd(hci: str, *args: str) -> bool:
     return True
 
 
-def adapter_up(hci: str = "hci0") -> bool:
-    """Bring an adapter up."""
+def adapter_up(hci: str = "hci0") -> dict:
+    """Bring an adapter up.
+
+    Returns:
+        {"success": bool, "hci": str, "operation": str, "error": str|None}
+    """
     if not _adapter_exists(hci):
-        return False
+        return {"success": False, "hci": hci, "operation": "up", "error": f"Adapter {hci} not found"}
     if _hci_cmd(hci, "up"):
         success(f"{hci} is UP")
-        return True
-    return False
+        logger.info("Adapter brought up", extra={"hci": hci})
+        return {"success": True, "hci": hci, "operation": "up", "error": None}
+    return {"success": False, "hci": hci, "operation": "up", "error": f"hciconfig {hci} up failed"}
 
 
-def adapter_down(hci: str = "hci0") -> bool:
-    """Bring an adapter down."""
+def adapter_down(hci: str = "hci0") -> dict:
+    """Bring an adapter down.
+
+    Returns:
+        {"success": bool, "hci": str, "operation": str, "error": str|None}
+    """
     if not _adapter_exists(hci):
-        return False
+        return {"success": False, "hci": hci, "operation": "down", "error": f"Adapter {hci} not found"}
     if _hci_cmd(hci, "down"):
         info(f"{hci} is DOWN")
-        return True
-    return False
+        logger.info("Adapter brought down", extra={"hci": hci})
+        return {"success": True, "hci": hci, "operation": "down", "error": None}
+    return {"success": False, "hci": hci, "operation": "down", "error": f"hciconfig {hci} down failed"}
 
 
-def adapter_reset(hci: str = "hci0") -> bool:
-    """Reset an adapter."""
+def adapter_reset(hci: str = "hci0") -> dict:
+    """Reset an adapter.
+
+    Returns:
+        {"success": bool, "hci": str, "operation": str, "error": str|None}
+    """
     if not _adapter_exists(hci):
-        return False
+        return {"success": False, "hci": hci, "operation": "reset", "error": f"Adapter {hci} not found"}
     if _hci_cmd(hci, "reset"):
         info(f"{hci} reset complete")
-        return True
-    return False
+        logger.info("Adapter reset", extra={"hci": hci})
+        return {"success": True, "hci": hci, "operation": "reset", "error": None}
+    return {"success": False, "hci": hci, "operation": "reset", "error": f"hciconfig {hci} reset failed"}
 
 
-def set_device_class(hci: str, device_class: str = "0x5a020c") -> bool:
+def set_device_class(hci: str, device_class: str = "0x5a020c") -> dict:
     """Set the Bluetooth device class.
 
     Common classes for IVI impersonation:
@@ -343,23 +365,76 @@ def set_device_class(hci: str, device_class: str = "0x5a020c") -> bool:
       0x200408 - Audio/Video: Portable Audio
       0x5a020c - Phone (smartphone)
       0x7a020c - Smart Phone
+
+    Args:
+        hci: HCI adapter name (e.g., "hci0")
+        device_class: Hex string with or without 0x prefix, range 0x000000-0xFFFFFF
+
+    Raises:
+        ValueError: If device_class is not a valid hex string in range 0x000000-0xFFFFFF
+
+    Returns:
+        {"success": bool, "hci": str, "device_class": str}
     """
+    # Normalise: accept with or without 0x prefix
+    normalised = device_class if device_class.lower().startswith("0x") else f"0x{device_class}"
+    # Validate hex characters
+    hex_body = normalised[2:]
+    if not hex_body or not all(c in "0123456789abcdefABCDEF" for c in hex_body):
+        raise ValueError(
+            f"device_class must be a valid hex string (e.g. 0x5a020c), got: {device_class!r}"
+        )
+    val = int(normalised, 16)
+    if not 0 <= val <= 0xFFFFFF:
+        raise ValueError(
+            f"device_class must be in range 0x000000-0xFFFFFF, got: {device_class!r} ({val:#x})"
+        )
+
     if not _adapter_exists(hci):
-        return False
-    if _hci_cmd(hci, "class", device_class):
-        success(f"{hci} device class set to {device_class}")
-        return True
-    return False
+        return {"success": False, "hci": hci, "device_class": normalised}
+    if _hci_cmd(hci, "class", normalised):
+        success(f"{hci} device class set to {normalised}")
+        logger.info("Device class set", extra={"hci": hci, "device_class": normalised})
+        return {"success": True, "hci": hci, "device_class": normalised}
+    return {"success": False, "hci": hci, "device_class": normalised}
 
 
-def set_device_name(hci: str, name: str) -> bool:
-    """Set the Bluetooth device name (useful for impersonation)."""
+def set_device_name(hci: str, name: str) -> dict:
+    """Set the Bluetooth device name (useful for impersonation).
+
+    Args:
+        hci: HCI adapter name (e.g., "hci0")
+        name: Device name; must be at most 248 bytes when UTF-8 encoded (Bluetooth spec limit)
+
+    Raises:
+        ValueError: If name exceeds 248 bytes when UTF-8 encoded
+
+    Returns:
+        {"success": bool, "hci": str, "name": str, "previous_name": str|None}
+    """
+    name_bytes = name.encode("utf-8", errors="replace")
+    if len(name_bytes) > 248:
+        raise ValueError(
+            f"Device name too long: {len(name_bytes)} bytes (max 248 bytes UTF-8 encoded). "
+            f"Received: {name!r}"
+        )
+
     if not _adapter_exists(hci):
-        return False
+        return {"success": False, "hci": hci, "name": name, "previous_name": None}
+
+    # Capture previous name before changing
+    previous_name: str | None = None
+    prev_result = run_cmd(["hciconfig", hci, "name"])
+    if prev_result.returncode == 0:
+        m = re.search(r"Name:\s*'(.+?)'", prev_result.stdout)
+        if m:
+            previous_name = m.group(1)
+
     if _hci_cmd(hci, "name", name):
         success(f"{hci} name set to '{name}'")
-        return True
-    return False
+        logger.info("Device name set", extra={"hci": hci, "name": name, "previous_name": previous_name})
+        return {"success": True, "hci": hci, "name": name, "previous_name": previous_name}
+    return {"success": False, "hci": hci, "name": name, "previous_name": previous_name}
 
 
 def enable_page_scan(hci: str) -> bool:
@@ -382,38 +457,72 @@ def disable_page_scan(hci: str) -> bool:
     return False
 
 
-def enable_ssp(hci: str) -> bool:
-    """Enable Secure Simple Pairing on the adapter."""
+def enable_ssp(hci: str) -> dict:
+    """Enable Secure Simple Pairing on the adapter.
+
+    Returns:
+        {"success": bool, "hci": str, "ssp_enabled": bool, "error": str|None}
+    """
     if not _adapter_exists(hci):
-        return False
+        return {"success": False, "hci": hci, "ssp_enabled": False, "error": f"Adapter {hci} not found"}
     idx = hci.replace("hci", "")
     # Need to power off first to change SSP on some adapters
-    run_cmd(["sudo", "btmgmt", "--index", idx, "power", "off"])
+    power_off = run_cmd(["sudo", "btmgmt", "--index", idx, "power", "off"])
+    if power_off.returncode != 0:
+        warning(f"Failed to power off {hci} before SSP change")
+        logger.warning("Power off before SSP enable failed", extra={"hci": hci, "stderr": power_off.stderr.strip()})
+
     result = run_cmd(["sudo", "btmgmt", "--index", idx, "ssp", "on"])
-    run_cmd(["sudo", "btmgmt", "--index", idx, "power", "on"])
+
+    power_on = run_cmd(["sudo", "btmgmt", "--index", idx, "power", "on"])
+    if power_on.returncode != 0:
+        error(f"Failed to power on {hci} after SSP change — adapter may be DOWN")
+        logger.error("Power on after SSP enable failed — attempting hciconfig up fallback", extra={"hci": hci})
+        run_cmd(["sudo", "hciconfig", hci, "up"])
 
     combined = (result.stdout + result.stderr).lower()
     if result.returncode == 0 and "not supported" not in combined:
         success(f"SSP enabled on {hci}")
-        return True
+        logger.info("SSP enabled", extra={"hci": hci})
+        return {"success": True, "hci": hci, "ssp_enabled": True, "error": None}
     else:
-        error(f"Failed to enable SSP: {result.stderr.strip() or result.stdout.strip()}")
-        return False
+        err_msg = result.stderr.strip() or result.stdout.strip()
+        error(f"Failed to enable SSP: {err_msg}")
+        logger.error("SSP enable failed", extra={"hci": hci, "detail": err_msg})
+        return {"success": False, "hci": hci, "ssp_enabled": False, "error": err_msg}
 
 
-def disable_ssp(hci: str) -> bool:
-    """Disable SSP (force legacy PIN pairing)."""
+def disable_ssp(hci: str) -> dict:
+    """Disable SSP (force legacy PIN pairing).
+
+    Returns:
+        {"success": bool, "hci": str, "ssp_enabled": bool, "error": str|None}
+    """
     if not _adapter_exists(hci):
-        return False
+        return {"success": False, "hci": hci, "ssp_enabled": True, "error": f"Adapter {hci} not found"}
     idx = hci.replace("hci", "")
-    run_cmd(["sudo", "btmgmt", "--index", idx, "power", "off"])
+    power_off = run_cmd(["sudo", "btmgmt", "--index", idx, "power", "off"])
+    if power_off.returncode != 0:
+        warning(f"Failed to power off {hci} before SSP change")
+        logger.warning("Power off before SSP disable failed", extra={"hci": hci, "stderr": power_off.stderr.strip()})
+
     result = run_cmd(["sudo", "btmgmt", "--index", idx, "ssp", "off"])
-    run_cmd(["sudo", "btmgmt", "--index", idx, "power", "on"])
+
+    power_on = run_cmd(["sudo", "btmgmt", "--index", idx, "power", "on"])
+    if power_on.returncode != 0:
+        error(f"Failed to power on {hci} after SSP change — adapter may be DOWN")
+        logger.error("Power on after SSP disable failed — attempting hciconfig up fallback", extra={"hci": hci})
+        run_cmd(["sudo", "hciconfig", hci, "up"])
 
     combined = (result.stdout + result.stderr).lower()
     if result.returncode == 0 and "not supported" not in combined:
         warning(f"SSP disabled on {hci} - legacy PIN pairing mode")
-        return True
+        logger.info("SSP disabled", extra={"hci": hci})
+        return {"success": True, "hci": hci, "ssp_enabled": False, "error": None}
     else:
-        error(f"Failed to disable SSP: {result.stderr.strip() or result.stdout.strip()}")
-        return False
+        err_msg = result.stderr.strip() or result.stdout.strip()
+        error(f"Failed to disable SSP: {err_msg}")
+        logger.error("SSP disable failed", extra={"hci": hci, "detail": err_msg})
+        # SSP state is unknown after failure — report True (unchanged) as
+        # the disable command did not succeed.
+        return {"success": False, "hci": hci, "ssp_enabled": True, "error": err_msg}  # unchanged: SSP still enabled
