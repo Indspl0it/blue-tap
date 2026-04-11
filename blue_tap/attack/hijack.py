@@ -227,15 +227,16 @@ class HijackSession:
                 result = clone_device_identity(
                     self.hci, self.phone_address, self.phone_name, device_class
                 )
-            if result:
+            clone_ok = result.get("success", False) if isinstance(result, dict) else bool(result)
+            if clone_ok:
                 success(f"Now impersonating: {self.phone_name} ({target(self.phone_address)})")
                 info("Waiting 2s for adapter to stabilize...")
                 time.sleep(2)
             else:
                 error("Impersonation failed")
 
-        outcome = "success" if result else "failed"
-        exec_status = EXECUTION_COMPLETED if result else EXECUTION_FAILED
+        outcome = "success" if clone_ok else "failed"
+        exec_status = EXECUTION_COMPLETED if clone_ok else EXECUTION_FAILED
         self._executions.append(make_execution(
             kind="phase", id="hijack_impersonate", title="Impersonation",
             module="attack", protocol="multi",
