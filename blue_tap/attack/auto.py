@@ -22,11 +22,15 @@ Each phase logs progress to the CLI and session. Failures in one phase
 do not stop subsequent phases — the workflow is resilient.
 """
 
+import logging
 import os
 import time
 
+from blue_tap.core.cli_events import emit_cli_event
 from blue_tap.utils.bt_helpers import normalize_mac
 from blue_tap.utils.output import info, success, warning, console, section
+
+logger = logging.getLogger(__name__)
 
 
 def _rssi_key(d):
@@ -38,10 +42,27 @@ def _rssi_key(d):
         return -999
 
 
-def _phase(name: str, results: dict, func, **kwargs) -> dict | None:
-    """Run a phase with error handling and timing."""
+def _phase(
+    name: str,
+    results: dict,
+    func,
+    *,
+    run_id: str = "",
+    target: str = "",
+    **kwargs,
+) -> dict | None:
+    """Run a phase with error handling, timing, and CliEvent emission."""
     start = time.time()
     info(f"  Starting...")
+    emit_cli_event(
+        event_type="phase_started",
+        module="auto",
+        run_id=run_id,
+        target=target,
+        message=f"Phase: {name}",
+        details={"phase": name},
+        echo=False,
+    )
     try:
         result = func(**kwargs)
         elapsed = time.time() - start
@@ -49,11 +70,30 @@ def _phase(name: str, results: dict, func, **kwargs) -> dict | None:
             result["_elapsed_seconds"] = round(elapsed, 1)
         results["phases"][name] = result or {"status": "success", "_elapsed_seconds": round(elapsed, 1)}
         success(f"  Complete ({elapsed:.1f}s)")
+        emit_cli_event(
+            event_type="execution_result",
+            module="auto",
+            run_id=run_id,
+            target=target,
+            message=f"Phase {name}: complete ({elapsed:.1f}s)",
+            details={"phase": name, "status": "success", "elapsed": round(elapsed, 1)},
+            echo=False,
+        )
         return result
     except Exception as exc:
         elapsed = time.time() - start
         warning(f"  Failed ({elapsed:.1f}s): {exc}")
+        logger.error("Auto phase %s failed after %.1fs: %s", name, elapsed, exc, exc_info=True)
         results["phases"][name] = {"status": "failed", "error": str(exc), "_elapsed_seconds": round(elapsed, 1)}
+        emit_cli_event(
+            event_type="execution_result",
+            module="auto",
+            run_id=run_id,
+            target=target,
+            message=f"Phase {name}: failed ({elapsed:.1f}s)",
+            details={"phase": name, "status": "failed", "error": str(exc), "elapsed": round(elapsed, 1)},
+            echo=False,
+        )
         return None
 
 
@@ -134,6 +174,12 @@ class AutoPentest:
             scan_duration = 30  # fallback to default
             warning("Invalid scan duration — using default 30 seconds")
 
+        from blue_tap.core.auto_framework import make_auto_run_id, build_auto_result
+        from blue_tap.core.result_schema import now_iso
+
+        self.run_id = make_auto_run_id()
+        run_started_at = now_iso()
+
         os.makedirs(output_dir, exist_ok=True)
         results = {"target": self.ivi_address, "status": "started", "phases": {}}
         start_time = time.time()
@@ -144,9 +190,20 @@ class AutoPentest:
         info(f"Fuzzing: {'skip' if skip_fuzz else f'{fuzz_duration:.0f}s ({fuzz_duration/60:.0f}m)'}")
         console.print()
 
+        emit_cli_event(
+            event_type="run_started",
+            module="auto",
+            run_id=self.run_id,
+            target=self.ivi_address,
+            message=f"Auto pentest started: {self.ivi_address}",
+            details={"target": self.ivi_address, "phases": 9},
+            echo=False,
+        )
+
         # ── Phase 1: Discovery ──────────────────────────────────────
         section("Phase 1: Device Discovery", style="bt.cyan")
         phone = _phase("discovery", results, self.discover_paired_phone,
+                        run_id=self.run_id, target=self.ivi_address,
                         scan_duration=scan_duration)
         phone_addr = phone.get("address", "") if phone else ""
         phone_name = phone.get("name", "") if phone else ""
@@ -169,7 +226,8 @@ class AutoPentest:
                     warning(f"  Indicator: {hint}")
             return {"status": "success", "fingerprint": fp}
 
-        _phase("fingerprint", results, _fingerprint)
+        _phase("fingerprint", results, _fingerprint,
+               run_id=self.run_id, target=self.ivi_address)
 
         # ── Phase 3: Reconnaissance ─────────────────────────────────
         section("Phase 3: Service Reconnaissance", style="bt.cyan")
@@ -207,7 +265,8 @@ class AutoPentest:
                 "services": services,
             }
 
-        _phase("recon", results, _recon)
+        _phase("recon", results, _recon,
+               run_id=self.run_id, target=self.ivi_address)
 
         # ── Phase 4: Vulnerability Assessment ───────────────────────
         section("Phase 4: Vulnerability Assessment", style="bt.yellow")
@@ -222,7 +281,8 @@ class AutoPentest:
             info(f"  {len(findings)} finding(s): {confirmed} confirmed, {critical} CRITICAL, {high} HIGH")
             return {"status": "success", "vulnscan": vulnscan, "findings": findings, "count": len(findings)}
 
-        vuln_result = _phase("vuln_assessment", results, _vulnscan)
+        vuln_result = _phase("vuln_assessment", results, _vulnscan,
+                             run_id=self.run_id, target=self.ivi_address)
         findings = vuln_result.get("vulnscan", {}).get("module_data", {}).get("findings", []) if vuln_result else []
 
         # ── Phase 5: Pairing & Encryption Attacks ───────────────────
@@ -261,7 +321,8 @@ class AutoPentest:
 
             return {"status": "success", "attacks": attack_results}
 
-        _phase("pairing_attacks", results, _pairing_attacks)
+        _phase("pairing_attacks", results, _pairing_attacks,
+               run_id=self.run_id, target=self.ivi_address)
 
         # ── Phase 6: Exploitation ───────────────────────────────────
         if not skip_exploit and phone_addr:
@@ -283,12 +344,22 @@ class AutoPentest:
                 finally:
                     session.cleanup()
 
-            _phase("exploitation", results, _exploit)
+            _phase("exploitation", results, _exploit,
+                   run_id=self.run_id, target=self.ivi_address)
         else:
             reason = "no phone discovered" if not phone_addr else "user requested"
             info("Phase 6: Exploitation skipped" +
                  (" (no phone discovered)" if not phone_addr else " (--skip-exploit)"))
             results["phases"]["exploitation"] = {"status": "skipped", "reason": reason, "_elapsed_seconds": 0}
+            emit_cli_event(
+                event_type="execution_skipped",
+                module="auto",
+                run_id=self.run_id,
+                target=self.ivi_address,
+                message=f"Phase exploitation: skipped ({reason})",
+                details={"phase": "exploitation", "reason": reason},
+                echo=False,
+            )
 
         # ── Phase 7: Protocol Fuzzing ───────────────────────────────
         if not skip_fuzz:
@@ -322,10 +393,20 @@ class AutoPentest:
 
                 return summary
 
-            _phase("fuzzing", results, _fuzz)
+            _phase("fuzzing", results, _fuzz,
+                   run_id=self.run_id, target=self.ivi_address)
         else:
             info("Phase 7: Protocol fuzzing skipped (--skip-fuzz)")
-            results["phases"]["fuzzing"] = {"status": "skipped", "_elapsed_seconds": 0}
+            results["phases"]["fuzzing"] = {"status": "skipped", "reason": "user requested", "_elapsed_seconds": 0}
+            emit_cli_event(
+                event_type="execution_skipped",
+                module="auto",
+                run_id=self.run_id,
+                target=self.ivi_address,
+                message="Phase fuzzing: skipped (user requested)",
+                details={"phase": "fuzzing", "reason": "user requested"},
+                echo=False,
+            )
 
         # ── Phase 8: DoS Testing ────────────────────────────────────
         if not skip_dos:
@@ -363,10 +444,20 @@ class AutoPentest:
                     "results": checks,
                 }
 
-            _phase("dos_testing", results, _dos)
+            _phase("dos_testing", results, _dos,
+                   run_id=self.run_id, target=self.ivi_address)
         else:
             info("Phase 8: DoS testing skipped (--skip-dos)")
-            results["phases"]["dos_testing"] = {"status": "skipped", "_elapsed_seconds": 0}
+            results["phases"]["dos_testing"] = {"status": "skipped", "reason": "user requested", "_elapsed_seconds": 0}
+            emit_cli_event(
+                event_type="execution_skipped",
+                module="auto",
+                run_id=self.run_id,
+                target=self.ivi_address,
+                message="Phase dos_testing: skipped (user requested)",
+                details={"phase": "dos_testing", "reason": "user requested"},
+                echo=False,
+            )
 
         # ── Phase 9: Report Generation ──────────────────────────────
         section("Phase 9: Report Generation", style="bt.green")
@@ -468,7 +559,8 @@ class AutoPentest:
 
             return {"status": "success", "html": html_path, "json": json_path}
 
-        _phase("report", results, _report)
+        _phase("report", results, _report,
+               run_id=self.run_id, target=self.ivi_address)
 
         # ── Summary ─────────────────────────────────────────────────
         total_time = time.time() - start_time
@@ -496,6 +588,34 @@ class AutoPentest:
         skip_msg = f", {skipped} skipped" if skipped else ""
         console.rule(f"[bold {color}]Pentest {results['status'].title()} "
                      f"({passed}/{total} phases{skip_msg}, {total_time/60:.1f} minutes)")
+
+        emit_cli_event(
+            event_type="run_completed",
+            module="auto",
+            run_id=self.run_id,
+            target=self.ivi_address,
+            message=f"Auto pentest complete: {passed}/{total} phases passed",
+            details={
+                "passed": passed,
+                "failed": failed,
+                "skipped": skipped,
+                "total_time": round(total_time, 1),
+            },
+            echo=False,
+        )
+        logger.info(
+            "Auto pentest completed: target=%s run_id=%s passed=%d failed=%d skipped=%d total_time=%.1fs",
+            self.ivi_address, self.run_id, passed, failed, skipped, total_time,
+        )
+
+        envelope = build_auto_result(
+            target=self.ivi_address,
+            adapter=self.hci,
+            results=results,
+            started_at=run_started_at,
+            run_id=self.run_id,
+        )
+        results["_envelope"] = envelope
 
         return results
 
