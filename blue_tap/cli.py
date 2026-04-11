@@ -7468,6 +7468,7 @@ def ctkd_cmd(target, mode, hci, interval):
       sudo blue-tap ctkd AA:BB:CC:DD:EE:FF -m monitor    # Watch key changes
     """
     from blue_tap.attack.ctkd import CTKDAttack
+    from blue_tap.utils.session import log_command
 
     target = resolve_address(target)
     if not target:
@@ -7481,7 +7482,6 @@ def ctkd_cmd(target, mode, hci, interval):
             success(f"CTKD: Target {target} may be VULNERABLE")
         else:
             info(f"CTKD: No vulnerability detected on {target}")
-        from blue_tap.utils.session import log_command
         log_command("ctkd", attack.build_envelope(), category="attack", target=target)
     elif mode == "monitor":
         attack.monitor(interval=interval)

@@ -11,6 +11,7 @@ import math
 import os
 from datetime import datetime
 
+<<<<<<< HEAD
 from blue_tap.report.adapters import REPORT_ADAPTERS
 from blue_tap.report.renderers import render_sections
 from blue_tap.utils.output import info, success, error, warning
