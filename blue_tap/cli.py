@@ -437,7 +437,9 @@ def adapter_info(hci):
 def up(hci):
     """Bring adapter up."""
     from blue_tap.core.adapter import adapter_up
-    adapter_up(hci)
+    from blue_tap.utils.session import log_command
+    ok = adapter_up(hci)
+    log_command("adapter_up", {"hci": hci, "success": ok}, category="general")
 
 
 @adapter.command()
@@ -445,7 +447,9 @@ def up(hci):
 def down(hci):
     """Bring adapter down."""
     from blue_tap.core.adapter import adapter_down
-    adapter_down(hci)
+    from blue_tap.utils.session import log_command
+    ok = adapter_down(hci)
+    log_command("adapter_down", {"hci": hci, "success": ok}, category="general")
 
 
 @adapter.command()
@@ -453,7 +457,9 @@ def down(hci):
 def reset(hci):
     """Reset adapter."""
     from blue_tap.core.adapter import adapter_reset
-    adapter_reset(hci)
+    from blue_tap.utils.session import log_command
+    ok = adapter_reset(hci)
+    log_command("adapter_reset", {"hci": hci, "success": ok}, category="general")
 
 
 @adapter.command("set-name")
@@ -462,7 +468,9 @@ def reset(hci):
 def set_name(hci, name):
     """Set adapter Bluetooth name (for impersonation)."""
     from blue_tap.core.adapter import set_device_name
-    set_device_name(hci, name)
+    from blue_tap.utils.session import log_command
+    ok = set_device_name(hci, name)
+    log_command("adapter_set_name", {"hci": hci, "name": name, "success": ok}, category="general")
 
 
 @adapter.command("set-class")
@@ -471,7 +479,9 @@ def set_name(hci, name):
 def set_class(hci, device_class):
     """Set device class. Default 0x5a020c = smartphone."""
     from blue_tap.core.adapter import set_device_class
-    set_device_class(hci, device_class)
+    from blue_tap.utils.session import log_command
+    ok = set_device_class(hci, device_class)
+    log_command("adapter_set_class", {"hci": hci, "device_class": device_class, "success": ok}, category="general")
 
 
 @adapter.command("firmware-status")
@@ -479,6 +489,17 @@ def set_class(hci, device_class):
 def adapter_firmware_status(hci):
     """Check DarkFirmware status on RTL8761B adapter."""
     from blue_tap.core.firmware import DarkFirmwareManager
+    from blue_tap.core.firmware_framework import build_firmware_status_result, make_firmware_run_id
+    from blue_tap.core.result_schema import now_iso
+    from blue_tap.utils.session import log_command
+
+    run_id = make_firmware_run_id()
+    started_at = now_iso()
+    emit_cli_event(
+        event_type="run_started", module="firmware", run_id=run_id,
+        adapter=hci, message="Firmware status check",
+        echo=False,
+    )
 
     fw = DarkFirmwareManager()
     status = fw.get_firmware_status(hci)
@@ -490,6 +511,14 @@ def adapter_firmware_status(hci):
     info(f"Original firmware backed up: {status.get('original_backed_up', False)}")
     if status.get("capabilities"):
         info(f"Capabilities: {', '.join(status['capabilities'])}")
+
+    envelope = build_firmware_status_result(adapter=hci, status=status, started_at=started_at, run_id=run_id)
+    emit_cli_event(
+        event_type="run_completed", module="firmware", run_id=run_id,
+        adapter=hci, message="Firmware status complete",
+        echo=False,
+    )
+    log_command("firmware_status", envelope, category="general", target=hci)
 
 
 @adapter.command("firmware-install")
@@ -519,8 +548,21 @@ def adapter_firmware_install(source, restore, hci):
       sudo blue-tap adapter firmware-install --restore  # revert to stock Realtek
     """
     from blue_tap.core.firmware import DarkFirmwareManager
+    from blue_tap.core.firmware_framework import build_firmware_operation_result, make_firmware_run_id
+    from blue_tap.core.result_schema import now_iso
+    from blue_tap.utils.session import log_command
+
+    run_id = make_firmware_run_id()
+    started_at = now_iso()
+    operation = "restore" if restore else "install"
+    emit_cli_event(
+        event_type="run_started", module="firmware", run_id=run_id,
+        adapter=hci, message=f"Firmware {operation}",
+        echo=False,
+    )
 
     fw = DarkFirmwareManager()
+    ok = False
 
     if restore:
         if fw.restore_firmware():
@@ -529,15 +571,46 @@ def adapter_firmware_install(source, restore, hci):
             import time
             time.sleep(2.5)
             success("Original Realtek firmware restored")
+            ok = True
         else:
             error("Failed to restore firmware")
+        envelope = build_firmware_operation_result(
+            adapter=hci, operation=operation,
+            title="Firmware Restore",
+            success=ok,
+            observations=["Original Realtek firmware restored" if ok else "Restore failed"],
+            module_data={"source": source, "restore": restore},
+            started_at=started_at, run_id=run_id,
+        )
+        emit_cli_event(
+            event_type="run_completed" if ok else "run_error",
+            module="firmware", run_id=run_id, adapter=hci,
+            message=f"Firmware restore {'succeeded' if ok else 'failed'}",
+            echo=False,
+        )
+        log_command("firmware_install", envelope, category="general", target=hci)
         return
 
     if not fw.detect_rtl8761b(hci):
         error(f"No RTL8761B adapter detected on {hci}. "
               f"This command only works with TP-Link UB500 or compatible RTL8761B dongles.")
+        envelope = build_firmware_operation_result(
+            adapter=hci, operation=operation,
+            title="DarkFirmware Install",
+            success=False,
+            observations=[f"No RTL8761B detected on {hci}"],
+            module_data={"source": source, "restore": restore},
+            started_at=started_at, run_id=run_id,
+        )
+        emit_cli_event(
+            event_type="run_error", module="firmware", run_id=run_id, adapter=hci,
+            message=f"No RTL8761B detected on {hci}",
+            echo=False,
+        )
+        log_command("firmware_install", envelope, category="general", target=hci)
         return
 
+    verified = False
     if fw.install_firmware(source):
         info("Resetting adapter to load DarkFirmware...")
         fw.usb_reset()
@@ -546,11 +619,39 @@ def adapter_firmware_install(source, restore, hci):
 
         if fw.is_darkfirmware_loaded(hci):
             success("DarkFirmware installed and verified!")
+            ok = True
+            verified = True
         else:
             warning("Firmware installed but DarkFirmware not detected — "
                     "adapter may need manual replug")
+            ok = True  # install step succeeded even if verification inconclusive
     else:
         error("Firmware installation failed")
+
+    observations = []
+    if ok and verified:
+        observations.append("DarkFirmware installed and verified active")
+    elif ok:
+        observations.append("DarkFirmware installed; verification inconclusive — replug adapter")
+    else:
+        observations.append("Firmware installation failed")
+
+    envelope = build_firmware_operation_result(
+        adapter=hci, operation=operation,
+        title="DarkFirmware Install",
+        success=ok,
+        observations=observations,
+        module_data={"source": source, "restore": restore, "verified": verified},
+        started_at=started_at, run_id=run_id,
+    )
+    emit_cli_event(
+        event_type="run_completed" if ok else "run_error",
+        module="firmware", run_id=run_id, adapter=hci,
+        message=f"Firmware install {'succeeded' if ok else 'failed'}",
+        details={"verified": verified},
+        echo=False,
+    )
+    log_command("firmware_install", envelope, category="general", target=hci)
 
 
 @adapter.command("firmware-init")
@@ -568,19 +669,65 @@ def adapter_firmware_init(hci):
     plugged in the adapter after Blue-Tap started.
     """
     from blue_tap.core.firmware import DarkFirmwareManager
+    from blue_tap.core.firmware_framework import build_firmware_operation_result, make_firmware_run_id
+    from blue_tap.core.result_schema import now_iso
+    from blue_tap.utils.session import log_command
+
+    run_id = make_firmware_run_id()
+    started_at = now_iso()
+    emit_cli_event(
+        event_type="run_started", module="firmware", run_id=run_id,
+        adapter=hci, message="Firmware hook initialization",
+        echo=False,
+    )
 
     fw = DarkFirmwareManager()
     if not fw.is_darkfirmware_loaded(hci):
         error(f"DarkFirmware not detected on {hci}")
+        envelope = build_firmware_operation_result(
+            adapter=hci, operation="init",
+            title="DarkFirmware Hook Init",
+            success=False,
+            observations=[f"DarkFirmware not detected on {hci}"],
+            started_at=started_at, run_id=run_id,
+        )
+        emit_cli_event(
+            event_type="run_error", module="firmware", run_id=run_id, adapter=hci,
+            message=f"DarkFirmware not detected on {hci}",
+            echo=False,
+        )
+        log_command("firmware_init", envelope, category="general", target=hci)
         return
 
     result = fw.init_hooks(hci)
-    if result.get("all_ok"):
+    ok = bool(result.get("all_ok"))
+    if ok:
         success("All 4 hooks initialized")
     else:
         for hook in ("hook1", "hook2", "hook3", "hook4"):
-            status = "active" if result.get(hook) else "FAILED"
-            info(f"  {hook}: {status}")
+            hook_status = "active" if result.get(hook) else "FAILED"
+            info(f"  {hook}: {hook_status}")
+
+    hook_observations = [
+        f"{hook}: {'active' if result.get(hook) else 'FAILED'}"
+        for hook in ("hook1", "hook2", "hook3", "hook4")
+    ]
+    envelope = build_firmware_operation_result(
+        adapter=hci, operation="init",
+        title="DarkFirmware Hook Init",
+        success=ok,
+        observations=hook_observations,
+        module_data=result,
+        started_at=started_at, run_id=run_id,
+    )
+    emit_cli_event(
+        event_type="run_completed" if ok else "run_error",
+        module="firmware", run_id=run_id, adapter=hci,
+        message=f"Firmware init {'all hooks active' if ok else 'some hooks failed'}",
+        details=result,
+        echo=False,
+    )
+    log_command("firmware_init", envelope, category="general", target=hci)
 
 
 @adapter.command("connection-inspect")
@@ -607,10 +754,26 @@ def adapter_connection_inspect(conn, watch, interval, hci):
     """
     from blue_tap.core.firmware import ConnectionInspector, DarkFirmwareManager
     from blue_tap.core.hci_vsc import HCIVSCSocket
+    from blue_tap.core.firmware_framework import build_connection_inspect_result, make_firmware_run_id
+    from blue_tap.core.result_schema import now_iso
+    from blue_tap.utils.session import log_command
+
+    run_id = make_firmware_run_id()
+    started_at = now_iso()
+    emit_cli_event(
+        event_type="run_started", module="firmware", run_id=run_id,
+        adapter=hci, message=f"Connection inspect on {hci} (watch={watch})",
+        echo=False,
+    )
 
     fw = DarkFirmwareManager()
     if not fw.is_darkfirmware_loaded(hci):
         error(f"DarkFirmware not detected on {hci}")
+        emit_cli_event(
+            event_type="run_error", module="firmware", run_id=run_id, adapter=hci,
+            message=f"DarkFirmware not detected on {hci}",
+            echo=False,
+        )
         return
 
     hci_idx = int(hci.replace("hci", ""))
@@ -631,17 +794,26 @@ def adapter_connection_inspect(conn, watch, interval, hci):
                     time.sleep(interval)
         except KeyboardInterrupt:
             info("Stopped")
+        # Watch mode: emit aborted — no structured envelope, operator stopped it manually
+        emit_cli_event(
+            event_type="run_aborted", module="firmware", run_id=run_id, adapter=hci,
+            message="Connection watch stopped by operator",
+            echo=False,
+        )
     else:
+        connections = []
         try:
             with HCIVSCSocket(hci_dev=hci_idx) as sock:
                 if conn >= 0:
                     r = inspector.inspect_connection(sock, conn)
+                    connections = [r]
                     if r.get("active"):
                         _display_connection(None, r)
                     else:
                         info(f"Slot {conn}: no active connection")
                 else:
                     active = inspector.scan_all_connections(sock)
+                    connections = active or []
                     if active:
                         for r in active:
                             _display_connection(None, r)
@@ -649,6 +821,18 @@ def adapter_connection_inspect(conn, watch, interval, hci):
                         info("No active connections found")
         except Exception as exc:
             error(f"Connection inspect failed: {exc}")
+
+        envelope = build_connection_inspect_result(
+            adapter=hci, connections=connections,
+            started_at=started_at, run_id=run_id,
+        )
+        active_count = len([c for c in connections if c.get("active")])
+        emit_cli_event(
+            event_type="run_completed", module="firmware", run_id=run_id, adapter=hci,
+            message=f"Connection inspect complete: {active_count} active",
+            echo=False,
+        )
+        log_command("connection_inspect", envelope, category="general", target=hci)
 
 
 def _display_connection(ts, r):
@@ -775,11 +959,28 @@ def adapter_firmware_dump(start, end, region, output, hci):
       blue-tap adapter firmware-dump --region ram -o ram.bin
       blue-tap adapter firmware-dump --start 0x8012DC50 --end 0x8012F450 -o connections.bin
     """
+    import os as _os
     from blue_tap.core.firmware import DarkFirmwareManager, MEMORY_REGIONS
+    from blue_tap.core.firmware_framework import build_firmware_dump_result, make_firmware_run_id
+    from blue_tap.core.result_schema import now_iso
+    from blue_tap.utils.session import log_command
+
+    run_id = make_firmware_run_id()
+    started_at = now_iso()
+    emit_cli_event(
+        event_type="run_started", module="firmware", run_id=run_id,
+        adapter=hci, message=f"Firmware memory dump to {output}",
+        echo=False,
+    )
 
     fw = DarkFirmwareManager()
     if not fw.is_darkfirmware_loaded(hci):
         error(f"DarkFirmware not loaded on {hci}")
+        emit_cli_event(
+            event_type="run_error", module="firmware", run_id=run_id, adapter=hci,
+            message=f"DarkFirmware not loaded on {hci}",
+            echo=False,
+        )
         return
 
     if region:
@@ -791,15 +992,55 @@ def adapter_firmware_dump(start, end, region, output, hci):
             end_addr = int(end, 16) if isinstance(end, str) else end
         except ValueError:
             error("Start and end addresses must be valid hex (e.g., 0x80000000)")
+            emit_cli_event(
+                event_type="run_error", module="firmware", run_id=run_id, adapter=hci,
+                message="Invalid address format",
+                echo=False,
+            )
             return
     else:
         error("Provide either --region or both --start and --end")
+        emit_cli_event(
+            event_type="run_error", module="firmware", run_id=run_id, adapter=hci,
+            message="No address range specified",
+            echo=False,
+        )
         return
 
-    if fw.dump_memory(start_addr, end_addr, output, hci):
+    ok = fw.dump_memory(start_addr, end_addr, output, hci)
+    if ok:
         success(f"Dump saved to {output}")
+        emit_cli_event(
+            event_type="artifact_saved", module="firmware", run_id=run_id, adapter=hci,
+            message=f"Memory dump saved: {output}",
+            details={"path": output},
+            echo=False,
+        )
     else:
         error("Memory dump failed")
+
+    file_size = 0
+    if ok and _os.path.exists(output):
+        file_size = _os.path.getsize(output)
+
+    envelope = build_firmware_dump_result(
+        adapter=hci,
+        start_addr=start_addr,
+        end_addr=end_addr,
+        output_path=output,
+        success=ok,
+        file_size=file_size,
+        started_at=started_at,
+        run_id=run_id,
+    )
+    emit_cli_event(
+        event_type="run_completed" if ok else "run_error",
+        module="firmware", run_id=run_id, adapter=hci,
+        message=f"Firmware dump {'complete' if ok else 'failed'}: {output}",
+        details={"success": ok, "file_size": file_size},
+        echo=False,
+    )
+    log_command("firmware_dump", envelope, category="general", target=hci)
 
 
 @adapter.command("connections")
@@ -2101,21 +2342,44 @@ def spoof_mac(target_mac, hci, method):
         return
     info(f"Spoofing adapter {hci} MAC to {target_mac} (method={method})")
     from blue_tap.core.spoofer import spoof_address
+    from blue_tap.core.spoof_framework import build_spoof_result, make_spoof_run_id
+    from blue_tap.core.result_schema import now_iso
+    from blue_tap.utils.session import log_command
+
+    run_id = make_spoof_run_id()
+    started_at = now_iso()
+    emit_cli_event(
+        event_type="run_started", module="spoof", run_id=run_id,
+        target=target_mac, adapter=hci,
+        message=f"MAC spoof: {target_mac} on {hci} (method={method})",
+        echo=False,
+    )
+
     ok = False
+    result = {}
     try:
-        ok = spoof_address(hci, target_mac, method)
+        result = spoof_address(hci, target_mac, method)
+        ok = result["success"]
         if ok:
             success(f"MAC address changed to {target_mac} on {hci}")
         else:
             error(f"MAC spoof failed — address not changed on {hci}")
     except Exception as exc:
         error(f"MAC spoof failed: {exc}")
+        result = {"success": False, "error": str(exc)}
 
-    from blue_tap.utils.session import log_command
-    # TODO(standardization): Keep low-level spoofing operations as raw session
-    # events until we decide whether they belong in formal reports or remain
-    # operator-only actions under the attack module contract.
-    log_command("spoof_mac", {"target_mac": target_mac, "hci": hci, "method": method, "success": ok}, category="attack")
+    envelope = build_spoof_result(
+        target=target_mac, adapter=hci, operation="mac",
+        result=result, started_at=started_at, run_id=run_id,
+    )
+    emit_cli_event(
+        event_type="run_completed" if ok else "run_error",
+        module="spoof", run_id=run_id, target=target_mac, adapter=hci,
+        message=f"MAC spoof {'succeeded' if ok else 'failed'}: {result.get('method_used', 'none')}",
+        details={"success": ok, "method": result.get("method_used", "")},
+        echo=False,
+    )
+    log_command("spoof_mac", envelope, category="attack", target=target_mac)
 
 
 @spoof.command("clone")
@@ -2135,21 +2399,47 @@ def spoof_clone(target_mac, target_name, hci, device_class):
     info(f"Cloning device identity from {target_mac} on adapter {hci}")
     info(f"  MAC: {target_mac}, Name: {target_name}, Class: {device_class}")
     from blue_tap.core.spoofer import clone_device_identity
+    from blue_tap.core.spoof_framework import build_spoof_result, make_spoof_run_id
+    from blue_tap.core.result_schema import now_iso
+    from blue_tap.utils.session import log_command
+
+    run_id = make_spoof_run_id()
+    started_at = now_iso()
+    emit_cli_event(
+        event_type="run_started", module="spoof", run_id=run_id,
+        target=target_mac, adapter=hci,
+        message=f"Identity clone: {target_mac} ({target_name}) on {hci}",
+        echo=False,
+    )
+
     ok = False
+    result = {}
     try:
         info("Step 1/3: Spoofing MAC address...")
         info("Step 2/3: Setting device name...")
         info("Step 3/3: Setting device class...")
-        ok = clone_device_identity(hci, target_mac, target_name, device_class)
+        result = clone_device_identity(hci, target_mac, target_name, device_class)
+        ok = result["success"]
         if ok:
             success(f"Identity clone complete: now impersonating {target_name} ({target_mac})")
         else:
             error(f"Identity clone failed — device identity not changed on {hci}")
     except Exception as exc:
         error(f"Identity clone failed: {exc}")
+        result = {"success": False, "error": str(exc)}
 
-    from blue_tap.utils.session import log_command
-    log_command("spoof_clone", {"target_mac": target_mac, "target_name": target_name, "device_class": device_class, "success": ok}, category="attack")
+    envelope = build_spoof_result(
+        target=target_mac, adapter=hci, operation="clone",
+        result=result, started_at=started_at, run_id=run_id,
+    )
+    emit_cli_event(
+        event_type="run_completed" if ok else "run_error",
+        module="spoof", run_id=run_id, target=target_mac, adapter=hci,
+        message=f"Identity clone {'succeeded' if ok else 'failed'}: {target_name}",
+        details={"success": ok, "target_name": target_name},
+        echo=False,
+    )
+    log_command("spoof_clone", envelope, category="attack", target=target_mac)
 
 
 @spoof.command("restore")
@@ -2160,18 +2450,44 @@ def spoof_restore(hci, method):
     """Restore adapter to its original MAC address."""
     info(f"Restoring original MAC address on adapter {hci} (method={method})")
     from blue_tap.core.spoofer import restore_original_mac
+    from blue_tap.core.spoof_framework import build_spoof_result, make_spoof_run_id
+    from blue_tap.core.result_schema import now_iso
+    from blue_tap.utils.session import log_command
+
+    run_id = make_spoof_run_id()
+    started_at = now_iso()
+    emit_cli_event(
+        event_type="run_started", module="spoof", run_id=run_id,
+        target=hci, adapter=hci,
+        message=f"MAC restore on {hci} (method={method})",
+        echo=False,
+    )
+
     ok = False
+    result = {}
     try:
-        ok = restore_original_mac(hci, method)
+        result = restore_original_mac(hci, method)
+        ok = result["success"]
         if ok:
             success(f"Original MAC restored on {hci}")
         else:
             error(f"MAC restore failed — original address not restored on {hci}")
     except Exception as exc:
         error(f"MAC restore failed: {exc}")
+        result = {"success": False, "error": str(exc)}
 
-    from blue_tap.utils.session import log_command
-    log_command("spoof_restore", {"hci": hci, "method": method, "success": ok}, category="attack")
+    envelope = build_spoof_result(
+        target=hci, adapter=hci, operation="restore",
+        result=result, started_at=started_at, run_id=run_id,
+    )
+    emit_cli_event(
+        event_type="run_completed" if ok else "run_error",
+        module="spoof", run_id=run_id, target=hci, adapter=hci,
+        message=f"MAC restore {'succeeded' if ok else 'failed'}",
+        details={"success": ok, "method": result.get("method_used", "")},
+        echo=False,
+    )
+    log_command("spoof_restore", envelope, category="attack", target=hci)
 
 
 # ============================================================================
@@ -6120,16 +6436,20 @@ def auto_cmd(ivi_mac, duration, output, hci, fuzz_duration, skip_fuzz, skip_dos,
         )
         os.makedirs(output, exist_ok=True)
         _save_json(results, os.path.join(output, "auto_results.json"))
-        _log_standardized_operation(
-            module="attack",
-            command="auto",
-            title="Automated Attack Workflow",
-            protocol="multi",
-            target=ivi_mac,
-            result=results,
-            category="attack",
-            observations=[f"skip_fuzz={skip_fuzz}", f"skip_dos={skip_dos}", f"skip_exploit={skip_exploit}"],
-        )
+        envelope = results.get("_envelope")
+        if envelope:
+            log_command("auto", envelope, category="attack", target=ivi_mac)
+        else:
+            _log_standardized_operation(
+                module="attack",
+                command="auto",
+                title="Automated Attack Workflow",
+                protocol="multi",
+                target=ivi_mac,
+                result=results,
+                category="attack",
+                observations=[f"skip_fuzz={skip_fuzz}", f"skip_dos={skip_dos}", f"skip_exploit={skip_exploit}"],
+            )
     except KeyboardInterrupt:
         warning("\nInterrupted by user")
 
