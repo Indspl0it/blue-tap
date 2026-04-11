@@ -129,8 +129,9 @@ def get_adapter_info(hci: str) -> dict:
                 ext["capabilities"]["memory_rw"] = True
                 if "DarkFirmware" not in ext.get("features", []):
                     ext.setdefault("features", []).append("DarkFirmware")
-        except Exception:
-            pass  # DarkFirmware check failed, non-fatal
+        except Exception as exc:
+            from blue_tap.utils.output import verbose
+            verbose(f"DarkFirmware detection skipped: {type(exc).__name__}: {exc}")
 
     # --- btmgmt info for management-level details ---
     idx = hci.replace("hci", "")
@@ -346,6 +347,17 @@ def set_device_class(hci: str, device_class: str = "0x5a020c") -> bool:
     """
     if not _adapter_exists(hci):
         return False
+    if not device_class.startswith("0x"):
+        error(f"Device class must be hex (e.g. 0x5a020c), got: {device_class}")
+        return False
+    try:
+        val = int(device_class, 16)
+        if not 0 <= val <= 0xFFFFFF:
+            error(f"Device class must be 0x000000-0xFFFFFF, got: {device_class}")
+            return False
+    except ValueError:
+        error(f"Invalid device class hex: {device_class}")
+        return False
     if _hci_cmd(hci, "class", device_class):
         success(f"{hci} device class set to {device_class}")
         return True
@@ -355,6 +367,10 @@ def set_device_class(hci: str, device_class: str = "0x5a020c") -> bool:
 def set_device_name(hci: str, name: str) -> bool:
     """Set the Bluetooth device name (useful for impersonation)."""
     if not _adapter_exists(hci):
+        return False
+    name_bytes = name.encode("utf-8", errors="replace")
+    if len(name_bytes) > 248:
+        error(f"Device name too long ({len(name_bytes)} bytes, max 248)")
         return False
     if _hci_cmd(hci, "name", name):
         success(f"{hci} name set to '{name}'")
@@ -388,9 +404,16 @@ def enable_ssp(hci: str) -> bool:
         return False
     idx = hci.replace("hci", "")
     # Need to power off first to change SSP on some adapters
-    run_cmd(["sudo", "btmgmt", "--index", idx, "power", "off"])
+    power_off = run_cmd(["sudo", "btmgmt", "--index", idx, "power", "off"])
+    if power_off.returncode != 0:
+        warning(f"Failed to power off {hci} before SSP change")
+
     result = run_cmd(["sudo", "btmgmt", "--index", idx, "ssp", "on"])
-    run_cmd(["sudo", "btmgmt", "--index", idx, "power", "on"])
+
+    power_on = run_cmd(["sudo", "btmgmt", "--index", idx, "power", "on"])
+    if power_on.returncode != 0:
+        error(f"Failed to power on {hci} after SSP change — adapter may be DOWN")
+        run_cmd(["sudo", "hciconfig", hci, "up"])
 
     combined = (result.stdout + result.stderr).lower()
     if result.returncode == 0 and "not supported" not in combined:
@@ -406,9 +429,16 @@ def disable_ssp(hci: str) -> bool:
     if not _adapter_exists(hci):
         return False
     idx = hci.replace("hci", "")
-    run_cmd(["sudo", "btmgmt", "--index", idx, "power", "off"])
+    power_off = run_cmd(["sudo", "btmgmt", "--index", idx, "power", "off"])
+    if power_off.returncode != 0:
+        warning(f"Failed to power off {hci} before SSP change")
+
     result = run_cmd(["sudo", "btmgmt", "--index", idx, "ssp", "off"])
-    run_cmd(["sudo", "btmgmt", "--index", idx, "power", "on"])
+
+    power_on = run_cmd(["sudo", "btmgmt", "--index", idx, "power", "on"])
+    if power_on.returncode != 0:
+        error(f"Failed to power on {hci} after SSP change — adapter may be DOWN")
+        run_cmd(["sudo", "hciconfig", hci, "up"])
 
     combined = (result.stdout + result.stderr).lower()
     if result.returncode == 0 and "not supported" not in combined:
