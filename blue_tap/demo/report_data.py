@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from blue_tap.attack.cve_framework import summarize_check, summarize_findings, build_vulnscan_result
-from blue_tap.attack.dos_framework import build_dos_run_result, summarize_dos_checks
-from blue_tap.core.fuzz_framework import build_fuzz_campaign_result
-from blue_tap.core.recon_framework import build_recon_result
-from blue_tap.core.result_schema import now_iso
-from blue_tap.core.scan_framework import build_scan_result
+from blue_tap.modules.assessment.cve_framework import summarize_check, summarize_findings, build_vulnscan_result
+from blue_tap.modules.exploitation.dos.framework import build_dos_run_result, summarize_dos_checks
+from blue_tap.framework.envelopes.fuzz import build_fuzz_campaign_result
+from blue_tap.framework.envelopes.recon import build_recon_result
+from blue_tap.framework.contracts.result_schema import now_iso
+from blue_tap.framework.envelopes.scan import build_scan_result
 
 
 def build_demo_scan_result(*, devices: list[dict], adapter: str, duration_requested: int) -> dict:

@@ -451,7 +451,7 @@ def run_demo(output_dir: str = "demo_output"):
         with step("Compiling assessment data"):
             _delay(0.5, 0.2)
 
-        from blue_tap.report.generator import ReportGenerator
+        from blue_tap.interfaces.reporting.generator import ReportGenerator
         from blue_tap.demo.report_data import (
             build_demo_dos_result,
             build_demo_fingerprint_result,
@@ -493,8 +493,8 @@ def run_demo(output_dir: str = "demo_output"):
             )
         )
 
-        from blue_tap.core.attack_framework import build_attack_result
-        from blue_tap.core.data_framework import build_data_result
+        from blue_tap.framework.envelopes.attack import build_attack_result
+        from blue_tap.framework.envelopes.data import build_data_result
 
         report.add_run_envelope(
             build_attack_result(

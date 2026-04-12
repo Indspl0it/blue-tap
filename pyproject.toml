@@ -47,7 +47,11 @@ Changelog = "https://github.com/Indspl0it/blue-tap/blob/main/docs/CHANGELOG.md"
 dev = ["pytest", "ruff"]
 
 [project.scripts]
-blue-tap = "blue_tap.cli:cli"
+blue-tap = "blue_tap.interfaces.cli.main:main"
+
+[project.entry-points."blue_tap.modules"]
+# Third-party modules register here:
+# my-module = "my_package.modules.my_module:MyModuleDescriptor"
 
 [tool.setuptools.packages.find]
 include = ["blue_tap*"]

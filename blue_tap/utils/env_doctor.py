@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from blue_tap.core.obex_client import detect_obex_capability
+from blue_tap.hardware.obex_client import detect_obex_capability
 from blue_tap.utils.bt_helpers import check_tool, get_hci_adapters, run_cmd
 
 

@@ -19,11 +19,11 @@ def _scan_devices(scan_duration: int = 8, hci: str = "hci0",
     section("Device Discovery", style="bt.cyan")
 
     if include_ble:
-        from blue_tap.core.scanner import scan_all
+        from blue_tap.hardware.scanner import scan_all
         info(f"Scanning Classic + BLE ({scan_duration}s)...")
         devices = scan_all(scan_duration, hci)
     else:
-        from blue_tap.core.scanner import scan_classic
+        from blue_tap.hardware.scanner import scan_classic
         info(f"Scanning Classic BT ({scan_duration}s)...")
         devices = scan_classic(scan_duration, hci)
 

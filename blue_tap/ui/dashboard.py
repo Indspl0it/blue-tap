@@ -114,7 +114,7 @@ class AttackDashboard:
         table.add_column("Full", width=5)
 
         try:
-            from blue_tap.fuzz.protocols.lmp import COMMAND_NAMES
+            from blue_tap.modules.fuzzing.protocols.lmp import COMMAND_NAMES
         except ImportError:
             COMMAND_NAMES = {}
 
