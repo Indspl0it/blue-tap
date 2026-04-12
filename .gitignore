@@ -16,7 +16,7 @@ build/
 .serena/
 .pytest_cache/
 .ruff_cache/
-sessions/
+/sessions/
 sample-reports/
 scripts/
 aflnet/
