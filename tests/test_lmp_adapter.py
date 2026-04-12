@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import pytest
 
-from blue_tap.report.adapters.lmp_capture import LmpCaptureReportAdapter
-from blue_tap.core.report_contract import SectionModel
+from blue_tap.framework.reporting.adapters.lmp_capture import LmpCaptureReportAdapter
+from blue_tap.framework.contracts.report_contract import SectionModel
 
 
 def _make_capture(bdaddr: str = "AA:BB:CC:DD:EE:FF", packets: list[dict] | None = None) -> dict:
@@ -238,7 +238,7 @@ def test_build_json_section_empty_state():
 # ---------------------------------------------------------------------------
 
 def test_render_sections_passes_html_raw_through():
-    from blue_tap.report.renderers.html import render_sections
+    from blue_tap.framework.reporting.renderers.html import render_sections
 
     adapter = LmpCaptureReportAdapter()
     state: dict = {}

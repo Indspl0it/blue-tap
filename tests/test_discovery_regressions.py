@@ -5,7 +5,7 @@ import json
 from click.testing import CliRunner
 
 from blue_tap.cli import main
-from blue_tap.report.generator import ReportGenerator
+from blue_tap.interfaces.reporting.generator import ReportGenerator
 
 
 def test_empty_scan_is_persisted_to_session_log(monkeypatch):
@@ -18,9 +18,9 @@ def test_empty_scan_is_persisted_to_session_log(monkeypatch):
         recorded["target"] = target
         return "session-file.json"
 
-    monkeypatch.setattr("blue_tap.utils.session.log_command", fake_log_command)
+    monkeypatch.setattr("blue_tap.framework.sessions.store.log_command", fake_log_command)
     monkeypatch.setattr(
-        "blue_tap.core.scanner.scan_classic_result",
+        "blue_tap.hardware.scanner.scan_classic_result",
         lambda duration, hci: {
             "schema": "blue_tap.scan.result",
             "schema_version": 2,

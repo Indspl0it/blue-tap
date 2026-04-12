@@ -1,7 +1,7 @@
 """Tests for standardized block renderers, adapters, and rendering pipeline."""
 import json
-from blue_tap.core.report_contract import SectionBlock, SectionModel
-from blue_tap.report.renderers.blocks import (
+from blue_tap.framework.contracts.report_contract import SectionBlock, SectionModel
+from blue_tap.framework.reporting.renderers.blocks import (
     render_block,
     render_card_list,
     render_status_summary,
@@ -9,9 +9,9 @@ from blue_tap.report.renderers.blocks import (
     render_key_value,
     render_badge_group,
 )
-from blue_tap.report.renderers.registry import get_default_block_renderer_registry
-from blue_tap.report.renderers.sections import render_sections
-from blue_tap.report.adapters import REPORT_ADAPTERS
+from blue_tap.framework.reporting.renderers.registry import get_default_block_renderer_registry
+from blue_tap.framework.reporting.renderers.sections import render_sections
+from blue_tap.framework.reporting.adapters import REPORT_ADAPTERS
 
 
 def test_all_block_types_render():

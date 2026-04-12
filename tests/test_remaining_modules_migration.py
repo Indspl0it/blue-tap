@@ -12,23 +12,23 @@ from __future__ import annotations
 
 import pytest
 
-from blue_tap.core.auto_framework import build_auto_result
-from blue_tap.core.firmware_framework import (
+from blue_tap.framework.envelopes.auto import build_auto_result
+from blue_tap.framework.envelopes.firmware import (
     build_connection_inspect_result,
     build_firmware_status_result,
 )
-from blue_tap.core.result_schema import (
+from blue_tap.framework.contracts.result_schema import (
     build_run_envelope,
     make_evidence,
     make_execution,
     now_iso,
 )
-from blue_tap.core.spoof_framework import build_spoof_result
-from blue_tap.report.adapters import REPORT_ADAPTERS
-from blue_tap.report.adapters.auto import AutoReportAdapter
-from blue_tap.report.adapters.firmware import FirmwareReportAdapter
-from blue_tap.report.adapters.spoof import SpoofReportAdapter
-from blue_tap.report.generator import ReportGenerator
+from blue_tap.framework.envelopes.spoof import build_spoof_result
+from blue_tap.framework.reporting.adapters import REPORT_ADAPTERS
+from blue_tap.framework.reporting.adapters.auto import AutoReportAdapter
+from blue_tap.framework.reporting.adapters.firmware import FirmwareReportAdapter
+from blue_tap.framework.reporting.adapters.spoof import SpoofReportAdapter
+from blue_tap.interfaces.reporting.generator import ReportGenerator
 
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from blue_tap.attack.hfp import HFPClient
+from blue_tap.modules.post_exploitation.media.hfp import HFPClient
 
 
 def test_hfp_indicator_mapping_is_one_based_and_ciev_updates_apply():

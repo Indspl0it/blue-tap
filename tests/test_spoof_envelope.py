@@ -3,13 +3,13 @@ from __future__ import annotations
 
 import json
 
-from blue_tap.core.spoof_framework import (
+from blue_tap.framework.envelopes.spoof import (
     SPOOF_MODULE_OUTCOMES,
     build_spoof_result,
     make_spoof_run_id,
 )
-from blue_tap.core.result_schema import validate_run_envelope
-from blue_tap.report.adapters.spoof import SpoofReportAdapter
+from blue_tap.framework.contracts.result_schema import validate_run_envelope
+from blue_tap.framework.reporting.adapters.spoof import SpoofReportAdapter
 
 
 def _make_spoof_envelope(operation="mac", success=True):

@@ -3,20 +3,19 @@ import json
 from click.testing import CliRunner
 
 from blue_tap.cli import main
-from blue_tap.recon.capability_detector import detect_target_capabilities
-from blue_tap.recon.capture_analysis import analyze_capture_results
-from blue_tap.recon.campaign import run_auto_recon
-from blue_tap.recon.correlation import build_recon_correlation
-from blue_tap.recon.correlation import analyze_capture_artifact
-from blue_tap.recon.l2cap_scan import _classify_l2cap_behavior
-from blue_tap.recon.rfcomm_scan import classify_rfcomm_response
-from blue_tap.recon.spec_interpretation import evaluate_smp_transcript, interpret_ble_capture, interpret_lmp_capture
-from blue_tap.report.generator import ReportGenerator
-from blue_tap.recon.sdp import parse_sdp_output
+from blue_tap.modules.reconnaissance.capability_detector import detect_target_capabilities
+from blue_tap.modules.reconnaissance.capture_analysis import analyze_capture_results
+from blue_tap.modules.reconnaissance.campaign import run_auto_recon
+from blue_tap.modules.reconnaissance.correlation import build_recon_correlation, analyze_capture_artifact
+from blue_tap.modules.reconnaissance.l2cap_scan import _classify_l2cap_behavior
+from blue_tap.modules.reconnaissance.rfcomm_scan import classify_rfcomm_response
+from blue_tap.modules.reconnaissance.spec_interpretation import evaluate_smp_transcript, interpret_ble_capture, interpret_lmp_capture
+from blue_tap.interfaces.reporting.generator import ReportGenerator
+from blue_tap.modules.reconnaissance.sdp import parse_sdp_output
 
 
 def test_capability_detector_classifies_dual_mode(monkeypatch):
-    monkeypatch.setattr("blue_tap.recon.capability_detector.ensure_adapter_ready", lambda hci: True)
+    monkeypatch.setattr("blue_tap.modules.reconnaissance.capability_detector.ensure_adapter_ready", lambda hci: True)
 
     def fake_run_cmd(cmd, timeout=0):
         class Result:
@@ -31,13 +30,13 @@ def test_capability_detector_classifies_dual_mode(monkeypatch):
             return Result(0, stdout="hci0: Type: Primary\n")
         return Result(1, stderr="unsupported")
 
-    monkeypatch.setattr("blue_tap.recon.capability_detector.run_cmd", fake_run_cmd)
+    monkeypatch.setattr("blue_tap.modules.reconnaissance.capability_detector.run_cmd", fake_run_cmd)
     monkeypatch.setattr(
-        "blue_tap.recon.capability_detector.browse_services",
+        "blue_tap.modules.reconnaissance.capability_detector.browse_services",
         lambda address, hci="hci0": [{"name": "Hands-Free", "profile": "HFP AG"}],
     )
     monkeypatch.setattr(
-        "blue_tap.recon.capability_detector.enumerate_services_detailed_sync",
+        "blue_tap.modules.reconnaissance.capability_detector.enumerate_services_detailed_sync",
         lambda address: {"connected": True, "service_count": 2, "characteristic_count": 5, "status": "completed", "error": ""},
     )
 
@@ -58,10 +57,10 @@ def test_standalone_recon_command_persists_final_cli_events(monkeypatch):
         recorded["target"] = target
         return "session-file.json"
 
-    monkeypatch.setattr("blue_tap.utils.session.log_command", fake_log_command)
+    monkeypatch.setattr("blue_tap.framework.sessions.store.log_command", fake_log_command)
     monkeypatch.setattr("blue_tap.cli.resolve_address", lambda address=None: "AA:BB:CC:DD:EE:FF")
     monkeypatch.setattr(
-        "blue_tap.recon.sdp.browse_services_detailed",
+        "blue_tap.modules.reconnaissance.sdp.browse_services_detailed",
         lambda address: {
             "services": [{"name": "Serial Port", "profile": "SPP", "protocol": "RFCOMM", "channel": 5}],
             "rfcomm_channels": [5],
@@ -79,7 +78,7 @@ def test_standalone_recon_command_persists_final_cli_events(monkeypatch):
 
 def test_run_auto_recon_logs_skips_for_unsupported_transport(monkeypatch):
     monkeypatch.setattr(
-        "blue_tap.recon.campaign.detect_target_capabilities",
+        "blue_tap.modules.reconnaissance.campaign.detect_target_capabilities",
         lambda address, hci="hci0": {
             "classification": "ble_only",
             "classic": {"supported": False, "signals": []},
@@ -88,7 +87,7 @@ def test_run_auto_recon_logs_skips_for_unsupported_transport(monkeypatch):
         },
     )
     monkeypatch.setattr(
-        "blue_tap.recon.campaign.enumerate_services_detailed_sync",
+        "blue_tap.modules.reconnaissance.campaign.enumerate_services_detailed_sync",
         lambda address: {
             "connected": True,
             "status": "completed",
@@ -126,7 +125,7 @@ def test_run_auto_recon_logs_skips_for_unsupported_transport(monkeypatch):
 
 def test_run_auto_recon_capture_failures_emit_execution_result_not_run_error(monkeypatch):
     monkeypatch.setattr(
-        "blue_tap.recon.campaign.detect_target_capabilities",
+        "blue_tap.modules.reconnaissance.campaign.detect_target_capabilities",
         lambda address, hci="hci0": {
             "classification": "classic_only",
             "classic": {"supported": True, "signals": []},
@@ -135,7 +134,7 @@ def test_run_auto_recon_capture_failures_emit_execution_result_not_run_error(mon
         },
     )
     monkeypatch.setattr(
-        "blue_tap.recon.campaign.evaluate_recon_prerequisites",
+        "blue_tap.modules.reconnaissance.campaign.evaluate_recon_prerequisites",
         lambda **kwargs: {
             "hci_capture": {"available": True, "reason": ""},
             "nrf_ble_sniffer": {"available": False, "reason": "unsupported"},
@@ -143,34 +142,34 @@ def test_run_auto_recon_capture_failures_emit_execution_result_not_run_error(mon
             "combined_capture": {"available": False, "reason": "unsupported"},
         },
     )
-    monkeypatch.setattr("blue_tap.recon.campaign.fingerprint_device", lambda address, hci="hci0": {})
+    monkeypatch.setattr("blue_tap.modules.reconnaissance.campaign.fingerprint_device", lambda address, hci="hci0": {})
     monkeypatch.setattr(
-        "blue_tap.recon.campaign.browse_services_detailed",
+        "blue_tap.modules.reconnaissance.campaign.browse_services_detailed",
         lambda address, hci="hci0": {"services": [], "rfcomm_channels": [], "l2cap_psms": []},
     )
     monkeypatch.setattr(
-        "blue_tap.recon.campaign.RFCOMMScanner.scan_all_channels",
+        "blue_tap.modules.reconnaissance.campaign.RFCOMMScanner.scan_all_channels",
         lambda self, hci="hci0": [],
     )
     monkeypatch.setattr(
-        "blue_tap.recon.campaign.L2CAPScanner.scan_standard_psms",
+        "blue_tap.modules.reconnaissance.campaign.L2CAPScanner.scan_standard_psms",
         lambda self, timeout=1.0, full=False, hci="hci0": [],
     )
     monkeypatch.setattr(
-        "blue_tap.recon.campaign.correlate_rfcomm_with_sdp",
+        "blue_tap.modules.reconnaissance.campaign.correlate_rfcomm_with_sdp",
         lambda entries, channels: {"hidden_channels": [], "entries": []},
     )
     monkeypatch.setattr(
-        "blue_tap.recon.campaign.correlate_l2cap_with_sdp",
+        "blue_tap.modules.reconnaissance.campaign.correlate_l2cap_with_sdp",
         lambda entries, psms: {"unexpected_psms": [], "entries": []},
     )
-    monkeypatch.setattr("blue_tap.recon.campaign.detect_pairing_mode", lambda address, hci="hci0": {})
+    monkeypatch.setattr("blue_tap.modules.reconnaissance.campaign.detect_pairing_mode", lambda address, hci="hci0": {})
 
     class FakeCapture:
         def start(self, output, hci="hci0", pcap=True):
             return False
 
-    monkeypatch.setattr("blue_tap.recon.campaign.HCICapture", lambda: FakeCapture())
+    monkeypatch.setattr("blue_tap.modules.reconnaissance.campaign.HCICapture", lambda: FakeCapture())
 
     envelope = run_auto_recon(address="AA:BB:CC:DD:EE:FF", with_captures=True)
 
@@ -273,7 +272,7 @@ def test_evaluate_smp_transcript_classifies_legacy_justworks():
 
 def test_run_auto_recon_includes_prerequisites_and_correlation(monkeypatch):
     monkeypatch.setattr(
-        "blue_tap.recon.campaign.detect_target_capabilities",
+        "blue_tap.modules.reconnaissance.campaign.detect_target_capabilities",
         lambda address, hci="hci0": {
             "classification": "classic_only",
             "classic": {"supported": True, "signals": ["sdp_services"]},
@@ -282,7 +281,7 @@ def test_run_auto_recon_includes_prerequisites_and_correlation(monkeypatch):
         },
     )
     monkeypatch.setattr(
-        "blue_tap.recon.campaign.evaluate_recon_prerequisites",
+        "blue_tap.modules.reconnaissance.campaign.evaluate_recon_prerequisites",
         lambda **kwargs: {
             "classic_adapter_ready": {"available": True, "reason": ""},
             "hci_capture": {"available": False, "reason": "btmon not installed"},
@@ -292,15 +291,15 @@ def test_run_auto_recon_includes_prerequisites_and_correlation(monkeypatch):
         },
     )
     monkeypatch.setattr(
-        "blue_tap.recon.campaign.fingerprint_device",
+        "blue_tap.modules.reconnaissance.campaign.fingerprint_device",
         lambda address, hci="hci0": {"address": address, "name": "Demo", "manufacturer": "DemoCorp", "profiles": [], "attack_surface": []},
     )
     monkeypatch.setattr(
-        "blue_tap.recon.campaign.detect_pairing_mode",
+        "blue_tap.modules.reconnaissance.campaign.detect_pairing_mode",
         lambda address, hci="hci0": {"ssp_supported": True, "io_capability": "NoInputNoOutput", "pairing_method": "Just Works"},
     )
     monkeypatch.setattr(
-        "blue_tap.recon.campaign.browse_services_detailed",
+        "blue_tap.modules.reconnaissance.campaign.browse_services_detailed",
         lambda address, hci="hci0": {
             "services": [{"name": "Serial Port", "protocol": "RFCOMM", "channel": 5}],
             "rfcomm_channels": [5],
@@ -310,7 +309,7 @@ def test_run_auto_recon_includes_prerequisites_and_correlation(monkeypatch):
         },
     )
     monkeypatch.setattr(
-        "blue_tap.recon.campaign.RFCOMMScanner",
+        "blue_tap.modules.reconnaissance.campaign.RFCOMMScanner",
         lambda address: type(
             "StubScanner",
             (),
@@ -318,7 +317,7 @@ def test_run_auto_recon_includes_prerequisites_and_correlation(monkeypatch):
         )(),
     )
     monkeypatch.setattr(
-        "blue_tap.recon.campaign.L2CAPScanner",
+        "blue_tap.modules.reconnaissance.campaign.L2CAPScanner",
         lambda address: type(
             "StubL2",
             (),
@@ -344,7 +343,7 @@ def test_run_auto_recon_includes_prerequisites_and_correlation(monkeypatch):
 
 def test_run_auto_recon_executes_capture_collectors_when_available(monkeypatch):
     monkeypatch.setattr(
-        "blue_tap.recon.campaign.detect_target_capabilities",
+        "blue_tap.modules.reconnaissance.campaign.detect_target_capabilities",
         lambda address, hci="hci0": {
             "classification": "dual_mode",
             "classic": {"supported": True, "signals": ["sdp_services"]},
@@ -353,7 +352,7 @@ def test_run_auto_recon_executes_capture_collectors_when_available(monkeypatch):
         },
     )
     monkeypatch.setattr(
-        "blue_tap.recon.campaign.evaluate_recon_prerequisites",
+        "blue_tap.modules.reconnaissance.campaign.evaluate_recon_prerequisites",
         lambda **kwargs: {
             "classic_adapter_ready": {"available": True, "reason": ""},
             "hci_capture": {"available": True, "reason": ""},
@@ -363,31 +362,31 @@ def test_run_auto_recon_executes_capture_collectors_when_available(monkeypatch):
         },
     )
     monkeypatch.setattr(
-        "blue_tap.recon.campaign.fingerprint_device",
+        "blue_tap.modules.reconnaissance.campaign.fingerprint_device",
         lambda address, hci="hci0": {"address": address, "name": "Demo", "manufacturer": "DemoCorp", "profiles": [], "attack_surface": []},
     )
     monkeypatch.setattr(
-        "blue_tap.recon.campaign.detect_pairing_mode",
+        "blue_tap.modules.reconnaissance.campaign.detect_pairing_mode",
         lambda address, hci="hci0": {"ssp_supported": True, "io_capability": "DisplayYesNo", "pairing_method": "Numeric Comparison"},
     )
     monkeypatch.setattr(
-        "blue_tap.recon.campaign.browse_services_detailed",
+        "blue_tap.modules.reconnaissance.campaign.browse_services_detailed",
         lambda address, hci="hci0": {"services": [], "rfcomm_channels": [], "l2cap_psms": [], "service_count": 0, "status": "completed"},
     )
     monkeypatch.setattr(
-        "blue_tap.recon.campaign.RFCOMMScanner",
+        "blue_tap.modules.reconnaissance.campaign.RFCOMMScanner",
         lambda address: type("StubScanner", (), {"scan_all_channels": lambda self, hci="hci0": []})(),
     )
     monkeypatch.setattr(
-        "blue_tap.recon.campaign.L2CAPScanner",
+        "blue_tap.modules.reconnaissance.campaign.L2CAPScanner",
         lambda address: type("StubL2", (), {"scan_standard_psms": lambda self, hci="hci0": []})(),
     )
     monkeypatch.setattr(
-        "blue_tap.recon.campaign.enumerate_services_detailed_sync",
+        "blue_tap.modules.reconnaissance.campaign.enumerate_services_detailed_sync",
         lambda address: {"connected": True, "status": "completed", "services": [], "service_count": 0, "characteristic_count": 0, "observations": [], "security_summary": {}},
     )
     monkeypatch.setattr(
-        "blue_tap.recon.campaign._run_hci_capture_step",
+        "blue_tap.modules.reconnaissance.campaign._run_hci_capture_step",
         lambda *args, **kwargs: (
             {
                 "id": "recon_hci_capture",
@@ -403,7 +402,7 @@ def test_run_auto_recon_executes_capture_collectors_when_available(monkeypatch):
         ),
     )
     monkeypatch.setattr(
-        "blue_tap.recon.campaign._run_nrf_capture_step",
+        "blue_tap.modules.reconnaissance.campaign._run_nrf_capture_step",
         lambda *args, **kwargs: (
             {
                 "id": "recon_nrf_capture",
@@ -419,7 +418,7 @@ def test_run_auto_recon_executes_capture_collectors_when_available(monkeypatch):
         ),
     )
     monkeypatch.setattr(
-        "blue_tap.recon.campaign._run_lmp_capture_step",
+        "blue_tap.modules.reconnaissance.campaign._run_lmp_capture_step",
         lambda *args, **kwargs: (
             {
                 "id": "recon_below_hci",
@@ -435,7 +434,7 @@ def test_run_auto_recon_executes_capture_collectors_when_available(monkeypatch):
         ),
     )
     monkeypatch.setattr(
-        "blue_tap.recon.campaign._run_combined_capture_step",
+        "blue_tap.modules.reconnaissance.campaign._run_combined_capture_step",
         lambda *args, **kwargs: (
             {
                 "id": "recon_combined_capture",
@@ -741,8 +740,8 @@ def test_pcap_analysis_extracts_smp_and_crackle_signals(tmp_path, monkeypatch):
             return Result(stdout="TK found: 000000\nLTK found: 81b06facd90fe7a6e9bbd9cee59736a7\nSuccessfully cracked\n")
         return Result(returncode=1, stderr="unsupported")
 
-    monkeypatch.setattr("blue_tap.recon.correlation.check_tool", fake_check_tool)
-    monkeypatch.setattr("blue_tap.recon.correlation.run_cmd", fake_run_cmd)
+    monkeypatch.setattr("blue_tap.modules.reconnaissance.correlation.check_tool", fake_check_tool)
+    monkeypatch.setattr("blue_tap.modules.reconnaissance.correlation.run_cmd", fake_run_cmd)
 
     analysis = analyze_capture_artifact(str(pcap_path))
 

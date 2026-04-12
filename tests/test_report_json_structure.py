@@ -2,8 +2,8 @@ import json
 from pathlib import Path
 
 from blue_tap.demo import mock_data as M
-from blue_tap.core.auto_framework import build_auto_result
-from blue_tap.core.result_schema import build_run_envelope, make_evidence, make_execution
+from blue_tap.framework.envelopes.auto import build_auto_result
+from blue_tap.framework.contracts.result_schema import build_run_envelope, make_evidence, make_execution
 from blue_tap.demo.report_data import (
     build_demo_dos_result,
     build_demo_fingerprint_result,
@@ -12,8 +12,8 @@ from blue_tap.demo.report_data import (
     build_demo_scan_result,
     build_demo_vuln_result,
 )
-from blue_tap.report.generator import ReportGenerator
-from blue_tap.utils.session import Session
+from blue_tap.interfaces.reporting.generator import ReportGenerator
+from blue_tap.framework.sessions.store import Session
 
 
 def test_generate_json_includes_module_and_global_executions(tmp_path):

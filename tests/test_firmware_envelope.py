@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 
-from blue_tap.core.firmware_framework import (
+from blue_tap.framework.envelopes.firmware import (
     FIRMWARE_MODULE_OUTCOMES,
     build_firmware_status_result,
     build_firmware_dump_result,
@@ -11,8 +11,8 @@ from blue_tap.core.firmware_framework import (
     build_firmware_operation_result,
     make_firmware_run_id,
 )
-from blue_tap.core.result_schema import validate_run_envelope
-from blue_tap.report.adapters.firmware import FirmwareReportAdapter
+from blue_tap.framework.contracts.result_schema import validate_run_envelope
+from blue_tap.framework.reporting.adapters.firmware import FirmwareReportAdapter
 
 
 def test_firmware_run_id_format():

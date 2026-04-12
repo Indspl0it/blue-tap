@@ -1,7 +1,7 @@
 """Tests for fuzz CLI batch orchestration helpers."""
 from __future__ import annotations
 
-from blue_tap.fuzz import cli_extra
+from blue_tap.modules.fuzzing import cli_extra
 
 
 def test_run_protocol_batch_aggregates_per_protocol_results(monkeypatch):

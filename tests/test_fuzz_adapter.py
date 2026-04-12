@@ -3,13 +3,13 @@ from __future__ import annotations
 
 import json
 
-from blue_tap.core.fuzz_framework import (
+from blue_tap.framework.envelopes.fuzz import (
     build_fuzz_campaign_result,
     build_fuzz_operation_result,
     build_fuzz_protocol_execution,
     build_fuzz_result,
 )
-from blue_tap.report.adapters.fuzz import FuzzReportAdapter
+from blue_tap.framework.reporting.adapters.fuzz import FuzzReportAdapter
 
 
 def _make_campaign_envelope(num_protocols: int = 2, crashes: int = 0):

@@ -38,8 +38,8 @@ def test_spoof_mac_emits_run_lifecycle():
     }
 
     with patch("blue_tap.cli.emit_cli_event", side_effect=fake_emit), \
-         patch("blue_tap.core.spoofer.spoof_address", return_value=fake_result), \
-         patch("blue_tap.utils.session.log_command"):
+         patch("blue_tap.hardware.spoofer.spoof_address", return_value=fake_result), \
+         patch("blue_tap.framework.sessions.store.log_command"):
         result = CliRunner().invoke(
             main, ["spoof", "mac", "AA:BB:CC:DD:EE:FF", "--hci", "hci0"]
         )
@@ -68,8 +68,8 @@ def test_spoof_mac_emits_run_error_on_failure():
     }
 
     with patch("blue_tap.cli.emit_cli_event", side_effect=fake_emit), \
-         patch("blue_tap.core.spoofer.spoof_address", return_value=fake_result), \
-         patch("blue_tap.utils.session.log_command"):
+         patch("blue_tap.hardware.spoofer.spoof_address", return_value=fake_result), \
+         patch("blue_tap.framework.sessions.store.log_command"):
         CliRunner().invoke(main, ["spoof", "mac", "AA:BB:CC:DD:EE:FF", "--hci", "hci0"])
 
     assert "run_started" in captured
@@ -103,8 +103,8 @@ def test_spoof_clone_emits_run_lifecycle():
     }
 
     with patch("blue_tap.cli.emit_cli_event", side_effect=fake_emit), \
-         patch("blue_tap.core.spoofer.clone_device_identity", return_value=fake_result), \
-         patch("blue_tap.utils.session.log_command"):
+         patch("blue_tap.hardware.spoofer.clone_device_identity", return_value=fake_result), \
+         patch("blue_tap.framework.sessions.store.log_command"):
         CliRunner().invoke(
             main,
             ["spoof", "clone", "AA:BB:CC:DD:EE:FF", "Galaxy S24", "--hci", "hci0"],
@@ -138,8 +138,8 @@ def test_spoof_restore_emits_run_lifecycle():
     }
 
     with patch("blue_tap.cli.emit_cli_event", side_effect=fake_emit), \
-         patch("blue_tap.core.spoofer.restore_original_mac", return_value=fake_result), \
-         patch("blue_tap.utils.session.log_command"):
+         patch("blue_tap.hardware.spoofer.restore_original_mac", return_value=fake_result), \
+         patch("blue_tap.framework.sessions.store.log_command"):
         CliRunner().invoke(main, ["spoof", "restore", "--hci", "hci0"])
 
     assert "run_started" in captured
@@ -165,8 +165,8 @@ def test_adapter_set_name_emits_run_lifecycle():
     fake_result = {"success": True, "name": "TestDevice", "previous_name": "hci0"}
 
     with patch("blue_tap.cli.emit_cli_event", side_effect=fake_emit), \
-         patch("blue_tap.core.adapter.set_device_name", return_value=fake_result), \
-         patch("blue_tap.utils.session.log_command"):
+         patch("blue_tap.hardware.adapter.set_device_name", return_value=fake_result), \
+         patch("blue_tap.framework.sessions.store.log_command"):
         CliRunner().invoke(main, ["adapter", "set-name", "hci0", "TestDevice"])
 
     assert "run_started" in captured
@@ -187,8 +187,8 @@ def test_adapter_set_name_logs_to_session():
 
     fake_result = {"success": True, "name": "TestDevice", "previous_name": "hci0"}
 
-    with patch("blue_tap.core.adapter.set_device_name", return_value=fake_result), \
-         patch("blue_tap.utils.session.log_command", side_effect=fake_log), \
+    with patch("blue_tap.hardware.adapter.set_device_name", return_value=fake_result), \
+         patch("blue_tap.framework.sessions.store.log_command", side_effect=fake_log), \
          patch("blue_tap.cli.emit_cli_event", return_value={}):
         CliRunner().invoke(main, ["adapter", "set-name", "hci0", "TestDevice"])
 
@@ -217,8 +217,8 @@ def test_adapter_set_class_emits_run_lifecycle():
     fake_result = {"success": True, "device_class": "0x5a020c"}
 
     with patch("blue_tap.cli.emit_cli_event", side_effect=fake_emit), \
-         patch("blue_tap.core.adapter.set_device_class", return_value=fake_result), \
-         patch("blue_tap.utils.session.log_command"):
+         patch("blue_tap.hardware.adapter.set_device_class", return_value=fake_result), \
+         patch("blue_tap.framework.sessions.store.log_command"):
         CliRunner().invoke(main, ["adapter", "set-class", "hci0", "0x5a020c"])
 
     assert "run_started" in captured
@@ -245,8 +245,8 @@ def test_adapter_up_emits_run_lifecycle():
     fake_result = {"success": True, "hci": "hci0", "operation": "adapter_up"}
 
     with patch("blue_tap.cli.emit_cli_event", side_effect=fake_emit), \
-         patch("blue_tap.core.adapter.adapter_up", return_value=fake_result), \
-         patch("blue_tap.utils.session.log_command"):
+         patch("blue_tap.hardware.adapter.adapter_up", return_value=fake_result), \
+         patch("blue_tap.framework.sessions.store.log_command"):
         CliRunner().invoke(main, ["adapter", "up", "hci0"])
 
     assert "run_started" in captured
@@ -269,8 +269,8 @@ def test_adapter_down_emits_run_lifecycle():
     fake_result = {"success": True, "hci": "hci0", "operation": "adapter_down"}
 
     with patch("blue_tap.cli.emit_cli_event", side_effect=fake_emit), \
-         patch("blue_tap.core.adapter.adapter_down", return_value=fake_result), \
-         patch("blue_tap.utils.session.log_command"):
+         patch("blue_tap.hardware.adapter.adapter_down", return_value=fake_result), \
+         patch("blue_tap.framework.sessions.store.log_command"):
         CliRunner().invoke(main, ["adapter", "down", "hci0"])
 
     assert "run_started" in captured
@@ -291,8 +291,8 @@ def test_adapter_reset_emits_run_lifecycle():
     fake_result = {"success": True, "hci": "hci0", "operation": "adapter_reset"}
 
     with patch("blue_tap.cli.emit_cli_event", side_effect=fake_emit), \
-         patch("blue_tap.core.adapter.adapter_reset", return_value=fake_result), \
-         patch("blue_tap.utils.session.log_command"):
+         patch("blue_tap.hardware.adapter.adapter_reset", return_value=fake_result), \
+         patch("blue_tap.framework.sessions.store.log_command"):
         CliRunner().invoke(main, ["adapter", "reset", "hci0"])
 
     assert "run_started" in captured
@@ -323,9 +323,9 @@ def test_firmware_dump_emits_artifact_saved(tmp_path):
         return True
 
     with patch("blue_tap.cli.emit_cli_event", side_effect=fake_emit), \
-         patch("blue_tap.core.firmware.DarkFirmwareManager.is_darkfirmware_loaded", return_value=True), \
-         patch("blue_tap.core.firmware.DarkFirmwareManager.dump_memory", side_effect=fake_dump), \
-         patch("blue_tap.utils.session.log_command"):
+         patch("blue_tap.hardware.firmware.DarkFirmwareManager.is_darkfirmware_loaded", return_value=True), \
+         patch("blue_tap.hardware.firmware.DarkFirmwareManager.dump_memory", side_effect=fake_dump), \
+         patch("blue_tap.framework.sessions.store.log_command"):
         CliRunner().invoke(
             main,
             ["adapter", "firmware-dump", "--region", "rom", "-o", output_file, "--hci", "hci1"],
@@ -354,9 +354,9 @@ def test_firmware_dump_emits_run_completed(tmp_path):
         return True
 
     with patch("blue_tap.cli.emit_cli_event", side_effect=fake_emit), \
-         patch("blue_tap.core.firmware.DarkFirmwareManager.is_darkfirmware_loaded", return_value=True), \
-         patch("blue_tap.core.firmware.DarkFirmwareManager.dump_memory", side_effect=fake_dump), \
-         patch("blue_tap.utils.session.log_command"):
+         patch("blue_tap.hardware.firmware.DarkFirmwareManager.is_darkfirmware_loaded", return_value=True), \
+         patch("blue_tap.hardware.firmware.DarkFirmwareManager.dump_memory", side_effect=fake_dump), \
+         patch("blue_tap.framework.sessions.store.log_command"):
         CliRunner().invoke(
             main,
             ["adapter", "firmware-dump", "--region", "ram", "-o", output_file, "--hci", "hci1"],
@@ -381,9 +381,9 @@ def test_firmware_spoof_emits_run_lifecycle():
         return {"event_type": event_type, **kwargs}
 
     with patch("blue_tap.cli.emit_cli_event", side_effect=fake_emit), \
-         patch("blue_tap.core.firmware.DarkFirmwareManager.detect_rtl8761b", return_value=True), \
-         patch("blue_tap.core.firmware.DarkFirmwareManager.patch_bdaddr", return_value=True), \
-         patch("blue_tap.utils.session.log_command"):
+         patch("blue_tap.hardware.firmware.DarkFirmwareManager.detect_rtl8761b", return_value=True), \
+         patch("blue_tap.hardware.firmware.DarkFirmwareManager.patch_bdaddr", return_value=True), \
+         patch("blue_tap.framework.sessions.store.log_command"):
         CliRunner().invoke(
             main, ["adapter", "firmware-spoof", "AA:BB:CC:DD:EE:FF", "--hci", "hci1"]
         )
@@ -404,9 +404,9 @@ def test_firmware_spoof_logs_to_session():
     def fake_log(command, payload, **kwargs):
         logged.append((command, payload))
 
-    with patch("blue_tap.core.firmware.DarkFirmwareManager.detect_rtl8761b", return_value=True), \
-         patch("blue_tap.core.firmware.DarkFirmwareManager.patch_bdaddr", return_value=True), \
-         patch("blue_tap.utils.session.log_command", side_effect=fake_log), \
+    with patch("blue_tap.hardware.firmware.DarkFirmwareManager.detect_rtl8761b", return_value=True), \
+         patch("blue_tap.hardware.firmware.DarkFirmwareManager.patch_bdaddr", return_value=True), \
+         patch("blue_tap.framework.sessions.store.log_command", side_effect=fake_log), \
          patch("blue_tap.cli.emit_cli_event", return_value={}):
         CliRunner().invoke(
             main, ["adapter", "firmware-spoof", "AA:BB:CC:DD:EE:FF", "--hci", "hci1"]
@@ -435,9 +435,9 @@ def test_firmware_set_emits_run_lifecycle():
         return {"event_type": event_type, **kwargs}
 
     with patch("blue_tap.cli.emit_cli_event", side_effect=fake_emit), \
-         patch("blue_tap.core.firmware.DarkFirmwareManager.is_darkfirmware_loaded", return_value=True), \
-         patch("blue_tap.core.firmware.DarkFirmwareManager.patch_send_length", return_value=True), \
-         patch("blue_tap.utils.session.log_command"):
+         patch("blue_tap.hardware.firmware.DarkFirmwareManager.is_darkfirmware_loaded", return_value=True), \
+         patch("blue_tap.hardware.firmware.DarkFirmwareManager.patch_send_length", return_value=True), \
+         patch("blue_tap.framework.sessions.store.log_command"):
         CliRunner().invoke(
             main, ["adapter", "firmware-set", "lmp-size", "17", "--hci", "hci1"]
         )
@@ -458,9 +458,9 @@ def test_firmware_set_logs_to_session():
     def fake_log(command, payload, **kwargs):
         logged.append((command, payload))
 
-    with patch("blue_tap.core.firmware.DarkFirmwareManager.is_darkfirmware_loaded", return_value=True), \
-         patch("blue_tap.core.firmware.DarkFirmwareManager.patch_send_length", return_value=True), \
-         patch("blue_tap.utils.session.log_command", side_effect=fake_log), \
+    with patch("blue_tap.hardware.firmware.DarkFirmwareManager.is_darkfirmware_loaded", return_value=True), \
+         patch("blue_tap.hardware.firmware.DarkFirmwareManager.patch_send_length", return_value=True), \
+         patch("blue_tap.framework.sessions.store.log_command", side_effect=fake_log), \
          patch("blue_tap.cli.emit_cli_event", return_value={}):
         CliRunner().invoke(
             main, ["adapter", "firmware-set", "lmp-size", "17", "--hci", "hci1"]

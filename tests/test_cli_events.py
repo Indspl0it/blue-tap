@@ -7,7 +7,7 @@ import re
 
 import pytest
 
-from blue_tap.core.cli_events import CANONICAL_EVENT_TYPES, emit_cli_event
+from blue_tap.framework.runtime.cli_events import CANONICAL_EVENT_TYPES, emit_cli_event
 
 
 _EXPECTED_CANONICAL = {
@@ -36,7 +36,7 @@ def test_canonical_event_types_has_expected_members():
 
 
 def test_emit_cli_event_canonical_no_warning(caplog):
-    with caplog.at_level(logging.WARNING, logger="blue_tap.core.cli_events"):
+    with caplog.at_level(logging.WARNING, logger="blue_tap.framework.runtime.cli_events"):
         emit_cli_event(
             event_type="run_started",
             module="test",
@@ -48,7 +48,7 @@ def test_emit_cli_event_canonical_no_warning(caplog):
 
 
 def test_emit_cli_event_non_canonical_logs_warning(caplog):
-    with caplog.at_level(logging.WARNING, logger="blue_tap.core.cli_events"):
+    with caplog.at_level(logging.WARNING, logger="blue_tap.framework.runtime.cli_events"):
         result = emit_cli_event(
             event_type="execution_error",
             module="test",
@@ -64,7 +64,7 @@ def test_emit_cli_event_non_canonical_logs_warning(caplog):
 
 
 def test_emit_cli_event_non_canonical_mentions_module_in_warning(caplog):
-    with caplog.at_level(logging.WARNING, logger="blue_tap.core.cli_events"):
+    with caplog.at_level(logging.WARNING, logger="blue_tap.framework.runtime.cli_events"):
         emit_cli_event(
             event_type="bad_type",
             module="mymodule",

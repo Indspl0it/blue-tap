@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import socket
 
-from blue_tap.attack import cve_checks_ble_smp, cve_checks_l2cap, protocol_dos
-from blue_tap.core import scanner
+from blue_tap.modules.assessment.checks import cve_ble_smp as cve_checks_ble_smp, cve_l2cap as cve_checks_l2cap
+from blue_tap.modules.exploitation.dos import protocol_dos
+from blue_tap.hardware import scanner
 
 
 class FakeSocket:

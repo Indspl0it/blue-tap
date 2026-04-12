@@ -3,13 +3,13 @@ from __future__ import annotations
 
 import json
 
-from blue_tap.core.auto_framework import (
+from blue_tap.framework.envelopes.auto import (
     AUTO_MODULE_OUTCOMES,
     build_auto_result,
     build_auto_phase_execution,
     make_auto_run_id,
 )
-from blue_tap.core.result_schema import validate_run_envelope
+from blue_tap.framework.contracts.result_schema import validate_run_envelope
 
 
 def _make_auto_results(phases_status=None):

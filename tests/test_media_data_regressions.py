@@ -4,13 +4,13 @@ from pathlib import Path
 
 from click.testing import CliRunner
 
-from blue_tap.attack.bluesnarfer import ATClient
-from blue_tap.attack.hfp import HFPClient
-from blue_tap.attack.map_client import MAPClient, parse_bmessage
-from blue_tap.attack.opp import OPPClient
-from blue_tap.attack.pbap import PBAPClient
-from blue_tap.attack.avrcp import AVRCPController
-from blue_tap.attack.a2dp import (
+from blue_tap.modules.post_exploitation.data.bluesnarfer import ATClient
+from blue_tap.modules.post_exploitation.media.hfp import HFPClient
+from blue_tap.modules.post_exploitation.contacts.map_client import MAPClient, parse_bmessage
+from blue_tap.modules.post_exploitation.data.opp import OPPClient
+from blue_tap.modules.post_exploitation.contacts.pbap import PBAPClient
+from blue_tap.modules.post_exploitation.media.avrcp import AVRCPController
+from blue_tap.modules.post_exploitation.media.a2dp import (
     capture_a2dp,
     play_to_car,
     record_car_mic,
@@ -19,7 +19,7 @@ from blue_tap.attack.a2dp import (
     resolve_hfp_source,
     set_profile_a2dp,
 )
-from blue_tap.core.obex_client import ObexError
+from blue_tap.hardware.obex_client import ObexError
 from blue_tap.cli import _command_succeeded
 from blue_tap.cli import main
 
@@ -130,7 +130,7 @@ def test_pbap_prefers_obex_session_for_listing(monkeypatch):
         def disconnect(self):
             return None
 
-    monkeypatch.setattr("blue_tap.attack.pbap.PBAPSession", FakePBAPSession)
+    monkeypatch.setattr("blue_tap.modules.post_exploitation.contacts.pbap.PBAPSession", FakePBAPSession)
 
     client = PBAPClient("AA:BB:CC:DD:EE:FF", channel=19)
     assert client.connect() is True
@@ -235,7 +235,7 @@ def test_map_prefers_obex_session_for_listing(monkeypatch):
         def disconnect(self):
             return None
 
-    monkeypatch.setattr("blue_tap.attack.map_client.MAPSession", FakeMAPSession)
+    monkeypatch.setattr("blue_tap.modules.post_exploitation.contacts.map_client.MAPSession", FakeMAPSession)
 
     client = MAPClient("AA:BB:CC:DD:EE:FF", channel=20)
     assert client.connect() is True
@@ -288,10 +288,10 @@ def test_map_list_logs_filters(monkeypatch):
             return None
 
     monkeypatch.setattr("blue_tap.cli.resolve_address", lambda address=None, prompt=None: "AA:BB:CC:DD:EE:FF")
-    monkeypatch.setattr("blue_tap.recon.sdp.find_service_channel", lambda *args, **kwargs: 20)
-    monkeypatch.setattr("blue_tap.attack.map_client.MAPClient", FakeMAPClient)
+    monkeypatch.setattr("blue_tap.modules.reconnaissance.sdp.find_service_channel", lambda *args, **kwargs: 20)
+    monkeypatch.setattr("blue_tap.modules.post_exploitation.contacts.map_client.MAPClient", FakeMAPClient)
     monkeypatch.setattr(
-        "blue_tap.utils.session.log_command",
+        "blue_tap.framework.sessions.store.log_command",
         lambda command, data, category="general", target="": recorded.update(
             {"command": command, "data": data, "category": category, "target": target}
         ),
@@ -328,10 +328,10 @@ def test_map_folders_logs_standardized_data_envelope(monkeypatch):
             return None
 
     monkeypatch.setattr("blue_tap.cli.resolve_address", lambda address=None, prompt=None: "AA:BB:CC:DD:EE:FF")
-    monkeypatch.setattr("blue_tap.recon.sdp.find_service_channel", lambda *args, **kwargs: 20)
-    monkeypatch.setattr("blue_tap.attack.map_client.MAPClient", FakeMAPClient)
+    monkeypatch.setattr("blue_tap.modules.reconnaissance.sdp.find_service_channel", lambda *args, **kwargs: 20)
+    monkeypatch.setattr("blue_tap.modules.post_exploitation.contacts.map_client.MAPClient", FakeMAPClient)
     monkeypatch.setattr(
-        "blue_tap.utils.session.log_command",
+        "blue_tap.framework.sessions.store.log_command",
         lambda command, data, category="general", target="": recorded.update(
             {"command": command, "data": data, "category": category, "target": target}
         ),
@@ -362,10 +362,10 @@ def test_map_update_inbox_logs_failure(monkeypatch):
             return None
 
     monkeypatch.setattr("blue_tap.cli.resolve_address", lambda address=None, prompt=None: "AA:BB:CC:DD:EE:FF")
-    monkeypatch.setattr("blue_tap.recon.sdp.find_service_channel", lambda *args, **kwargs: 20)
-    monkeypatch.setattr("blue_tap.attack.map_client.MAPClient", FakeMAPClient)
+    monkeypatch.setattr("blue_tap.modules.reconnaissance.sdp.find_service_channel", lambda *args, **kwargs: 20)
+    monkeypatch.setattr("blue_tap.modules.post_exploitation.contacts.map_client.MAPClient", FakeMAPClient)
     monkeypatch.setattr(
-        "blue_tap.utils.session.log_command",
+        "blue_tap.framework.sessions.store.log_command",
         lambda command, data, category="general", target="": recorded.update(
             {"command": command, "data": data, "category": category, "target": target}
         ),
@@ -399,7 +399,7 @@ def test_opp_prefers_obex_session_for_push(monkeypatch, tmp_path):
         def disconnect(self):
             return None
 
-    monkeypatch.setattr("blue_tap.attack.opp.OPPSession", FakeOPPSession)
+    monkeypatch.setattr("blue_tap.modules.post_exploitation.data.opp.OPPSession", FakeOPPSession)
 
     client = OPPClient("AA:BB:CC:DD:EE:FF", channel=9)
     assert client.connect() is True
@@ -428,7 +428,7 @@ def test_opp_dbus_transfer_failure_returns_false_without_raw_socket_crash(monkey
         def disconnect(self):
             return None
 
-    monkeypatch.setattr("blue_tap.attack.opp.OPPSession", FakeOPPSession)
+    monkeypatch.setattr("blue_tap.modules.post_exploitation.data.opp.OPPSession", FakeOPPSession)
 
     client = OPPClient("AA:BB:CC:DD:EE:FF", channel=9)
     assert client.connect() is True
@@ -451,7 +451,7 @@ def test_doctor_profiles_logs_environment_envelope(monkeypatch):
         },
     )
     monkeypatch.setattr(
-        "blue_tap.utils.session.log_command",
+        "blue_tap.framework.sessions.store.log_command",
         lambda command, data, category="general", target="": recorded.update(
             {"command": command, "data": data, "category": category, "target": target}
         ),
@@ -489,7 +489,7 @@ def test_doctor_profiles_logs_capability_limitations(monkeypatch):
         },
     )
     monkeypatch.setattr(
-        "blue_tap.utils.session.log_command",
+        "blue_tap.framework.sessions.store.log_command",
         lambda command, data, category="general", target="": recorded.update(
             {"command": command, "data": data, "category": category, "target": target}
         ),
@@ -522,10 +522,10 @@ def test_opp_push_logs_failure_when_connection_setup_fails(monkeypatch, tmp_path
             return False
 
     monkeypatch.setattr("blue_tap.cli.resolve_address", lambda address=None, prompt=None: "AA:BB:CC:DD:EE:FF")
-    monkeypatch.setattr("blue_tap.recon.sdp.find_service_channel", lambda *args, **kwargs: 9)
-    monkeypatch.setattr("blue_tap.attack.opp.OPPClient", FakeOPPClient)
+    monkeypatch.setattr("blue_tap.modules.reconnaissance.sdp.find_service_channel", lambda *args, **kwargs: 9)
+    monkeypatch.setattr("blue_tap.modules.post_exploitation.data.opp.OPPClient", FakeOPPClient)
     monkeypatch.setattr(
-        "blue_tap.utils.session.log_command",
+        "blue_tap.framework.sessions.store.log_command",
         lambda command, data, category="general", target="": recorded.update(
             {"command": command, "data": data, "category": category, "target": target}
         ),
@@ -565,10 +565,10 @@ def test_map_dump_writes_manifest_artifact(monkeypatch, tmp_path):
             return None
 
     monkeypatch.setattr("blue_tap.cli.resolve_address", lambda address=None, prompt=None: "AA:BB:CC:DD:EE:FF")
-    monkeypatch.setattr("blue_tap.recon.sdp.find_service_channel", lambda *args, **kwargs: 20)
-    monkeypatch.setattr("blue_tap.attack.map_client.MAPClient", FakeMAPClient)
+    monkeypatch.setattr("blue_tap.modules.reconnaissance.sdp.find_service_channel", lambda *args, **kwargs: 20)
+    monkeypatch.setattr("blue_tap.modules.post_exploitation.contacts.map_client.MAPClient", FakeMAPClient)
     monkeypatch.setattr(
-        "blue_tap.utils.session.log_command",
+        "blue_tap.framework.sessions.store.log_command",
         lambda command, data, category="general", target="": recorded.update(
             {"command": command, "data": data, "category": category, "target": target}
         ),
@@ -602,10 +602,10 @@ def test_map_push_logs_capability_limitations(monkeypatch):
             return None
 
     monkeypatch.setattr("blue_tap.cli.resolve_address", lambda address=None, prompt=None: "AA:BB:CC:DD:EE:FF")
-    monkeypatch.setattr("blue_tap.recon.sdp.find_service_channel", lambda *args, **kwargs: 20)
-    monkeypatch.setattr("blue_tap.attack.map_client.MAPClient", FakeMAPClient)
+    monkeypatch.setattr("blue_tap.modules.reconnaissance.sdp.find_service_channel", lambda *args, **kwargs: 20)
+    monkeypatch.setattr("blue_tap.modules.post_exploitation.contacts.map_client.MAPClient", FakeMAPClient)
     monkeypatch.setattr(
-        "blue_tap.utils.session.log_command",
+        "blue_tap.framework.sessions.store.log_command",
         lambda command, data, category="general", target="": recorded.update(
             {"command": command, "data": data, "category": category, "target": target}
         ),
@@ -644,10 +644,10 @@ def test_map_status_logs_failed_outcome(monkeypatch):
             return None
 
     monkeypatch.setattr("blue_tap.cli.resolve_address", lambda address=None, prompt=None: "AA:BB:CC:DD:EE:FF")
-    monkeypatch.setattr("blue_tap.recon.sdp.find_service_channel", lambda *args, **kwargs: 20)
-    monkeypatch.setattr("blue_tap.attack.map_client.MAPClient", FakeMAPClient)
+    monkeypatch.setattr("blue_tap.modules.reconnaissance.sdp.find_service_channel", lambda *args, **kwargs: 20)
+    monkeypatch.setattr("blue_tap.modules.post_exploitation.contacts.map_client.MAPClient", FakeMAPClient)
     monkeypatch.setattr(
-        "blue_tap.utils.session.log_command",
+        "blue_tap.framework.sessions.store.log_command",
         lambda command, data, category="general", target="": recorded.update(
             {"command": command, "data": data, "category": category, "target": target}
         ),
@@ -731,7 +731,7 @@ def test_avrcp_connect_falls_back_to_next_player_candidate(monkeypatch):
         },
     }
 
-    result = __import__("blue_tap.attack.avrcp", fromlist=["_run_async"])._run_async(
+    result = __import__("blue_tap.modules.post_exploitation.media.avrcp", fromlist=["_run_async"])._run_async(
         ctrl._find_transport({}, "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF")
     )
     assert result is None
@@ -763,7 +763,7 @@ def test_avrcp_connect_falls_back_to_next_player_candidate(monkeypatch):
                 ctrl._props_iface = None
         return bind_errors
 
-    bind_errors = __import__("blue_tap.attack.avrcp", fromlist=["_run_async"])._run_async(_run())
+    bind_errors = __import__("blue_tap.modules.post_exploitation.media.avrcp", fromlist=["_run_async"])._run_async(_run())
     assert ctrl.dbus_path == "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF/player1"
     assert ctrl._player_iface is not None
     assert ctrl.get_selection_diagnostics()["selected_name"] == "Spotify"
@@ -779,7 +779,7 @@ def test_resolve_bt_audio_endpoints_prefer_exact_mac_matches(monkeypatch):
     ]
 
     monkeypatch.setattr(
-        "blue_tap.attack.a2dp._list_short",
+        "blue_tap.modules.post_exploitation.media.a2dp._list_short",
         lambda kind: [entry for entry in entries if ("output" in entry["name"]) == (kind == "sinks")],
     )
 
@@ -795,14 +795,14 @@ def test_set_profile_a2dp_verifies_active_profile(monkeypatch):
         returncode = 0
         stderr = ""
 
-    monkeypatch.setattr("blue_tap.attack.a2dp.run_cmd", lambda cmd: Result())
+    monkeypatch.setattr("blue_tap.modules.post_exploitation.media.a2dp.run_cmd", lambda cmd: Result())
 
     def _profile(_mac):
         calls["count"] += 1
         return "off" if calls["count"] == 1 else "a2dp-sink"
 
-    monkeypatch.setattr("blue_tap.attack.a2dp.get_active_profile", _profile)
-    monkeypatch.setattr("blue_tap.attack.a2dp.time.sleep", lambda *_: None)
+    monkeypatch.setattr("blue_tap.modules.post_exploitation.media.a2dp.get_active_profile", _profile)
+    monkeypatch.setattr("blue_tap.modules.post_exploitation.media.a2dp.time.sleep", lambda *_: None)
 
     assert set_profile_a2dp("AA:BB:CC:DD:EE:FF") is True
 
@@ -811,13 +811,13 @@ def test_audio_live_logs_failed_audio_envelope(monkeypatch):
     recorded = {}
 
     monkeypatch.setattr("blue_tap.cli.resolve_address", lambda address=None, prompt=None: "AA:BB:CC:DD:EE:FF")
-    monkeypatch.setattr("blue_tap.attack.a2dp.live_eavesdrop", lambda mac, auto_setup=True: False)
+    monkeypatch.setattr("blue_tap.modules.post_exploitation.media.a2dp.live_eavesdrop", lambda mac, auto_setup=True: False)
     monkeypatch.setattr(
         "blue_tap.utils.env_doctor.detect_profile_environment",
         lambda: {"summary": {"capability_limitations": ["No active PipeWire/PulseAudio user service detected"]}},
     )
     monkeypatch.setattr(
-        "blue_tap.utils.session.log_command",
+        "blue_tap.framework.sessions.store.log_command",
         lambda command, data, category="general", target="": recorded.update(
             {"command": command, "data": data, "category": category, "target": target}
         ),
@@ -850,11 +850,11 @@ def test_record_car_mic_returns_empty_on_header_only_file(monkeypatch, tmp_path)
             output.write_bytes(b"R" * 44)
             return 0
 
-    monkeypatch.setattr("blue_tap.attack.a2dp.check_tool", lambda tool: True)
-    monkeypatch.setattr("blue_tap.attack.a2dp.detect_mic_channels", lambda mac: 1)
-    monkeypatch.setattr("blue_tap.attack.a2dp.resolve_hfp_source", lambda mac: "bluez_input.AA_BB_CC_DD_EE_FF.0")
-    monkeypatch.setattr("blue_tap.attack.a2dp.subprocess.Popen", lambda *args, **kwargs: FakeProc())
-    monkeypatch.setattr("blue_tap.attack.a2dp.time.sleep", lambda *_: None)
+    monkeypatch.setattr("blue_tap.modules.post_exploitation.media.a2dp.check_tool", lambda tool: True)
+    monkeypatch.setattr("blue_tap.modules.post_exploitation.media.a2dp.detect_mic_channels", lambda mac: 1)
+    monkeypatch.setattr("blue_tap.modules.post_exploitation.media.a2dp.resolve_hfp_source", lambda mac: "bluez_input.AA_BB_CC_DD_EE_FF.0")
+    monkeypatch.setattr("blue_tap.modules.post_exploitation.media.a2dp.subprocess.Popen", lambda *args, **kwargs: FakeProc())
+    monkeypatch.setattr("blue_tap.modules.post_exploitation.media.a2dp.time.sleep", lambda *_: None)
 
     result = record_car_mic("AA:BB:CC:DD:EE:FF", str(output), duration=1, auto_setup=False)
 
@@ -874,9 +874,9 @@ def test_capture_a2dp_returns_empty_on_header_only_file(monkeypatch, tmp_path):
             output.write_bytes(b"R" * 44)
             return 0
 
-    monkeypatch.setattr("blue_tap.attack.a2dp._detect_source_rate", lambda source: 44100)
-    monkeypatch.setattr("blue_tap.attack.a2dp.subprocess.Popen", lambda *args, **kwargs: FakeProc())
-    monkeypatch.setattr("blue_tap.attack.a2dp.time.sleep", lambda *_: None)
+    monkeypatch.setattr("blue_tap.modules.post_exploitation.media.a2dp._detect_source_rate", lambda source: 44100)
+    monkeypatch.setattr("blue_tap.modules.post_exploitation.media.a2dp.subprocess.Popen", lambda *args, **kwargs: FakeProc())
+    monkeypatch.setattr("blue_tap.modules.post_exploitation.media.a2dp.time.sleep", lambda *_: None)
 
     result = capture_a2dp(None, str(output), duration=1, source="bluez_source.demo")
 
@@ -886,15 +886,15 @@ def test_capture_a2dp_returns_empty_on_header_only_file(monkeypatch, tmp_path):
 def test_play_to_car_returns_false_on_timeout(monkeypatch):
     import subprocess
 
-    monkeypatch.setattr("blue_tap.attack.a2dp.os.path.exists", lambda path: True)
-    monkeypatch.setattr("blue_tap.attack.a2dp.set_profile_a2dp", lambda mac: True)
-    monkeypatch.setattr("blue_tap.attack.a2dp.set_sink_volume", lambda sink, volume_pct=80: True)
-    monkeypatch.setattr("blue_tap.attack.a2dp.time.sleep", lambda *_: None)
+    monkeypatch.setattr("blue_tap.modules.post_exploitation.media.a2dp.os.path.exists", lambda path: True)
+    monkeypatch.setattr("blue_tap.modules.post_exploitation.media.a2dp.set_profile_a2dp", lambda mac: True)
+    monkeypatch.setattr("blue_tap.modules.post_exploitation.media.a2dp.set_sink_volume", lambda sink, volume_pct=80: True)
+    monkeypatch.setattr("blue_tap.modules.post_exploitation.media.a2dp.time.sleep", lambda *_: None)
 
     def _raise_timeout(*args, **kwargs):
         raise subprocess.TimeoutExpired(cmd="paplay", timeout=600)
 
-    monkeypatch.setattr("blue_tap.attack.a2dp.subprocess.run", _raise_timeout)
+    monkeypatch.setattr("blue_tap.modules.post_exploitation.media.a2dp.subprocess.run", _raise_timeout)
 
     assert play_to_car("AA:BB:CC:DD:EE:FF", "tone.wav") is False
 
@@ -920,8 +920,8 @@ def test_hfp_capture_logs_failed_audio_envelope(monkeypatch):
             return None
 
     monkeypatch.setattr("blue_tap.cli.resolve_address", lambda address=None, prompt=None: "AA:BB:CC:DD:EE:FF")
-    monkeypatch.setattr("blue_tap.recon.sdp.find_service_channel", lambda *args, **kwargs: 7)
-    monkeypatch.setattr("blue_tap.attack.hfp.HFPClient", FakeHFPClient)
+    monkeypatch.setattr("blue_tap.modules.reconnaissance.sdp.find_service_channel", lambda *args, **kwargs: 7)
+    monkeypatch.setattr("blue_tap.modules.post_exploitation.media.hfp.HFPClient", FakeHFPClient)
     monkeypatch.setattr(
         "blue_tap.utils.env_doctor.detect_profile_environment",
         lambda: {
@@ -933,7 +933,7 @@ def test_hfp_capture_logs_failed_audio_envelope(monkeypatch):
         },
     )
     monkeypatch.setattr(
-        "blue_tap.utils.session.log_command",
+        "blue_tap.framework.sessions.store.log_command",
         lambda command, data, category="general", target="": recorded.update(
             {"command": command, "data": data, "category": category, "target": target}
         ),
@@ -955,7 +955,7 @@ def test_audio_play_logs_audio_module_failure(monkeypatch):
     recorded = {}
 
     monkeypatch.setattr("blue_tap.cli.resolve_address", lambda address=None, prompt=None: "AA:BB:CC:DD:EE:FF")
-    monkeypatch.setattr("blue_tap.attack.a2dp.play_to_car", lambda mac, audio_file, volume_pct=80: False)
+    monkeypatch.setattr("blue_tap.modules.post_exploitation.media.a2dp.play_to_car", lambda mac, audio_file, volume_pct=80: False)
     monkeypatch.setattr(
         "blue_tap.utils.env_doctor.detect_profile_environment",
         lambda: {
@@ -967,7 +967,7 @@ def test_audio_play_logs_audio_module_failure(monkeypatch):
         },
     )
     monkeypatch.setattr(
-        "blue_tap.utils.session.log_command",
+        "blue_tap.framework.sessions.store.log_command",
         lambda command, data, category="general", target="": recorded.update(
             {"command": command, "data": data, "category": category, "target": target}
         ),
@@ -1016,10 +1016,10 @@ def test_pbap_size_logs_standardized_data_envelope(monkeypatch):
             return None
 
     monkeypatch.setattr("blue_tap.cli.resolve_address", lambda address=None, prompt=None: "AA:BB:CC:DD:EE:FF")
-    monkeypatch.setattr("blue_tap.recon.sdp.find_service_channel", lambda *args, **kwargs: 19)
-    monkeypatch.setattr("blue_tap.attack.pbap.PBAPClient", FakePBAPClient)
+    monkeypatch.setattr("blue_tap.modules.reconnaissance.sdp.find_service_channel", lambda *args, **kwargs: 19)
+    monkeypatch.setattr("blue_tap.modules.post_exploitation.contacts.pbap.PBAPClient", FakePBAPClient)
     monkeypatch.setattr(
-        "blue_tap.utils.session.log_command",
+        "blue_tap.framework.sessions.store.log_command",
         lambda command, data, category="general", target="": recorded.update(
             {"command": command, "data": data, "category": category, "target": target}
         ),
@@ -1068,10 +1068,10 @@ def test_pbap_list_logs_standardized_data_envelope(monkeypatch):
             return None
 
     monkeypatch.setattr("blue_tap.cli.resolve_address", lambda address=None, prompt=None: "AA:BB:CC:DD:EE:FF")
-    monkeypatch.setattr("blue_tap.recon.sdp.find_service_channel", lambda *args, **kwargs: 19)
-    monkeypatch.setattr("blue_tap.attack.pbap.PBAPClient", FakePBAPClient)
+    monkeypatch.setattr("blue_tap.modules.reconnaissance.sdp.find_service_channel", lambda *args, **kwargs: 19)
+    monkeypatch.setattr("blue_tap.modules.post_exploitation.contacts.pbap.PBAPClient", FakePBAPClient)
     monkeypatch.setattr(
-        "blue_tap.utils.session.log_command",
+        "blue_tap.framework.sessions.store.log_command",
         lambda command, data, category="general", target="": recorded.update(
             {"command": command, "data": data, "category": category, "target": target}
         ),
@@ -1120,10 +1120,10 @@ def test_pbap_search_logs_query_and_matches(monkeypatch):
             return None
 
     monkeypatch.setattr("blue_tap.cli.resolve_address", lambda address=None, prompt=None: "AA:BB:CC:DD:EE:FF")
-    monkeypatch.setattr("blue_tap.recon.sdp.find_service_channel", lambda *args, **kwargs: 19)
-    monkeypatch.setattr("blue_tap.attack.pbap.PBAPClient", FakePBAPClient)
+    monkeypatch.setattr("blue_tap.modules.reconnaissance.sdp.find_service_channel", lambda *args, **kwargs: 19)
+    monkeypatch.setattr("blue_tap.modules.post_exploitation.contacts.pbap.PBAPClient", FakePBAPClient)
     monkeypatch.setattr(
-        "blue_tap.utils.session.log_command",
+        "blue_tap.framework.sessions.store.log_command",
         lambda command, data, category="general", target="": recorded.update(
             {"command": command, "data": data, "category": category, "target": target}
         ),
@@ -1183,10 +1183,10 @@ def test_pbap_pull_writes_summary_json_sidecar(monkeypatch, tmp_path):
             return None
 
     monkeypatch.setattr("blue_tap.cli.resolve_address", lambda address=None, prompt=None: "AA:BB:CC:DD:EE:FF")
-    monkeypatch.setattr("blue_tap.recon.sdp.find_service_channel", lambda *args, **kwargs: 19)
-    monkeypatch.setattr("blue_tap.attack.pbap.PBAPClient", FakePBAPClient)
+    monkeypatch.setattr("blue_tap.modules.reconnaissance.sdp.find_service_channel", lambda *args, **kwargs: 19)
+    monkeypatch.setattr("blue_tap.modules.post_exploitation.contacts.pbap.PBAPClient", FakePBAPClient)
     monkeypatch.setattr(
-        "blue_tap.utils.session.log_command",
+        "blue_tap.framework.sessions.store.log_command",
         lambda command, data, category="general", target="": recorded.update(
             {"command": command, "data": data, "category": category, "target": target}
         ),
@@ -1226,10 +1226,10 @@ def test_opp_push_logs_failed_attack_envelope(monkeypatch, tmp_path):
             return None
 
     monkeypatch.setattr("blue_tap.cli.resolve_address", lambda address=None, prompt=None: "AA:BB:CC:DD:EE:FF")
-    monkeypatch.setattr("blue_tap.recon.sdp.find_service_channel", lambda *args, **kwargs: 9)
-    monkeypatch.setattr("blue_tap.attack.opp.OPPClient", FakeOPPClient)
+    monkeypatch.setattr("blue_tap.modules.reconnaissance.sdp.find_service_channel", lambda *args, **kwargs: 9)
+    monkeypatch.setattr("blue_tap.modules.post_exploitation.data.opp.OPPClient", FakeOPPClient)
     monkeypatch.setattr(
-        "blue_tap.utils.session.log_command",
+        "blue_tap.framework.sessions.store.log_command",
         lambda command, data, category="general", target="": recorded.update(
             {"command": command, "data": data, "category": category, "target": target}
         ),
@@ -1261,9 +1261,9 @@ def test_avrcp_play_logs_failed_attack_envelope(monkeypatch):
             return None
 
     monkeypatch.setattr("blue_tap.cli.resolve_address", lambda address=None, prompt=None: "AA:BB:CC:DD:EE:FF")
-    monkeypatch.setattr("blue_tap.attack.avrcp.AVRCPController", FakeAVRCPController)
+    monkeypatch.setattr("blue_tap.modules.post_exploitation.media.avrcp.AVRCPController", FakeAVRCPController)
     monkeypatch.setattr(
-        "blue_tap.utils.session.log_command",
+        "blue_tap.framework.sessions.store.log_command",
         lambda command, data, category="general", target="": recorded.update(
             {"command": command, "data": data, "category": category, "target": target}
         ),
@@ -1295,9 +1295,9 @@ def test_at_connect_logs_standardized_data_envelope(monkeypatch):
             return None
 
     monkeypatch.setattr("blue_tap.cli.resolve_address", lambda address=None, prompt=None: "AA:BB:CC:DD:EE:FF")
-    monkeypatch.setattr("blue_tap.attack.bluesnarfer.ATClient", FakeATClient)
+    monkeypatch.setattr("blue_tap.modules.post_exploitation.data.bluesnarfer.ATClient", FakeATClient)
     monkeypatch.setattr(
-        "blue_tap.utils.session.log_command",
+        "blue_tap.framework.sessions.store.log_command",
         lambda command, data, category="general", target="": recorded.update(
             {"command": command, "data": data, "category": category, "target": target}
         ),
@@ -1340,9 +1340,9 @@ def test_at_dump_logs_failed_data_envelope_when_no_meaningful_data(monkeypatch, 
             return None
 
     monkeypatch.setattr("blue_tap.cli.resolve_address", lambda address=None, prompt=None: "AA:BB:CC:DD:EE:FF")
-    monkeypatch.setattr("blue_tap.attack.bluesnarfer.ATClient", FakeATClient)
+    monkeypatch.setattr("blue_tap.modules.post_exploitation.data.bluesnarfer.ATClient", FakeATClient)
     monkeypatch.setattr(
-        "blue_tap.utils.session.log_command",
+        "blue_tap.framework.sessions.store.log_command",
         lambda command, data, category="general", target="": recorded.update(
             {"command": command, "data": data, "category": category, "target": target}
         ),
@@ -1362,9 +1362,9 @@ def test_at_snarf_logs_failure_capability_limitation(monkeypatch):
     recorded = {}
 
     monkeypatch.setattr("blue_tap.cli.resolve_address", lambda address=None, prompt=None: "AA:BB:CC:DD:EE:FF")
-    monkeypatch.setattr("blue_tap.attack.bluesnarfer.bluesnarfer_extract", lambda *args, **kwargs: "")
+    monkeypatch.setattr("blue_tap.modules.post_exploitation.data.bluesnarfer.bluesnarfer_extract", lambda *args, **kwargs: "")
     monkeypatch.setattr(
-        "blue_tap.utils.session.log_command",
+        "blue_tap.framework.sessions.store.log_command",
         lambda command, data, category="general", target="": recorded.update(
             {"command": command, "data": data, "category": category, "target": target}
         ),

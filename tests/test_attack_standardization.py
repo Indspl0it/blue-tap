@@ -1,13 +1,13 @@
 """Tests for attack module standardized envelope outputs."""
 from __future__ import annotations
 
-from blue_tap.attack.hijack import HijackSession
-from blue_tap.attack.knob import KNOBAttack
-from blue_tap.attack.bias import BIASAttack
-from blue_tap.attack.ssp_downgrade import SSPDowngradeAttack
-from blue_tap.attack.bluffs import BLUFFSAttack
-from blue_tap.attack.encryption_downgrade import EncryptionDowngradeAttack
-from blue_tap.attack.ctkd import CTKDAttack
+from blue_tap.modules.exploitation.hijack import HijackSession
+from blue_tap.modules.exploitation.knob import KNOBAttack
+from blue_tap.modules.exploitation.bias import BIASAttack
+from blue_tap.modules.exploitation.ssp_downgrade import SSPDowngradeAttack
+from blue_tap.modules.exploitation.bluffs import BLUFFSAttack
+from blue_tap.modules.exploitation.encryption_downgrade import EncryptionDowngradeAttack
+from blue_tap.modules.exploitation.ctkd import CTKDAttack
 
 
 # ---------------------------------------------------------------------------
@@ -57,8 +57,8 @@ def _assert_execution_record(rec: dict):
 
 def test_hijack_build_envelope_produces_v2(monkeypatch):
     """HijackSession.build_envelope() returns a valid v2 RunEnvelope."""
-    from blue_tap.core import scanner as _scanner_mod
-    from blue_tap.recon import fingerprint as _fp_mod, sdp as _sdp_mod
+    from blue_tap.hardware import scanner as _scanner_mod
+    from blue_tap.modules.reconnaissance import fingerprint as _fp_mod, sdp as _sdp_mod
 
     session = _stub_hijack_session(monkeypatch)
 
@@ -85,8 +85,8 @@ def test_hijack_build_envelope_produces_v2(monkeypatch):
 
 def test_hijack_envelope_has_cli_events(monkeypatch):
     """Hijack envelope includes collected CLI events in module_data."""
-    from blue_tap.core import scanner as _scanner_mod
-    from blue_tap.recon import fingerprint as _fp_mod, sdp as _sdp_mod
+    from blue_tap.hardware import scanner as _scanner_mod
+    from blue_tap.modules.reconnaissance import fingerprint as _fp_mod, sdp as _sdp_mod
 
     session = _stub_hijack_session(monkeypatch)
     monkeypatch.setattr(_scanner_mod, "resolve_name", lambda addr, hci="hci0": "Phone")
@@ -106,14 +106,14 @@ def test_hijack_envelope_has_cli_events(monkeypatch):
 
 def test_hijack_failed_phase_records_error(monkeypatch):
     """A failed recon produces an execution record with error status."""
-    from blue_tap.core import scanner as _scanner_mod
-    from blue_tap.recon import fingerprint as _fp_mod
+    from blue_tap.hardware import scanner as _scanner_mod
+    from blue_tap.modules.reconnaissance import fingerprint as _fp_mod
 
     session = _stub_hijack_session(monkeypatch)
     monkeypatch.setattr(_scanner_mod, "resolve_name", lambda addr, hci="hci0": "Phone")
     monkeypatch.setattr(_fp_mod, "fingerprint_device", lambda addr, hci="hci0": None)
 
-    from blue_tap.recon import sdp as _sdp_mod
+    from blue_tap.modules.reconnaissance import sdp as _sdp_mod
     monkeypatch.setattr(_sdp_mod, "browse_services", lambda addr: [])
     monkeypatch.setattr(_sdp_mod, "find_service_channel", lambda addr, name, services=None: None)
 
@@ -282,7 +282,7 @@ def test_ssp_downgrade_probe_produces_execution_record(monkeypatch):
     attack = SSPDowngradeAttack("AA:BB:CC:DD:EE:FF", hci="hci0")
 
     # Stub hcitool and btmgmt
-    from blue_tap.attack import ssp_downgrade as _mod
+    from blue_tap.modules.exploitation import ssp_downgrade as _mod
     from unittest.mock import MagicMock
     mock_result = MagicMock()
     mock_result.returncode = 1
@@ -393,7 +393,7 @@ def test_ctkd_probe_no_darkfirmware(monkeypatch):
     mock_fw = MagicMock()
     mock_fw.is_darkfirmware_loaded.return_value = False
     monkeypatch.setattr(
-        "blue_tap.core.firmware.DarkFirmwareManager", lambda: mock_fw
+        "blue_tap.hardware.firmware.DarkFirmwareManager", lambda: mock_fw
     )
 
     attack = CTKDAttack("AA:BB:CC:DD:EE:FF", hci="hci1")

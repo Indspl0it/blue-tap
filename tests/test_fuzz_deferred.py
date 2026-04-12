@@ -22,17 +22,17 @@ from __future__ import annotations
 import click
 from click.testing import CliRunner
 
-from blue_tap.core.fuzz_framework import (
+from blue_tap.framework.envelopes.fuzz import (
     FUZZ_MODULE_OUTCOMES,
     build_fuzz_campaign_result,
     build_fuzz_operation_result,
     build_fuzz_protocol_execution,
     make_fuzz_run_id,
 )
-from blue_tap.core.result_schema import validate_run_envelope
-from blue_tap.fuzz import cli_extra
-from blue_tap.fuzz.engine import FuzzCampaign
-from blue_tap.report.adapters.fuzz import FuzzReportAdapter
+from blue_tap.framework.contracts.result_schema import validate_run_envelope
+from blue_tap.modules.fuzzing import cli_extra
+from blue_tap.modules.fuzzing.engine import FuzzCampaign
+from blue_tap.framework.reporting.adapters.fuzz import FuzzReportAdapter
 
 
 # ---------------------------------------------------------------------------
@@ -89,7 +89,7 @@ def test_run_single_protocol_emits_run_started_and_completed(tmp_path, monkeypat
         emitted.append(event_type)
         return {"event_type": event_type, "run_id": run_id}
 
-    monkeypatch.setattr("blue_tap.fuzz.engine.emit_cli_event", fake_emit)
+    monkeypatch.setattr("blue_tap.modules.fuzzing.engine.emit_cli_event", fake_emit)
 
     class FakeTransport:
         connected = False
@@ -127,7 +127,7 @@ def test_run_single_protocol_emits_execution_result_on_crash(tmp_path, monkeypat
         emitted.append(event_type)
         return {"event_type": event_type, "run_id": run_id}
 
-    monkeypatch.setattr("blue_tap.fuzz.engine.emit_cli_event", fake_emit)
+    monkeypatch.setattr("blue_tap.modules.fuzzing.engine.emit_cli_event", fake_emit)
 
     call_count = [0]
 
@@ -251,7 +251,7 @@ def test_obex_uses_run_via_engine(monkeypatch):
         )[1],
     )
     monkeypatch.setattr(
-        "blue_tap.fuzz.protocols.obex.generate_all_obex_fuzz_cases",
+        "blue_tap.modules.fuzzing.protocols.obex.generate_all_obex_fuzz_cases",
         lambda profile: [[b"obex-fuzz-case"]],
     )
 
