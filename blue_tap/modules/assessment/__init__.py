@@ -23,7 +23,7 @@ _register_once(
         requires_pairing=False,
         schema_prefix="blue_tap.vulnscan.result",
         has_report_adapter=True,
-        entry_point="blue_tap.modules.assessment.vuln_scanner:run_vulnerability_scan",
+        entry_point="blue_tap.modules.assessment.vuln_scanner:VulnScannerModule",
     )
 )
 
@@ -39,8 +39,26 @@ _register_once(
         requires_pairing=False,
         schema_prefix="blue_tap.fleet.result",
         has_report_adapter=False,
-        entry_point="blue_tap.modules.assessment.fleet:FleetAssessment",
+        entry_point="blue_tap.modules.assessment.fleet:FleetModule",
     )
 )
 
-from blue_tap.modules.assessment import checks as _checks  # noqa: F401
+# Import checks files to trigger auto-registration of native Module subclasses
+from blue_tap.modules.assessment.checks import (  # noqa: F401
+    cve_sdp,
+    cve_l2cap,
+    cve_bnep,
+    cve_avrcp,
+    cve_gatt,
+    cve_airoha,
+    cve_ble_smp,
+    cve_pairing,
+    cve_hid,
+    cve_raw_acl,
+    non_cve_ble,
+    non_cve_rfcomm,
+    non_cve_posture,
+)
+
+# Import vulnscan meta-module for auto-registration
+from blue_tap.modules.assessment import vulnscan_module as _vulnscan_module  # noqa: F401

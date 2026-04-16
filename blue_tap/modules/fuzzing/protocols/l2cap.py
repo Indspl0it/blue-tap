@@ -581,7 +581,7 @@ class ScapyL2CAPTransport:
 
     Args:
         target: BD_ADDR of the target device.
-        hci: HCI interface to use (default: ``"hci0"``).
+        hci: HCI interface to use (default: ``<hciX>``).
         handle: ACL connection handle to use in HCI ACL headers.
             Default is ``0x0040`` (typical first handle assigned by
             the controller).
@@ -589,7 +589,12 @@ class ScapyL2CAPTransport:
 
     AVAILABLE = False  # Set to True if scapy imports succeed
 
-    def __init__(self, target: str, hci: str = "hci0", handle: int = 0x0040) -> None:
+    def __init__(self, target: str, hci: str | None = None, handle: int = 0x0040) -> None:
+        if hci is None:
+
+            from blue_tap.hardware.adapter import resolve_active_hci
+
+            hci = resolve_active_hci()
         self.target = target
         self.hci = hci
         self._sock = None

@@ -369,3 +369,71 @@ def _check_reflected_public_key(address: str) -> list[dict]:
             sock.close()
         except OSError:
             pass
+
+
+# ---------------------------------------------------------------------------
+# Native Module classes
+# ---------------------------------------------------------------------------
+
+from typing import Any
+
+from blue_tap.framework.module import Module, RunContext
+from blue_tap.framework.module.options import OptAddress, OptString
+from blue_tap.modules.assessment.base import CveCheckModule
+
+
+class Cve20192225Module(CveCheckModule):
+    """CVE-2019-2225: JustWorks silent pairing vulnerability."""
+
+    module_id = "assessment.cve_2019_2225"
+    name = "JustWorks Silent Pair"
+    description = "CVE-2019-2225: JustWorks bonding completes without user confirmation"
+    protocols = ("Classic", "SMP")
+    requires = ("classic_target", "adapter")
+    destructive = False
+    requires_pairing = True
+    references = ("CVE-2019-2225",)
+    options = (
+        OptAddress("RHOST", required=True, description="Target BR/EDR address"),
+        OptString("HCI", default="", description="Local HCI adapter"),
+    )
+
+    check_fn = staticmethod(_check_justworks_silent_pair)
+    option_param_map = {"RHOST": "address", "HCI": "hci"}
+
+
+class Cve202225837Module(CveCheckModule):
+    """CVE-2022-25837: BR/EDR pairing method confusion."""
+
+    module_id = "assessment.cve_2022_25837"
+    name = "BR/EDR Method Confusion"
+    description = "CVE-2022-25837: BR/EDR pairing downgraded to weaker method"
+    protocols = ("Classic", "SMP")
+    requires = ("classic_target", "adapter")
+    destructive = False
+    requires_pairing = True
+    references = ("CVE-2022-25837",)
+    options = (
+        OptAddress("RHOST", required=True, description="Target BR/EDR address"),
+        OptString("HCI", default="", description="Local HCI adapter"),
+    )
+
+    check_fn = staticmethod(_check_bredr_method_confusion)
+    option_param_map = {"RHOST": "address", "HCI": "hci"}
+
+
+class Cve202026558Module(CveCheckModule):
+    """CVE-2020-26558: Reflected public key (Passkey Entry impersonation)."""
+
+    module_id = "assessment.cve_2020_26558"
+    name = "Reflected Public Key"
+    description = "CVE-2020-26558: Reflected LE SC public key, Passkey impersonation"
+    protocols = ("BLE", "SMP")
+    requires = ("ble_target",)
+    destructive = False
+    requires_pairing = True
+    references = ("CVE-2020-26558",)
+    options = (OptAddress("RHOST", required=True, description="Target BLE address"),)
+
+    check_fn = staticmethod(_check_reflected_public_key)
+    option_param_map = {"RHOST": "address"}

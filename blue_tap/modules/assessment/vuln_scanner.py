@@ -53,8 +53,13 @@ ENCRYPTION_TIMEOUT = 4.0   # Encryption enforcement checks
 AT_PROBE_TIMEOUT = 2.0     # Automotive AT command probes
 
 
-def _run_hcitool_info(address: str, hci: str = "hci0"):
+def _run_hcitool_info(address: str, hci: str | None = None):
     """Run hcitool info with retry on transient failure."""
+    if hci is None:
+
+        from blue_tap.hardware.adapter import resolve_active_hci
+
+        hci = resolve_active_hci()
     result = run_cmd(["hcitool", "-i", hci, "info", address], timeout=HCITOOL_TIMEOUT)
     if result.returncode != 0:
         # Retry once on transient failures
@@ -127,11 +132,25 @@ def _check_service_exposure(address: str, services: list[dict]) -> list[dict]:
     return check_service_exposure(address, services, RFCOMM_PROBE_TIMEOUT)
 
 
-def _check_darkfirmware_available(hci: str = "hci0") -> bool:
-    """Check if DarkFirmware is available for enhanced vulnerability probing."""
+def _check_darkfirmware_available(_scan_hci: str | None = None) -> bool:
+    """Check if DarkFirmware is available for enhanced vulnerability probing.
+
+    Identifies the RTL8761B dongle by USB VID:PID (never by position) and probes
+    that adapter for DarkFirmware — the scan adapter is irrelevant here.
+
+    The startup flow caches the dongle HCI in ``BT_TAP_DARKFIRMWARE_HCI`` so
+    most calls are a single env-var lookup + one HCI probe. If the env var is
+    absent (e.g. unit tests, non-standard startup) ``find_rtl8761b_hci()`` is
+    called to discover the adapter dynamically.
+    """
     try:
+        import os as _os
         from blue_tap.hardware.firmware import DarkFirmwareManager
-        return DarkFirmwareManager().is_darkfirmware_loaded(hci)
+        mgr = DarkFirmwareManager()
+        df_hci = _os.environ.get("BT_TAP_DARKFIRMWARE_HCI") or mgr.find_rtl8761b_hci()
+        if df_hci is None:
+            return False
+        return mgr.is_darkfirmware_loaded(df_hci)
     except Exception:
         return False
 
@@ -784,7 +803,7 @@ def _probe_lmp_features(address: str, hci: str) -> dict | None:
     Args:
         address: Target Bluetooth address (unused for LMP — operates on
             the active ACL link).
-        hci: HCI adapter identifier (e.g. ``"hci0"``).
+        hci: HCI adapter identifier (e.g. ``<hciX>``).
 
     Returns:
         Dict with ``"raw"`` (bytes) plus boolean flags for each known
@@ -910,18 +929,23 @@ def _probe_lmp_version(address: str, hci: str) -> dict | None:
         return None
 
 
-def run_vulnerability_scan(address: str, hci: str = "hci0", active: bool = False,
+def run_vulnerability_scan(address: str, hci: str | None = None, active: bool = False,
                            phone_address: str | None = None) -> dict:
     """Run vulnerability and attack-surface checks against a target.
 
     Output is evidence-based and intentionally avoids definitive CVE claims
     without active exploit verification.
     """
+    if hci is None:
+
+        from blue_tap.hardware.adapter import resolve_active_hci
+
+        hci = resolve_active_hci()
     started_at = datetime.now(timezone.utc).isoformat()
     run_id = make_run_id("vulnscan")
     emit_cli_event(
         event_type="run_started",
-        module="vulnscan",
+        module="assessment.vuln_scanner",
         run_id=run_id,
         target=address,
         adapter=hci,
@@ -948,7 +972,7 @@ def run_vulnerability_scan(address: str, hci: str = "hci0", active: bool = False
         )
         emit_cli_event(
             event_type="run_error",
-            module="vulnscan",
+            module="assessment.vuln_scanner",
             run_id=run_id,
             target=address,
             adapter=hci,
@@ -1036,7 +1060,7 @@ def run_vulnerability_scan(address: str, hci: str = "hci0", active: bool = False
         verbose(f"[NON-CVE] {spec.check_id} — {spec.title}")
         emit_cli_event(
             event_type="execution_started",
-            module="vulnscan",
+            module="assessment.vuln_scanner",
             run_id=run_id,
             execution_id=spec.check_id,
             target=address,
@@ -1060,7 +1084,7 @@ def run_vulnerability_scan(address: str, hci: str = "hci0", active: bool = False
             })
             emit_cli_event(
                 event_type="run_error",
-                module="vulnscan",
+                module="assessment.vuln_scanner",
                 run_id=run_id,
                 execution_id=spec.check_id,
                 target=address,
@@ -1088,7 +1112,7 @@ def run_vulnerability_scan(address: str, hci: str = "hci0", active: bool = False
         primary_status = non_cve_check_log[-1]["primary_status"]
         emit_cli_event(
             event_type="execution_result" if primary_status != "not_applicable" else "execution_skipped",
-            module="vulnscan",
+            module="assessment.vuln_scanner",
             run_id=run_id,
             execution_id=spec.check_id,
             target=address,
@@ -1130,7 +1154,7 @@ def run_vulnerability_scan(address: str, hci: str = "hci0", active: bool = False
     })
     emit_cli_event(
         event_type="execution_result",
-        module="vulnscan",
+        module="assessment.vuln_scanner",
         run_id=run_id,
         execution_id="local_analysis",
         target=address,
@@ -1185,7 +1209,7 @@ def run_vulnerability_scan(address: str, hci: str = "hci0", active: bool = False
         })
         emit_cli_event(
             event_type="execution_result",
-            module="vulnscan",
+            module="assessment.vuln_scanner",
             run_id=run_id,
             execution_id="bias_active",
             target=address,
@@ -1243,7 +1267,7 @@ def run_vulnerability_scan(address: str, hci: str = "hci0", active: bool = False
         })
         emit_cli_event(
             event_type="execution_result",
-            module="vulnscan",
+            module="assessment.vuln_scanner",
             run_id=run_id,
             execution_id="darkfirmware_knob_probe",
             target=address,
@@ -1263,7 +1287,7 @@ def run_vulnerability_scan(address: str, hci: str = "hci0", active: bool = False
     })
     emit_cli_event(
         event_type="execution_result",
-        module="vulnscan",
+        module="assessment.vuln_scanner",
         run_id=run_id,
         execution_id="perfektblue",
         target=address,
@@ -1329,7 +1353,7 @@ def run_vulnerability_scan(address: str, hci: str = "hci0", active: bool = False
         verbose(f"[CVE] {spec.cve} — {spec.title}")
         emit_cli_event(
             event_type="execution_started",
-            module="vulnscan",
+            module="assessment.vuln_scanner",
             run_id=run_id,
             execution_id=spec.cve,
             target=address,
@@ -1353,7 +1377,7 @@ def run_vulnerability_scan(address: str, hci: str = "hci0", active: bool = False
             })
             emit_cli_event(
                 event_type="run_error",
-                module="vulnscan",
+                module="assessment.vuln_scanner",
                 run_id=run_id,
                 execution_id=spec.cve,
                 target=address,
@@ -1388,7 +1412,7 @@ def run_vulnerability_scan(address: str, hci: str = "hci0", active: bool = False
                 else "execution_skipped" if primary_status == "not_applicable"
                 else "execution_result"
             ),
-            module="vulnscan",
+            module="assessment.vuln_scanner",
             run_id=run_id,
             execution_id=spec.cve,
             target=address,
@@ -1407,7 +1431,7 @@ def run_vulnerability_scan(address: str, hci: str = "hci0", active: bool = False
             "Check 10: HID CVE Probes (CVE-2020-0556, CVE-2023-45866)",
             (
                 CveCheck("CVE-2020-0556/CVE-2023-45866", "HID Unbonded L2CAP Connection", _check_hid_unbonded_connection, (address, services)),
-                CveCheck("CVE-2020-0556/CVE-2023-45866", "HOGP Unbonded Report Write", _check_hogp_unbonded_write, (address,)),
+                CveCheck("CVE-2023-45866", "HOGP Unbonded Report Write", _check_hogp_unbonded_write, (address,)),
             ),
         ),
         CveSection(
@@ -1498,7 +1522,7 @@ def run_vulnerability_scan(address: str, hci: str = "hci0", active: bool = False
     )
     emit_cli_event(
         event_type="run_completed",
-        module="vulnscan",
+        module="assessment.vuln_scanner",
         run_id=run_id,
         target=address,
         adapter=hci,
@@ -1510,9 +1534,14 @@ def run_vulnerability_scan(address: str, hci: str = "hci0", active: bool = False
     return result
 
 
-def scan_vulnerabilities(address: str, hci: str = "hci0", active: bool = False,
+def scan_vulnerabilities(address: str, hci: str | None = None, active: bool = False,
                          phone_address: str | None = None) -> list[dict]:
     """Compatibility wrapper returning only the vulnerability findings list."""
+    if hci is None:
+
+        from blue_tap.hardware.adapter import resolve_active_hci
+
+        hci = resolve_active_hci()
     return run_vulnerability_scan(address, hci=hci, active=active, phone_address=phone_address).get("module_data", {}).get("findings", [])
 
 
@@ -1526,7 +1555,7 @@ def _print_findings(address: str, findings: list[dict]):
     # Exclude not_applicable (skipped) from the display table — they're counted in the summary
     displayable = [f for f in findings if f.get("status") != "not_applicable"]
     if displayable:
-        console.print(vuln_table(displayable))
+        vuln_table(displayable)
 
     summary = summarize_findings(findings)
 
@@ -1545,3 +1574,85 @@ def _print_findings(address: str, findings: list[dict]):
         },
         style="red" if summary["high_or_critical"] > 0 else "yellow" if summary["potential"] > 0 else "green",
     )
+
+
+# ── Native Module wrapper ─────────────────────────────────────────────────────
+
+from blue_tap.framework.module import Module, RunContext
+from blue_tap.framework.module.options import OptAddress, OptBool, OptString
+from blue_tap.framework.registry import ModuleFamily
+
+
+class VulnScannerModule(Module):
+    """Vulnerability Scanner.
+
+    Runs CVE and posture checks against a Bluetooth target and produces a
+    structured assessment report. Combines SDP enumeration, GATT fingerprinting,
+    and protocol-level probes to assess the attack surface.
+    """
+
+    module_id = "assessment.vuln_scanner"
+    family = ModuleFamily.ASSESSMENT
+    name = "Vulnerability Scanner"
+    description = "Run CVE and attack-surface checks against a Bluetooth target"
+    protocols = ("Classic", "BLE")
+    requires = ("adapter", "classic_target")
+    destructive = False
+    requires_pairing = False
+    schema_prefix = "blue_tap.vulnscan.result"
+    has_report_adapter = True
+    references = ()
+    options = (
+        OptAddress("RHOST", required=True, description="Target Bluetooth address"),
+        OptString("HCI", default="", description="Local HCI adapter"),
+        OptBool("ACTIVE", default=False,
+                description="Enable active probing (connects to target)"),
+        OptString("PHONE", default="",
+                  description="Phone/attacker address for pair-based checks"),
+    )
+
+    def run(self, ctx: RunContext) -> dict:
+        """Execute the vulnerability scan and return a RunEnvelope."""
+        address = ctx.options.get("RHOST", "")
+        hci = ctx.options.get("HCI", "")
+        active = bool(ctx.options.get("ACTIVE", False))
+        phone = ctx.options.get("PHONE", "") or None
+
+        try:
+            return run_vulnerability_scan(
+                address=address,
+                hci=hci,
+                active=active,
+                phone_address=phone,
+            )
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).exception(
+                "Vulnerability scan failed (target=%s, hci=%s)", address, hci
+            )
+            from blue_tap.framework.contracts.result_schema import (
+                build_run_envelope, make_execution, make_evidence,
+            )
+            return build_run_envelope(
+                schema=self.schema_prefix,
+                module="assessment.vuln_scanner",
+                target=address,
+                adapter=hci,
+                started_at=ctx.started_at,
+                executions=[
+                    make_execution(
+                        execution_id="vuln_scan",
+                        kind="check",
+                        id="vuln_scan",
+                        title="Vulnerability Scan",
+                        execution_status="error",
+                        module_outcome="not_applicable",
+                        evidence=make_evidence(summary=str(exc)),
+                        destructive=False,
+                        requires_pairing=False,
+                    )
+                ],
+                summary={"outcome": "not_applicable", "error": str(exc)},
+                module_data={},
+                run_id=ctx.run_id,
+            )

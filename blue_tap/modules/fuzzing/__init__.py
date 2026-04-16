@@ -1,6 +1,10 @@
-"""Protocol-aware Bluetooth fuzzing package."""
+"""Protocol-aware Bluetooth fuzzing package.
 
-from blue_tap.framework.registry import ModuleDescriptor, ModuleFamily, get_registry
+NOTE: Legacy ModuleDescriptor registrations have been removed. All fuzzing
+modules are now registered via Module subclass auto-registration when the
+modules package is imported.
+"""
+
 from blue_tap.modules.fuzzing.transport import (
     BLETransport,
     BluetoothTransport,
@@ -33,55 +37,11 @@ from blue_tap.modules.fuzzing.minimizer import (
     MinimizationResult,
 )
 
-_registry = get_registry()
-
-
-def _register_once(descriptor: ModuleDescriptor) -> None:
-    try:
-        _registry.get(descriptor.module_id)
-    except KeyError:
-        _registry.register(descriptor)
-
-
-_register_once(ModuleDescriptor(
-    module_id="fuzzing.engine",
-    family=ModuleFamily.FUZZING,
-    name="Fuzz Campaign",
-    description="Run multi-protocol Bluetooth fuzzing campaigns with crash tracking",
-    protocols=("Classic", "BLE", "L2CAP", "RFCOMM", "SDP", "OBEX", "ATT", "SMP", "BNEP", "LMP"),
-    requires=("adapter", "target"),
-    destructive=True,
-    requires_pairing=False,
-    schema_prefix="blue_tap.fuzz.result",
-    has_report_adapter=True,
-    entry_point="blue_tap.modules.fuzzing.engine:FuzzCampaign",
-))
-_register_once(ModuleDescriptor(
-    module_id="fuzzing.transport",
-    family=ModuleFamily.FUZZING,
-    name="Fuzz Transport",
-    description="Bluetooth transport abstractions for L2CAP, RFCOMM, BLE, and raw ACL fuzzing",
-    protocols=("Classic", "BLE", "L2CAP", "RFCOMM", "ATT", "SMP", "LMP"),
-    requires=("adapter", "target"),
-    destructive=True,
-    requires_pairing=False,
-    schema_prefix="blue_tap.fuzz.result",
-    has_report_adapter=False,
-    entry_point="blue_tap.modules.fuzzing.transport:BluetoothTransport",
-))
-_register_once(ModuleDescriptor(
-    module_id="fuzzing.minimizer",
-    family=ModuleFamily.FUZZING,
-    name="Crash Minimizer",
-    description="Minimize fuzzing crash inputs and replay them deterministically",
-    protocols=("Classic", "BLE", "L2CAP", "RFCOMM", "OBEX", "SDP", "ATT", "SMP", "BNEP", "LMP"),
-    requires=("target",),
-    destructive=True,
-    requires_pairing=False,
-    schema_prefix="blue_tap.fuzz.result",
-    has_report_adapter=False,
-    entry_point="blue_tap.modules.fuzzing.minimizer:CrashMinimizer",
-))
+# Import native Module files to trigger auto-registration via __init_subclass__
+# Former wrapper layer (modules/fuzzing/modules/) was collapsed on 2026-04-12
+from blue_tap.modules.fuzzing import campaign as _campaign  # noqa: F401
+from blue_tap.modules.fuzzing import minimizer as _minimizer_mod  # noqa: F401
+from blue_tap.modules.fuzzing import transport as _transport_mod  # noqa: F401
 
 __all__ = [
     "BluetoothTransport",

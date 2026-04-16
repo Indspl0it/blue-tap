@@ -543,7 +543,6 @@ def _check_ecred_6cid_overflow(address: str) -> list[dict]:
         )]
     finally:
         sock2.close()
-    return []
 
 
 # ---------------------------------------------------------------------------
@@ -642,7 +641,6 @@ def _check_ecred_duplicate_id(address: str) -> list[dict]:
         )]
     finally:
         sock.close()
-    return []
 
 
 # ---------------------------------------------------------------------------
@@ -716,3 +714,126 @@ def _check_l2cap_efs_info_leak(address: str) -> list[dict]:
             status="confirmed", confidence="high",
             evidence=f"EFS option data across probes: {[s.hex() for s in efs_samples[:2]]}")]
     return []
+
+
+# ---------------------------------------------------------------------------
+# Native Module classes
+# ---------------------------------------------------------------------------
+
+from typing import Any
+
+from blue_tap.framework.module import Module, RunContext
+from blue_tap.framework.module.options import OptAddress
+from blue_tap.modules.assessment.base import CveCheckModule
+
+
+class Cve20193459Module(CveCheckModule):
+    """CVE-2019-3459: Linux L2CAP CONF_REQ MTU pointer leak."""
+
+    module_id = "assessment.cve_2019_3459"
+    name = "L2CAP CONF MTU Info Leak"
+    description = "CVE-2019-3459: L2CAP CONF_REQ MTU len=0 leaks kernel heap pointer bits"
+    protocols = ("Classic", "L2CAP")
+    requires = ("classic_target",)
+    destructive = False
+    references = ("CVE-2019-3459",)
+    options = (OptAddress("RHOST", required=True, description="Target BR/EDR address"),)
+
+    check_fn = staticmethod(_check_l2cap_conf_mtu_info_leak)
+    option_param_map = {"RHOST": "address"}
+
+
+class Cve20189359Module(CveCheckModule):
+    """CVE-2018-9359: Android L2CAP heap memory disclosure."""
+
+    module_id = "assessment.cve_2018_9359"
+    name = "Android L2CAP Heap Jitter"
+    description = "CVE-2018-9359/9360/9361: L2CAP CMD_CONN_REQ heap disclosure on Android"
+    protocols = ("Classic", "L2CAP")
+    requires = ("classic_target",)
+    destructive = False
+    references = ("CVE-2018-9359", "CVE-2018-9360", "CVE-2018-9361")
+    options = (OptAddress("RHOST", required=True, description="Target BR/EDR address"),)
+
+    check_fn = staticmethod(_check_android_l2cap_heap_jitter)
+    option_param_map = {"RHOST": "address"}
+
+
+class Cve202012352Module(CveCheckModule):
+    """CVE-2020-12352: BlueZ A2MP heap information disclosure (BadChoice)."""
+
+    module_id = "assessment.cve_2020_12352"
+    name = "BlueZ A2MP Heap Jitter"
+    description = "CVE-2020-12352 BadChoice: BlueZ A2MP heap info leak (invalid ctrl_id)"
+    protocols = ("Classic", "L2CAP", "A2MP")
+    requires = ("classic_target",)
+    destructive = False
+    references = ("CVE-2020-12352",)
+    options = (OptAddress("RHOST", required=True, description="Target BR/EDR address"),)
+
+    check_fn = staticmethod(_check_a2mp_heap_jitter)
+    option_param_map = {"RHOST": "address"}
+
+
+class Cve202242896Module(CveCheckModule):
+    """CVE-2022-42896: Linux LE credit-based connect PSM=0 UAF."""
+
+    module_id = "assessment.cve_2022_42896"
+    name = "LE Credit PSM Zero UAF"
+    description = "CVE-2022-42896: Linux LE credit-based connect PSM=0 use-after-free"
+    protocols = ("BLE", "L2CAP")
+    requires = ("ble_target",)
+    destructive = False
+    references = ("CVE-2022-42896",)
+    options = (OptAddress("RHOST", required=True, description="Target BLE address"),)
+
+    check_fn = staticmethod(_check_l2cap_psm_zero_uaf)
+    option_param_map = {"RHOST": "address"}
+
+
+class Cve202220345Module(CveCheckModule):
+    """CVE-2022-20345: Android BLE L2CAP eCred 6-CID overflow."""
+
+    module_id = "assessment.cve_2022_20345"
+    name = "eCred 6-CID Overflow"
+    description = "CVE-2022-20345: Android BLE L2CAP eCred overflow via 6-CID CONN_REQ"
+    protocols = ("BLE", "L2CAP")
+    requires = ("ble_target",)
+    destructive = False
+    references = ("CVE-2022-20345",)
+    options = (OptAddress("RHOST", required=True, description="Target BLE address"),)
+
+    check_fn = staticmethod(_check_ecred_6cid_overflow)
+    option_param_map = {"RHOST": "address"}
+
+
+class Cve202623395Module(CveCheckModule):
+    """CVE-2026-23395: L2CAP eCred duplicate identifier overflow."""
+
+    module_id = "assessment.cve_2026_23395"
+    name = "eCred Duplicate Identifier"
+    description = "CVE-2026-23395: L2CAP eCred duplicate Identifier overflow"
+    protocols = ("BLE", "L2CAP")
+    requires = ("ble_target",)
+    destructive = False
+    references = ("CVE-2026-23395",)
+    options = (OptAddress("RHOST", required=True, description="Target BLE address"),)
+
+    check_fn = staticmethod(_check_ecred_duplicate_id)
+    option_param_map = {"RHOST": "address"}
+
+
+class Cve202242895Module(CveCheckModule):
+    """CVE-2022-42895: L2CAP EFS option kernel pointer leak."""
+
+    module_id = "assessment.cve_2022_42895"
+    name = "L2CAP EFS Info Leak"
+    description = "CVE-2022-42895: L2CAP EFS option leaks kernel pointer in CONF_RSP"
+    protocols = ("Classic", "L2CAP")
+    requires = ("classic_target",)
+    destructive = False
+    references = ("CVE-2022-42895",)
+    options = (OptAddress("RHOST", required=True, description="Target BR/EDR address"),)
+
+    check_fn = staticmethod(_check_l2cap_efs_info_leak)
+    option_param_map = {"RHOST": "address"}

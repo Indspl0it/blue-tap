@@ -117,7 +117,12 @@ class DeviceClassifier:
 class FleetAssessment:
     """Scan, classify, assess, and report on all nearby Bluetooth devices."""
 
-    def __init__(self, hci: str = "hci0", scan_duration: int = 15):
+    def __init__(self, hci: str | None = None, scan_duration: int = 15):
+        if hci is None:
+
+            from blue_tap.hardware.adapter import resolve_active_hci
+
+            hci = resolve_active_hci()
         self.hci = hci
         self.scan_duration = scan_duration
         self._classifier = DeviceClassifier()
@@ -339,3 +344,114 @@ class FleetAssessment:
             if level in ratings:
                 return level
         return "UNKNOWN"
+
+
+# ============================================================================
+# Module wrapper — adapts FleetAssessment to the standard Module interface
+# ============================================================================
+
+class FleetModule:
+    """Module entry point for assessment.fleet.
+
+    Wraps FleetAssessment in the standard run(ctx)/check(ctx) interface.
+    Registered as assessment.fleet in the module registry.
+    """
+
+    # Satisfy Invoker.resolve() without auto-registering via Module.__init_subclass__
+    _is_blue_tap_module = True
+
+    from blue_tap.framework.module.options import OptString, OptInt
+    options = (
+        OptString("HCI", default="", required=False, description="Local HCI adapter"),
+        OptInt("DURATION", default=15, required=False, description="Scan duration in seconds"),
+        OptString("CLASS", default="ivi", required=False,
+                  description="Device class to assess (ivi, phone, headset, etc.)"),
+    )
+
+    def run(self, ctx) -> dict:
+        from blue_tap.framework.contracts.result_schema import (
+            build_run_envelope, make_evidence, make_execution, make_run_id, now_iso,
+        )
+        from blue_tap.hardware.adapter import resolve_active_hci
+        hci = ctx.options.get("HCI") or resolve_active_hci()
+        duration = ctx.options.get("DURATION", 15) or 15
+        device_class = ctx.options.get("CLASS", "ivi") or "ivi"
+
+        started = now_iso()
+        run_id = make_run_id("assessment.fleet")
+
+        fleet = FleetAssessment(hci=hci, scan_duration=int(duration))
+        fleet.scan()
+        fleet.assess(device_class=device_class)
+        report = fleet.report()
+
+        total = report.get("total_devices", 0)
+        assessed = report.get("assessed", 0)
+        overall = report.get("overall_risk", "UNKNOWN")
+
+        # Fleet is an assessment family module — allowed outcomes are
+        # confirmed / inconclusive / pairing_required / not_applicable.
+        if total == 0:
+            outcome = "not_applicable"
+        elif assessed == 0:
+            outcome = "inconclusive"
+        elif overall in ("CRITICAL", "HIGH", "MEDIUM", "LOW"):
+            outcome = "confirmed"
+        else:
+            outcome = "inconclusive"
+
+        completed = now_iso()
+        execution = make_execution(
+            execution_id="fleet_scan",
+            kind="phase",
+            id="fleet_scan",
+            title=f"Fleet assessment ({device_class})",
+            module="assessment.fleet",
+            module_id="assessment.fleet",
+            protocol="Discovery",
+            execution_status="completed",
+            module_outcome=outcome,
+            evidence=make_evidence(
+                summary=(
+                    f"Scanned {total} device(s), assessed {assessed} as "
+                    f"{device_class}. Overall risk: {overall}"
+                ),
+                confidence="high" if assessed > 0 else "medium",
+                observations=[
+                    f"total_devices={total}",
+                    f"assessed={assessed}",
+                    f"device_class={device_class}",
+                    f"overall_risk={overall}",
+                ],
+                module_evidence={
+                    "classifications": report.get("classifications", {}),
+                },
+            ),
+            started_at=started,
+            completed_at=completed,
+            destructive=False,
+            requires_pairing=False,
+            tags=["fleet", device_class],
+        )
+
+        return build_run_envelope(
+            schema="blue_tap.fleet.result",
+            module="assessment.fleet",
+            target="nearby",
+            adapter=hci,
+            operator_context={"device_class": device_class, "duration": duration},
+            summary={
+                "total_devices": total,
+                "assessed": assessed,
+                "overall_risk": overall,
+                "outcome": outcome,
+            },
+            executions=[execution],
+            module_data=report,
+            started_at=started,
+            completed_at=completed,
+            run_id=run_id,
+        )
+
+    def cleanup(self, ctx) -> None:  # noqa: D102
+        pass

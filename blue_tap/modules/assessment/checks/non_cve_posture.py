@@ -232,3 +232,114 @@ def check_lmp_features(address: str, hci: str, hcitool_info_result) -> list[dict
         )
 
     return findings
+
+
+# ---------------------------------------------------------------------------
+# Native Module classes
+# ---------------------------------------------------------------------------
+
+from typing import Any
+
+from blue_tap.framework.module import Module, RunContext
+from blue_tap.framework.module.options import OptAddress, OptBool, OptString
+from blue_tap.modules.assessment.base import CveCheckModule, ServiceDiscoveryMixin
+from blue_tap.utils.bt_helpers import run_cmd
+
+
+class PinLockoutModule(CveCheckModule):
+    """Legacy PIN pairing lockout assessment."""
+
+    module_id = "assessment.pin_lockout"
+    name = "Legacy PIN Lockout Posture"
+    description = "Test legacy PIN pairing lockout; no backoff increases brute-force risk"
+    protocols = ("Classic",)
+    requires = ("classic_target", "adapter")
+    destructive = False
+    requires_pairing = True
+    category = "posture"
+    references = ()
+    options = (
+        OptAddress("RHOST", required=True, description="Target BR/EDR address"),
+        OptString("HCI", default="", description="Local HCI adapter"),
+        OptBool("SSP", default=None, description="Target SSP capability (auto-detect if not set)"),
+    )
+
+    check_fn = staticmethod(check_pin_lockout)
+
+    def _execute_check(self, ctx: Any) -> list[dict]:
+        """Execute check with SSP detection."""
+        target = ctx.options.get("RHOST", "")
+        hci = ctx.options.get("HCI", "")
+        ssp = ctx.options.get("SSP")
+
+        # Auto-detect SSP if not provided
+        if ssp is None:
+            from blue_tap.modules.reconnaissance.sdp import check_ssp
+
+            try:
+                ssp = check_ssp(target)
+            except Exception:
+                ssp = None
+
+        return check_pin_lockout(target, hci, ssp)
+
+
+class DeviceClassModule(CveCheckModule, ServiceDiscoveryMixin):
+    """Bluetooth device class posture assessment."""
+
+    module_id = "assessment.device_class"
+    name = "Device Class Profile Posture"
+    description = "Analyse device class and correlate with observed service exposure"
+    protocols = ("Classic",)
+    requires = ("classic_target", "adapter")
+    destructive = False
+    category = "posture"
+    references = ()
+    options = (
+        OptAddress("RHOST", required=True, description="Target BR/EDR address"),
+        OptString("HCI", default="", description="Local HCI adapter"),
+    )
+
+    def _execute_check(self, ctx: Any) -> list[dict]:
+        """Execute check with hcitool info and SDP services."""
+        target = ctx.options.get("RHOST", "")
+        hci = ctx.options.get("HCI", "")
+
+        services = self._get_services(ctx)
+
+        hcitool_result = run_cmd(
+            ["hcitool", "-i", hci, "info", target],
+            timeout=12.0,
+        )
+
+        return check_device_class(target, hci, services, hcitool_result)
+
+
+class LmpFeaturesModule(CveCheckModule):
+    """LMP features posture assessment."""
+
+    module_id = "assessment.lmp_features"
+    name = "LMP Features Posture"
+    description = "Analyse LMP feature bitmask: encryption, SSP, extended capabilities"
+    protocols = ("Classic", "LMP")
+    requires = ("classic_target", "adapter")
+    destructive = False
+    category = "posture"
+    references = ()
+    options = (
+        OptAddress("RHOST", required=True, description="Target BR/EDR address"),
+        OptString("HCI", default="", description="Local HCI adapter"),
+    )
+
+    def _execute_check(self, ctx: Any) -> list[dict]:
+        """Execute check with hcitool info."""
+        target = ctx.options.get("RHOST", "")
+        hci = ctx.options.get("HCI", "")
+
+        # Run hcitool info to get LMP features
+        hcitool_result = run_cmd(
+            ["hcitool", "-i", hci, "info", target],
+            timeout=12.0,
+        )
+
+        return check_lmp_features(target, hci, hcitool_result)

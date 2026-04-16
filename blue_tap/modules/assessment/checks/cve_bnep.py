@@ -471,3 +471,56 @@ def _run_heap_oracle_probe(sock: socket.socket, address: str) -> list[dict]:
 
     # No jitter detected — either patched or stack did not respond to data frames
     return []
+
+
+# ---------------------------------------------------------------------------
+# Native Module classes
+# ---------------------------------------------------------------------------
+
+from typing import Any
+
+from blue_tap.framework.module import Module, RunContext
+from blue_tap.framework.module.options import OptAddress
+from blue_tap.modules.assessment.base import CveCheckModule, ServiceDiscoveryMixin
+
+
+class Cve20170783Module(CveCheckModule, ServiceDiscoveryMixin):
+    """CVE-2017-0783: BNEP role swap vulnerability."""
+
+    module_id = "assessment.cve_2017_0783"
+    name = "BNEP Role Swap"
+    description = "CVE-2017-0783: BNEP role-swap bypasses authorization on Android"
+    protocols = ("Classic", "BNEP", "L2CAP")
+    requires = ("classic_target",)
+    destructive = False
+    references = ("CVE-2017-0783",)
+    options = (OptAddress("RHOST", required=True, description="Target BR/EDR address"),)
+
+    check_fn = staticmethod(_check_bnep_role_swap)
+
+    def _execute_check(self, ctx: Any) -> list[dict]:
+        """Execute check with service discovery."""
+        target = ctx.options.get("RHOST", "")
+        services = self._get_services(ctx)
+        return _check_bnep_role_swap(target, services)
+
+
+class Cve201713258Module(CveCheckModule, ServiceDiscoveryMixin):
+    """CVE-2017-13258: BNEP heap oracle vulnerability."""
+
+    module_id = "assessment.cve_2017_13258"
+    name = "BNEP Heap Oracle"
+    description = "CVE-2017-13258: Android BNEP heap leak via malformed extension headers"
+    protocols = ("Classic", "BNEP", "L2CAP")
+    requires = ("classic_target",)
+    destructive = False
+    references = ("CVE-2017-13258",)
+    options = (OptAddress("RHOST", required=True, description="Target BR/EDR address"),)
+
+    check_fn = staticmethod(_check_bnep_heap_oracle)
+
+    def _execute_check(self, ctx: Any) -> list[dict]:
+        """Execute check with service discovery."""
+        target = ctx.options.get("RHOST", "")
+        services = self._get_services(ctx)
+        return _check_bnep_heap_oracle(target, services)

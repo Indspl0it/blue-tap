@@ -59,6 +59,10 @@ class MinimizationResult:
             reduction step.
         success: ``False`` if the crash could not be reproduced at all
             during the initial verification pass.
+        prefix_packets: Reduced setup packet sequence (populated by
+            :meth:`CrashMinimizer.minimize_sequence`).  The full reduced
+            sequence can be reconstructed as
+            ``prefix_packets + [minimized]``.
     """
 
     original: bytes
@@ -71,6 +75,7 @@ class MinimizationResult:
     strategy_used: str
     log: list[str] = field(default_factory=list)
     success: bool = True
+    prefix_packets: list[bytes] = field(default_factory=list)
 
     def essential_bytes_hex(self) -> str:
         """Render the original payload with non-essential bytes replaced by ``??``.
@@ -110,6 +115,8 @@ class MinimizationResult:
             f"  Reduction:  {self.reduction_percent:.1f}%",
             f"  Tests run:  {self.tests_performed}",
         ]
+        if self.prefix_packets:
+            lines.append(f"  Prefix:     {len(self.prefix_packets)} setup packet(s)")
         if self.essential_mask and any(m == 0xFF for m in self.essential_mask):
             essential_count = sum(1 for m in self.essential_mask if m == 0xFF)
             lines.append(f"  Essential:  {essential_count}/{len(self.essential_mask)} bytes")
@@ -534,8 +541,12 @@ class CrashMinimizer:
 
     # -- Crash test --------------------------------------------------------
 
-    def _crash_test(self, payload: bytes) -> bool:
+    def _crash_test(self, payload: bytes | list[bytes]) -> bool:
         """Send *payload* to the target and return ``True`` if a crash is detected.
+
+        Accepts either a single ``bytes`` payload or a ``list[bytes]``
+        sequence.  For sequences, each packet is sent in order; crash
+        detection is evaluated after the final send.
 
         A crash is detected when any of the following occur:
 
@@ -553,11 +564,14 @@ class CrashMinimizer:
           This accounts for flaky Bluetooth crash behavior.
 
         Args:
-            payload: Raw bytes to send to the target.
+            payload: Raw bytes to send to the target, or an ordered list
+                of byte sequences to send as a multi-packet sequence.
 
         Returns:
             ``True`` if a crash was detected, ``False`` otherwise.
         """
+        pkts = payload if isinstance(payload, list) else [payload]
+
         for attempt in range(self.max_retries):
             self._test_count += 1
 
@@ -576,7 +590,8 @@ class CrashMinimizer:
                     continue
 
                 try:
-                    transport.send(payload)
+                    for pkt in pkts:
+                        transport.send(pkt)
                 except (ConnectionResetError, BrokenPipeError, ConnectionError):
                     # Connection dropped on send -- crash
                     return True
@@ -612,23 +627,43 @@ class CrashMinimizer:
     # -- Strategy runners ---------------------------------------------------
 
     def _run_binary(
-        self, payload: bytes, log: list[str]
+        self,
+        payload: bytes,
+        log: list[str],
+        crash_test: Callable[[bytes], bool] | None = None,
     ) -> bytes:
-        """Run binary search reduction and append to *log*."""
+        """Run binary search reduction and append to *log*.
+
+        Args:
+            payload: Payload to reduce.
+            log: Shared log list.
+            crash_test: Override crash-test callable.  Defaults to
+                ``self._crash_test`` when ``None``.
+        """
         reducer = BinarySearchReducer()
         result, step_log = reducer.reduce(
-            payload, self._crash_test, min_size=1
+            payload, crash_test if crash_test is not None else self._crash_test, min_size=1
         )
         log.extend(step_log)
         return result
 
     def _run_ddmin(
-        self, payload: bytes, log: list[str]
+        self,
+        payload: bytes,
+        log: list[str],
+        crash_test: Callable[[bytes], bool] | None = None,
     ) -> bytes:
-        """Run delta debugging reduction and append to *log*."""
+        """Run delta debugging reduction and append to *log*.
+
+        Args:
+            payload: Payload to reduce.
+            log: Shared log list.
+            crash_test: Override crash-test callable.  Defaults to
+                ``self._crash_test`` when ``None``.
+        """
         reducer = DeltaDebugReducer()
         result, step_log = reducer.reduce(
-            payload, self._crash_test, max_iterations=1000
+            payload, crash_test if crash_test is not None else self._crash_test, max_iterations=1000
         )
         log.extend(step_log)
         return result
@@ -638,6 +673,7 @@ class CrashMinimizer:
         payload: bytes,
         original: bytes,
         log: list[str],
+        crash_test: Callable[[bytes], bool] | None = None,
     ) -> tuple[bytes, bytes]:
         """Run field-level reduction and append to *log*.
 
@@ -646,13 +682,17 @@ class CrashMinimizer:
             original: The original full-size payload, used to build the
                 essential mask at the original payload's length.
             log: Shared log list.
+            crash_test: Override crash-test callable.  Defaults to
+                ``self._crash_test`` when ``None``.
 
         Returns:
             ``(field_reduced_payload, essential_mask)`` where the mask
             has the same length as *original*.
         """
         reducer = FieldReducer()
-        reduced, step_log, mask = reducer.reduce(payload, self._crash_test)
+        reduced, step_log, mask = reducer.reduce(
+            payload, crash_test if crash_test is not None else self._crash_test
+        )
         log.extend(step_log)
 
         # The essential_mask is relative to the minimized payload, not the
@@ -667,10 +707,15 @@ class CrashMinimizer:
 
     def minimize(
         self,
-        payload: bytes,
+        payload: bytes | list[bytes],
         strategy: str = "auto",
     ) -> MinimizationResult:
         """Minimize a crash payload.
+
+        Accepts either a single ``bytes`` payload or a ``list[bytes]``
+        multi-packet sequence.  A single-element list is unwrapped and
+        treated as ``bytes``.  A multi-packet list (``len > 1``) is
+        dispatched to :meth:`minimize_sequence`.
 
         Strategies:
 
@@ -682,7 +727,9 @@ class CrashMinimizer:
           tests).
 
         Args:
-            payload: The crash-triggering payload to minimize.
+            payload: The crash-triggering payload to minimize.  May be a
+                single ``bytes`` object or an ordered ``list[bytes]``
+                sequence.
             strategy: Which reduction strategy to use.
 
         Returns:
@@ -692,6 +739,14 @@ class CrashMinimizer:
         Raises:
             ValueError: If *strategy* is not one of the recognized names.
         """
+        # --- list[bytes] dispatch ------------------------------------------
+        if isinstance(payload, list):
+            if len(payload) == 1:
+                # Single-element list: unwrap and treat as plain bytes
+                payload = payload[0]
+            else:
+                # Multi-packet sequence: delegate to specialized method
+                return self.minimize_sequence(payload, strategy=strategy)
         valid_strategies = ("binary", "ddmin", "field", "auto")
         if strategy not in valid_strategies:
             raise ValueError(
@@ -707,9 +762,19 @@ class CrashMinimizer:
         info(f"Verifying crash reproduces with {len(payload)}-byte payload...")
         log.append(f"Baseline verification: {len(payload)} bytes")
 
-        if not self._crash_test(payload):
-            warning("Crash could NOT be reproduced -- aborting minimization")
-            log.append("FAILED: crash not reproducible")
+        baseline_verified = False
+        for attempt in range(3):
+            if self._crash_test(payload):
+                baseline_verified = True
+                break
+            if attempt < 2:
+                info(f"Baseline attempt {attempt + 1}/3 failed, retrying in 2s...")
+                log.append(f"Baseline attempt {attempt + 1} failed — retrying")
+                time.sleep(2)
+
+        if not baseline_verified:
+            warning("Crash could NOT be reproduced after 3 attempts -- aborting minimization")
+            log.append("FAILED: crash not reproducible after 3 attempts")
             return MinimizationResult(
                 original=original,
                 minimized=original,
@@ -792,6 +857,185 @@ class CrashMinimizer:
         info(result.summary())
         return result
 
+    def minimize_sequence(
+        self,
+        packets: list[bytes],
+        strategy: str = "auto",
+    ) -> MinimizationResult:
+        """Minimize a multi-packet crash sequence.
+
+        Phase 1 — Prefix reduction: try removing each setup packet (all except
+        the last) independently. Keep only packets that are required to trigger
+        the crash. Uses a greedy left-to-right removal pass.
+
+        Phase 2 — Final packet minimization: minimize the last (attack) packet
+        using the selected single-packet strategy, keeping the reduced prefix
+        fixed as context.
+
+        Args:
+            packets: Ordered list of packets to send. Crash is detected after
+                the final packet.
+            strategy: Reduction strategy for the final packet ("binary",
+                "ddmin", "field", "auto").
+
+        Returns:
+            MinimizationResult where ``minimized`` is the minimized final
+            packet and ``original`` is the original final packet. The ``log``
+            includes prefix reduction steps. The full reduced sequence can be
+            reconstructed as ``prefix_packets + [result.minimized]``.
+
+        Raises:
+            ValueError: If *strategy* is not one of the recognized names.
+        """
+        valid_strategies = ("binary", "ddmin", "field", "auto")
+        if strategy not in valid_strategies:
+            raise ValueError(
+                f"Unknown strategy {strategy!r}; "
+                f"choose from {valid_strategies}"
+            )
+
+        self._test_count = 0
+        log: list[str] = []
+        original_last = packets[-1]
+        original_prefix_count = len(packets) - 1
+
+        # --- Baseline verification -----------------------------------------
+        info(
+            f"Verifying crash reproduces with {len(packets)}-packet sequence "
+            f"(last packet: {len(original_last)} bytes)..."
+        )
+        log.append(
+            f"Baseline verification: {len(packets)}-packet sequence, "
+            f"last packet {len(original_last)} bytes"
+        )
+
+        if not self._crash_test(packets):
+            warning("Crash could NOT be reproduced -- aborting minimization")
+            log.append("FAILED: crash not reproducible with full sequence")
+            return MinimizationResult(
+                original=original_last,
+                minimized=original_last,
+                essential_mask=b"",
+                original_size=len(original_last),
+                minimized_size=len(original_last),
+                reduction_percent=0.0,
+                tests_performed=self._test_count,
+                strategy_used=f"sequence+{strategy}",
+                log=log,
+                success=False,
+                prefix_packets=list(packets[:-1]),
+            )
+
+        log.append("Baseline verified: crash reproduces")
+        info("Crash verified. Beginning sequence minimization...")
+
+        # --- Phase 1: prefix reduction -------------------------------------
+        prefix = list(packets[:-1])
+        last_pkt = packets[-1]
+
+        log.append(
+            f"[seq] Phase 1 — prefix reduction: "
+            f"{original_prefix_count} setup packet(s) to evaluate"
+        )
+
+        i = 0
+        while i < len(prefix):
+            # Try removing prefix[i]
+            candidate_prefix = prefix[:i] + prefix[i + 1:]
+            if self._crash_test(candidate_prefix + [last_pkt]):
+                log.append(
+                    f"[seq] Removed setup packet {i + 1}/{len(prefix) + 1} "
+                    f"({len(prefix[i])} bytes) — crash persists without it"
+                )
+                prefix = candidate_prefix
+                # Do NOT advance i: the next element shifted into position i
+            else:
+                log.append(
+                    f"[seq] Kept setup packet {i + 1}/{len(prefix) + 1} "
+                    f"({len(prefix[i])} bytes) — required for crash"
+                )
+                i += 1
+
+        reduced_prefix = prefix
+        log.append(
+            f"[seq] Kept {len(reduced_prefix)}/{original_prefix_count} setup packet(s)"
+        )
+        info(
+            f"Prefix reduction: {original_prefix_count} -> "
+            f"{len(reduced_prefix)} setup packet(s)"
+        )
+
+        # --- Phase 2: final packet minimization ----------------------------
+        log.append(
+            f"[seq] Phase 2 — final packet minimization "
+            f"({len(last_pkt)} bytes, strategy={strategy!r})"
+        )
+
+        # Build a closure that tests the final packet in context of the
+        # reduced prefix.  Uses reduced_prefix captured at this point (after
+        # phase 1 completes), not the original.
+        def _crash_test_with_prefix(pkt: bytes) -> bool:
+            return self._crash_test(reduced_prefix + [pkt])
+
+        current = last_pkt
+        essential_mask = b""
+
+        if strategy == "binary":
+            current = self._run_binary(current, log, crash_test=_crash_test_with_prefix)
+
+        elif strategy == "ddmin":
+            current = self._run_ddmin(current, log, crash_test=_crash_test_with_prefix)
+
+        elif strategy == "field":
+            current, essential_mask = self._run_field(
+                current, last_pkt, log, crash_test=_crash_test_with_prefix
+            )
+
+        elif strategy == "auto":
+            before = len(current)
+            current = self._run_binary(current, log, crash_test=_crash_test_with_prefix)
+            info(f"Binary search: {before}B -> {len(current)}B")
+
+            before = len(current)
+            current = self._run_ddmin(current, log, crash_test=_crash_test_with_prefix)
+            info(f"Delta debugging: {before}B -> {len(current)}B")
+
+            current, essential_mask = self._run_field(
+                current, last_pkt, log, crash_test=_crash_test_with_prefix
+            )
+            essential_count = sum(1 for m in essential_mask if m == 0xFF)
+            info(
+                f"Field analysis: {essential_count}/{len(essential_mask)} "
+                f"bytes essential"
+            )
+
+        # --- Build result --------------------------------------------------
+        minimized_size = len(current)
+        original_size = len(original_last)
+        if original_size > 0:
+            reduction_pct = (
+                (original_size - minimized_size) / original_size * 100.0
+            )
+        else:
+            reduction_pct = 0.0
+
+        result = MinimizationResult(
+            original=original_last,
+            minimized=current,
+            essential_mask=essential_mask,
+            original_size=original_size,
+            minimized_size=minimized_size,
+            reduction_percent=reduction_pct,
+            tests_performed=self._test_count,
+            strategy_used=f"sequence+{strategy}",
+            log=log,
+            success=True,
+            prefix_packets=reduced_prefix,
+        )
+
+        info(result.summary())
+        return result
+
     def minimize_from_db(
         self,
         crash_db: CrashDB,
@@ -831,7 +1075,16 @@ class CrashMinimizer:
             f"({crash.get('protocol', 'unknown')} protocol)"
         )
 
-        result = self.minimize(payload, strategy=strategy)
+        packet_sequence_json = crash.get("packet_sequence_json")
+        if packet_sequence_json:
+            import json as _json
+            pkt_list = [bytes.fromhex(h) for h in _json.loads(packet_sequence_json)]
+            if len(pkt_list) > 1:
+                result = self.minimize_sequence(pkt_list, strategy=strategy)
+            else:
+                result = self.minimize(pkt_list[0] if pkt_list else payload, strategy=strategy)
+        else:
+            result = self.minimize(payload, strategy=strategy)
 
         # Save results back to the database
         if result.success:
@@ -858,3 +1111,197 @@ class CrashMinimizer:
             warning(f"Crash {crash_id} could not be reproduced")
 
         return result
+
+
+# ---------------------------------------------------------------------------
+# Native Module class (replaces modules/fuzzing/modules/minimizer.py wrapper)
+# ---------------------------------------------------------------------------
+
+from blue_tap.framework.contracts.result_schema import (  # noqa: E402
+    build_run_envelope,
+    make_evidence,
+    make_execution,
+)
+from blue_tap.framework.module import Module, RunContext  # noqa: E402
+from blue_tap.framework.module.options import (  # noqa: E402
+    OptAddress,
+    OptEnum,
+    OptFloat,
+    OptInt,
+    OptPath,
+    OptString,
+)
+from blue_tap.framework.registry import ModuleFamily  # noqa: E402
+
+_REDUCERS = ("delta_debug", "binary_search", "field", "combined")
+_TRANSPORT_PROTOCOLS = ("l2cap", "rfcomm", "ble", "raw_acl")
+
+
+class CrashMinimizerModule(Module):
+    """Crash Minimizer.
+
+    Minimize fuzzing crash inputs and replay them deterministically.
+    Supports delta debugging, binary search, and field-based reduction.
+    """
+
+    module_id = "fuzzing.minimizer"
+    family = ModuleFamily.FUZZING
+    name = "Crash Minimizer"
+    description = "Minimize fuzzing crash inputs and replay them deterministically"
+    protocols = ("Classic", "BLE", "L2CAP", "RFCOMM", "OBEX", "SDP", "ATT", "SMP", "BNEP", "LMP")
+    requires = ("target",)
+    destructive = True
+    requires_pairing = False
+    schema_prefix = "blue_tap.fuzz.result"
+    has_report_adapter = False
+    references = ()
+    options = (
+        OptAddress("RHOST", required=True, description="Target Bluetooth address"),
+        OptPath("CRASH_FILE", required=True, description="Path to crash input file"),
+        OptString("PROTOCOL", default="l2cap", description=f"Protocol for transport ({', '.join(_TRANSPORT_PROTOCOLS)})"),
+        OptEnum("REDUCER", choices=_REDUCERS, default="delta_debug", description="Reduction strategy"),
+        OptInt("PSM", default=1, description="L2CAP PSM (for l2cap protocol)"),
+        OptInt("CHANNEL", default=1, description="RFCOMM channel (for rfcomm protocol)"),
+        OptString("HCI", default="", description="Local HCI adapter"),
+        OptFloat("TIMEOUT", default=5.0, description="Timeout per crash test"),
+        OptFloat("COOLDOWN", default=5.0, description="Cooldown between tests"),
+        OptInt("MAX_RETRIES", default=3, description="Retries per crash test"),
+    )
+
+    def run(self, ctx: RunContext) -> dict:
+        """Execute crash minimization."""
+        import logging as _logging
+        from blue_tap.modules.fuzzing.transport import (
+            BLETransport,
+            L2CAPTransport,
+            RFCOMMTransport,
+        )
+
+        _log = _logging.getLogger(__name__)
+
+        target = ctx.options.get("RHOST", "")
+        crash_file = ctx.options.get("CRASH_FILE", "")
+        protocol = ctx.options.get("PROTOCOL", "l2cap").lower()
+        reducer = ctx.options.get("REDUCER", "delta_debug")
+        psm = ctx.options.get("PSM", 1)
+        channel = ctx.options.get("CHANNEL", 1)
+        hci = ctx.options.get("HCI", "")
+        timeout = ctx.options.get("TIMEOUT", 5.0)
+        cooldown = ctx.options.get("COOLDOWN", 5.0)
+        max_retries = ctx.options.get("MAX_RETRIES", 3)
+        started_at = ctx.started_at
+
+        try:
+            with open(crash_file, "rb") as f:
+                original_payload = f.read()
+        except Exception as e:
+            _log.error("Failed to read crash file: %s", e)
+            return build_run_envelope(
+                schema=self.schema_prefix,
+                module=self.module_id,
+                target=target,
+                adapter=hci,
+                started_at=started_at,
+                executions=[make_execution(
+                    execution_id="minimize",
+                    kind="phase",
+                    id="minimize",
+                    title="Crash Minimization",
+                    module=self.module_id,
+                    module_id=self.module_id,
+                    protocol=protocol,
+                    execution_status="failed",
+                    module_outcome="not_applicable",
+                    evidence=make_evidence(raw={"error": str(e)}, summary=f"Failed to read crash file: {e}"),
+                    destructive=False,
+                    requires_pairing=False,
+                )],
+                summary={"outcome": "not_applicable", "error": str(e)},
+                module_data={"error": str(e)},
+                run_id=ctx.run_id,
+            )
+
+        def _transport_factory():
+            if protocol == "l2cap":
+                return L2CAPTransport(target, psm=psm, hci=hci, timeout=timeout)
+            elif protocol == "rfcomm":
+                return RFCOMMTransport(target, channel=channel, hci=hci, timeout=timeout)
+            elif protocol == "ble":
+                return BLETransport(target, hci=hci, timeout=timeout)
+            else:
+                raise ValueError(f"Unknown protocol: {protocol}")
+
+        minimizer = CrashMinimizer(
+            target=target,
+            transport_factory=_transport_factory,
+            timeout=timeout,
+            cooldown=cooldown,
+            max_retries=max_retries,
+        )
+
+        _min_error: str | None = None
+        try:
+            result = minimizer.minimize(original_payload, strategy=reducer)
+        except Exception as e:
+            _log.exception("Minimization failed: %s", e)
+            result = None
+            _min_error = str(e)
+
+        original_size = len(original_payload)
+        if isinstance(result, MinimizationResult):
+            minimized = result.minimized
+            minimized_size = result.minimized_size
+            reduction_pct = result.reduction_percent
+            status = "completed" if result.success else "error"
+        elif _min_error is not None:
+            minimized = original_payload
+            minimized_size = original_size
+            reduction_pct = 0.0
+            status = "error"
+        else:
+            minimized = original_payload
+            minimized_size = original_size
+            reduction_pct = 0.0
+            status = "completed"
+
+        outcome = "corpus_grown" if minimized_size < original_size else "no_findings"
+        if status == "error":
+            outcome = "not_applicable"
+
+        return build_run_envelope(
+            schema=self.schema_prefix,
+            module=self.module_id,
+            target=target,
+            adapter=hci,
+            started_at=started_at,
+            executions=[make_execution(
+                execution_id="minimize",
+                kind="phase",
+                id="minimize",
+                title=f"Crash Minimization ({reducer})",
+                module=self.module_id,
+                module_id=self.module_id,
+                protocol=protocol,
+                execution_status="completed" if status != "error" else "failed",
+                module_outcome=outcome,
+                evidence=make_evidence(
+                    raw={
+                        "original_size": original_size,
+                        "minimized_size": minimized_size,
+                        "reduction_pct": round(reduction_pct, 1),
+                        "reducer": reducer,
+                    },
+                    summary=f"Reduced {original_size} -> {minimized_size} bytes ({reduction_pct:.1f}% reduction)",
+                ),
+                destructive=True,
+                requires_pairing=False,
+            )],
+            summary={
+                "outcome": outcome,
+                "original_size": original_size,
+                "minimized_size": minimized_size,
+                "reduction_pct": round(reduction_pct, 1),
+            },
+            module_data=result if isinstance(result, dict) else {"minimized": minimized},
+            run_id=ctx.run_id,
+        )

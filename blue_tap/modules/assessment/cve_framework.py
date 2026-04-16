@@ -197,7 +197,7 @@ def build_vulnscan_result(
                 kind="check",
                 id=str(check.get("cve", "") or check.get("title", "cve_check")).lower().replace(" ", "_"),
                 title=check.get("title", check.get("cve", "CVE Check")),
-                module="vulnscan",
+                module="assessment.vuln_scanner",
                 protocol=check.get("section", "CVE").split(":")[0].replace("Check", "").strip() or "CVE",
                 execution_status=EXECUTION_ERROR if check.get("error") else EXECUTION_COMPLETED,
                 module_outcome=check.get("primary_status", STATUS_INCONCLUSIVE),
@@ -229,7 +229,7 @@ def build_vulnscan_result(
                 kind="check",
                 id=str(check.get("check_id", "non_cve_check")),
                 title=check.get("title", "Non-CVE Check"),
-                module="vulnscan",
+                module="assessment.vuln_scanner",
                 protocol=check.get("section", "Posture").split(":")[0].replace("Check", "").strip() or "Posture",
                 execution_status=EXECUTION_ERROR if check.get("error") else EXECUTION_COMPLETED,
                 module_outcome=check.get("primary_status", STATUS_INCONCLUSIVE),
@@ -246,7 +246,7 @@ def build_vulnscan_result(
         )
     return build_run_envelope(
         schema="blue_tap.vulnscan.result",
-        module="vulnscan",
+        module="assessment.vuln_scanner",
         target=target,
         adapter=adapter,
         operator_context={"active": active},
@@ -293,7 +293,7 @@ def build_vuln_probe_result(
         kind="check",
         id=operation,
         title=title,
-        module="vulnscan",
+        module="assessment.vuln_scanner",
         protocol=protocol,
         execution_status=EXECUTION_COMPLETED,
         module_outcome=outcome,
@@ -310,7 +310,7 @@ def build_vuln_probe_result(
     )
     return build_run_envelope(
         schema="blue_tap.vulnscan.result",
-        module="vulnscan",
+        module="assessment.vuln_scanner",
         target=target,
         adapter=adapter,
         operator_context={"operation": operation, "active": False},

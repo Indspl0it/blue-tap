@@ -151,3 +151,28 @@ def _check_sdp_continuation_info_leak(address: str) -> list[dict]:
                 sock.close()
             except OSError:
                 pass
+
+
+# ---------------------------------------------------------------------------
+# Native Module class
+# ---------------------------------------------------------------------------
+
+from blue_tap.framework.module import Module, RunContext
+from blue_tap.framework.module.options import OptAddress
+from blue_tap.modules.assessment.base import CveCheckModule
+
+
+class Cve20170785Module(CveCheckModule):
+    """CVE-2017-0785: Android SDP continuation state information disclosure."""
+
+    module_id = "assessment.cve_2017_0785"
+    name = "SDP Continuation State Replay"
+    description = "CVE-2017-0785: SDP continuation token cross-service replay leaks heap"
+    protocols = ("Classic", "SDP", "L2CAP")
+    requires = ("classic_target",)
+    destructive = False
+    references = ("CVE-2017-0785",)
+    options = (OptAddress("RHOST", required=True, description="Target BR/EDR address"),)
+
+    check_fn = staticmethod(_check_sdp_continuation_info_leak)
+    option_param_map = {"RHOST": "address"}

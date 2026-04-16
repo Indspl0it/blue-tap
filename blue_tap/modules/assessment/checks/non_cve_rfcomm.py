@@ -406,3 +406,138 @@ def check_automotive_diagnostics(address: str, services: list[dict], connect_tim
                 )
                 break
     return findings
+
+
+# ---------------------------------------------------------------------------
+# Native Module classes
+# ---------------------------------------------------------------------------
+
+from typing import Any
+
+from blue_tap.framework.module import Module, RunContext
+from blue_tap.framework.module.options import OptAddress, OptFloat
+from blue_tap.modules.assessment.base import CveCheckModule, ServiceDiscoveryMixin
+
+
+class ServiceExposureModule(CveCheckModule, ServiceDiscoveryMixin):
+    """RFCOMM service exposure assessment."""
+
+    module_id = "assessment.service_exposure"
+    name = "Sensitive RFCOMM Service Exposure"
+    description = "Probe PBAP/MAP/OPP RFCOMM reachability to confirm attack surface"
+    protocols = ("Classic", "RFCOMM")
+    requires = ("classic_target",)
+    destructive = False
+    category = "exposure"
+    references = ()
+    options = (
+        OptAddress("RHOST", required=True, description="Target BR/EDR address"),
+        OptFloat("RFCOMM_TIMEOUT", default=2.0, description="RFCOMM probe timeout"),
+    )
+
+    def _execute_check(self, ctx: Any) -> list[dict]:
+        """Execute check with service discovery."""
+        target = ctx.options.get("RHOST", "")
+        services = self._get_services(ctx)
+        timeout = ctx.options.get("RFCOMM_TIMEOUT", 2.0)
+        return check_service_exposure(target, services, timeout)
+
+
+class HiddenRfcommModule(CveCheckModule, ServiceDiscoveryMixin):
+    """Hidden RFCOMM channel discovery."""
+
+    module_id = "assessment.hidden_rfcomm"
+    name = "Unadvertised RFCOMM Channels"
+    description = "Probe unadvertised RFCOMM channels (debug/factory, weak auth)"
+    protocols = ("Classic", "RFCOMM")
+    requires = ("classic_target",)
+    destructive = False
+    category = "exposure"
+    references = ()
+    options = (
+        OptAddress("RHOST", required=True, description="Target BR/EDR address"),
+        OptFloat("RFCOMM_TIMEOUT", default=2.0, description="RFCOMM probe timeout"),
+    )
+
+    def _execute_check(self, ctx: Any) -> list[dict]:
+        """Execute check with service discovery."""
+        target = ctx.options.get("RHOST", "")
+        services = self._get_services(ctx)
+        timeout = ctx.options.get("RFCOMM_TIMEOUT", 2.0)
+        return check_hidden_rfcomm(target, services, timeout)
+
+
+class EncryptionEnforcementModule(CveCheckModule, ServiceDiscoveryMixin):
+    """Encryption enforcement assessment."""
+
+    module_id = "assessment.encryption_enforcement"
+    name = "RFCOMM Encryption Enforcement"
+    description = "Test if sensitive RFCOMM profiles accept unencrypted connections"
+    protocols = ("Classic", "RFCOMM")
+    requires = ("classic_target",)
+    destructive = False
+    category = "posture"
+    references = ()
+    options = (
+        OptAddress("RHOST", required=True, description="Target BR/EDR address"),
+        OptFloat("CONNECT_TIMEOUT", default=5.0, description="Connection timeout"),
+        OptFloat("OBEX_TIMEOUT", default=4.0, description="OBEX operation timeout"),
+    )
+
+    def _execute_check(self, ctx: Any) -> list[dict]:
+        """Execute check with service discovery."""
+        target = ctx.options.get("RHOST", "")
+        services = self._get_services(ctx)
+        connect_timeout = ctx.options.get("CONNECT_TIMEOUT", 5.0)
+        obex_timeout = ctx.options.get("OBEX_TIMEOUT", 4.0)
+        return check_encryption_enforcement(target, services, connect_timeout, obex_timeout)
+
+
+class AuthorizationModelModule(CveCheckModule, ServiceDiscoveryMixin):
+    """OBEX authorization model assessment."""
+
+    module_id = "assessment.authorization_model"
+    name = "OBEX Authorization Model"
+    description = "Test OBEX file-access authorization on PBAP/MAP"
+    protocols = ("Classic", "OBEX", "RFCOMM")
+    requires = ("classic_target",)
+    destructive = False
+    category = "posture"
+    references = ()
+    options = (
+        OptAddress("RHOST", required=True, description="Target BR/EDR address"),
+        OptFloat("TIMEOUT", default=4.0, description="OBEX operation timeout"),
+    )
+
+    def _execute_check(self, ctx: Any) -> list[dict]:
+        """Execute check with service discovery."""
+        target = ctx.options.get("RHOST", "")
+        services = self._get_services(ctx)
+        timeout = ctx.options.get("TIMEOUT", 4.0)
+        return check_authorization_model(target, services, timeout)
+
+
+class AutomotiveDiagnosticsModule(CveCheckModule, ServiceDiscoveryMixin):
+    """Automotive diagnostic surface assessment."""
+
+    module_id = "assessment.automotive_diagnostics"
+    name = "Automotive Diagnostic Surface"
+    description = "Probe AT/OBD-II diagnostic interfaces for vehicle data exposure"
+    protocols = ("Classic", "RFCOMM", "AT")
+    requires = ("classic_target",)
+    destructive = False
+    category = "exposure"
+    references = ()
+    options = (
+        OptAddress("RHOST", required=True, description="Target BR/EDR address"),
+        OptFloat("CONNECT_TIMEOUT", default=5.0, description="Connection timeout"),
+        OptFloat("AT_TIMEOUT", default=2.0, description="AT command timeout"),
+    )
+
+    def _execute_check(self, ctx: Any) -> list[dict]:
+        """Execute check with service discovery."""
+        target = ctx.options.get("RHOST", "")
+        services = self._get_services(ctx)
+        connect_timeout = ctx.options.get("CONNECT_TIMEOUT", 5.0)
+        at_timeout = ctx.options.get("AT_TIMEOUT", 2.0)
+        return check_automotive_diagnostics(target, services, connect_timeout, at_timeout)

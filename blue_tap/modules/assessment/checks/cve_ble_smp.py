@@ -63,6 +63,11 @@ def _connect_ble_smp(address: str, timeout: float = 8.0, hci: str | None = None)
     With this approach recv/send operate on the raw SMP payload (no L2CAP header).
     Returns connected socket or None on failure.
     """
+    if hci is None:
+
+        from blue_tap.hardware.adapter import resolve_active_hci
+
+        hci = resolve_active_hci()
     if _libc is None:
         return None
     sock = None
@@ -297,3 +302,54 @@ def _check_smp_bredr_oob(address: str, ssp: bool | None = None) -> list[dict]:
             evidence=str(exc),
         )]
     return []
+
+
+# ---------------------------------------------------------------------------
+# Native Module classes
+# ---------------------------------------------------------------------------
+
+from typing import Any
+
+from blue_tap.framework.module import Module, RunContext
+from blue_tap.framework.module.options import OptAddress, OptBool
+from blue_tap.modules.assessment.base import CveCheckModule
+
+
+class Cve202434722Module(CveCheckModule):
+    """CVE-2024-34722: BLE legacy pairing bypass."""
+
+    module_id = "assessment.cve_2024_34722"
+    name = "BLE Legacy Pairing Bypass"
+    description = "CVE-2024-34722: BLE SMP legacy pairing bypass (wrong Pairing_Confirm)"
+    protocols = ("BLE", "SMP")
+    requires = ("ble_target",)
+    destructive = False
+    references = ("CVE-2024-34722",)
+    options = (OptAddress("RHOST", required=True, description="Target BLE address"),)
+
+    check_fn = staticmethod(_check_ble_legacy_pairing_bypass)
+    option_param_map = {"RHOST": "address"}
+
+
+class Cve20189365Module(CveCheckModule):
+    """CVE-2018-9365: SMP BR/EDR fixed CID OOB read."""
+
+    module_id = "assessment.cve_2018_9365"
+    name = "SMP BR/EDR OOB"
+    description = "CVE-2018-9365: SMP_PAIRING_REQ on BR/EDR CID 0x0007 triggers OOB read"
+    protocols = ("Classic", "SMP", "L2CAP")
+    requires = ("classic_target",)
+    destructive = False
+    references = ("CVE-2018-9365",)
+    options = (
+        OptAddress("RHOST", required=True, description="Target BR/EDR address"),
+        OptBool("SSP", default=None, description="Target SSP capability (auto-detect if not set)"),
+    )
+
+    check_fn = staticmethod(_check_smp_bredr_oob)
+
+    def _execute_check(self, ctx: Any) -> list[dict]:
+        """Execute check with optional SSP parameter."""
+        target = ctx.options.get("RHOST", "")
+        ssp = ctx.options.get("SSP")
+        return _check_smp_bredr_oob(target, ssp=ssp)

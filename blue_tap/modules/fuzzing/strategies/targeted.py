@@ -876,30 +876,35 @@ class TargetedStrategy:
     # ------------------------------------------------------------------
 
     def generate_all(
-        self, cve: str | None = None,
+        self, cve: str | None = None, protocol: str | None = None,
     ) -> Generator[tuple[bytes | list[bytes], str], None, None]:
-        """Yield all CVE patterns, or filter by CVE ID substring.
+        """Yield all CVE patterns, optionally filtered by CVE ID or protocol.
 
         Args:
             cve: Optional filter string. If provided, only yields from CVE
                  methods whose ID contains this substring (case-insensitive).
                  Examples: ``"2017-0785"``, ``"sweyntooth"``, ``"5383"``.
+            protocol: Optional protocol name filter. If provided, only yields
+                 CVE patterns targeting this protocol (e.g. ``"sdp"``,
+                 ``"ble-att"``).
 
         Yields:
             ``(payload, description)`` tuples from all matching CVE methods.
         """
         methods = [
-            ("CVE-2017-0785", self.cve_2017_0785_sdp_leak),
-            ("CVE-2017-0781", self.cve_2017_0781_bnep_heap),
-            ("CVE-2019-19192-SweynTooth-Deadlock", self.sweyntooth_att_deadlock),
-            ("SweynTooth-LargeMTU", self.sweyntooth_att_large_mtu),
-            ("CVE-2018-5383", self.cve_2018_5383_invalid_curve),
-            ("CVE-2024-24746", self.cve_2024_24746_prepare_write),
-            ("CVE-2024-45431-PerfektBlue", self.perfektblue_l2cap_cid_zero),
+            ("CVE-2017-0785", "sdp", self.cve_2017_0785_sdp_leak),
+            ("CVE-2017-0781", "bnep", self.cve_2017_0781_bnep_heap),
+            ("CVE-2019-19192-SweynTooth-Deadlock", "ble-att", self.sweyntooth_att_deadlock),
+            ("SweynTooth-LargeMTU", "ble-att", self.sweyntooth_att_large_mtu),
+            ("CVE-2018-5383", "ble-smp", self.cve_2018_5383_invalid_curve),
+            ("CVE-2024-24746", "ble-att", self.cve_2024_24746_prepare_write),
+            ("CVE-2024-45431-PerfektBlue", "l2cap", self.perfektblue_l2cap_cid_zero),
         ]
 
-        for method_id, method in methods:
+        for method_id, method_proto, method in methods:
             if cve is not None and cve.lower() not in method_id.lower():
+                continue
+            if protocol is not None and method_proto != protocol:
                 continue
             yield from method()
 

@@ -290,3 +290,44 @@ def _check_android_eatt_integer_overflow(address: str) -> list[dict]:
             sock.close()
         except OSError:
             pass
+
+
+# ---------------------------------------------------------------------------
+# Native Module classes
+# ---------------------------------------------------------------------------
+
+from blue_tap.framework.module import Module, RunContext
+from blue_tap.framework.module.options import OptAddress
+from blue_tap.modules.assessment.base import CveCheckModule
+
+
+class Cve20220204Module(CveCheckModule):
+    """CVE-2022-0204: BlueZ GATT prepare-write overflow."""
+
+    module_id = "assessment.cve_2022_0204"
+    name = "BlueZ GATT Prepare Write Overflow"
+    description = "CVE-2022-0204: BlueZ GATT Prepare Write overflow (offset+len > MTU)"
+    protocols = ("BLE", "GATT", "ATT")
+    requires = ("ble_target",)
+    destructive = False
+    references = ("CVE-2022-0204",)
+    options = (OptAddress("RHOST", required=True, description="Target BLE address"),)
+
+    check_fn = staticmethod(_check_bluez_gatt_prep_write_overflow)
+    option_param_map = {"RHOST": "address"}
+
+
+class Cve202335681Module(CveCheckModule):
+    """CVE-2023-35681: Android EATT integer overflow."""
+
+    module_id = "assessment.cve_2023_35681"
+    name = "Android EATT Integer Overflow"
+    description = "CVE-2023-35681: Android EATT integer overflow via oversized MTU"
+    protocols = ("BLE", "GATT", "EATT")
+    requires = ("ble_target",)
+    destructive = False
+    references = ("CVE-2023-35681",)
+    options = (OptAddress("RHOST", required=True, description="Target BLE address"),)
+
+    check_fn = staticmethod(_check_android_eatt_integer_overflow)
+    option_param_map = {"RHOST": "address"}

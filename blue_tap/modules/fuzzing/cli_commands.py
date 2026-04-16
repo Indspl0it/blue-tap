@@ -38,6 +38,8 @@ from blue_tap.utils.output import (
     error,
     warning,
     section,
+    bare_table,
+    print_table,
     CYAN,
     GREEN,
     YELLOW,
@@ -762,7 +764,7 @@ def _campaign_command(fuzz_group):
         interrupted = False
         prev_handler = signal.getsignal(signal.SIGINT)
 
-        def _on_interrupt(signum, frame):
+        def _on_interrupt(_signum, _frame):
             nonlocal interrupted
             interrupted = True
             cam._running = False
@@ -1051,17 +1053,12 @@ def _crash_commands(fuzz_group):
             info("No crashes found matching the filter criteria.")
             return
 
-        table = Table(
-            title=f"[bold {RED}]Fuzz Crashes ({len(crashes)})[/bold {RED}]",
-            show_lines=True,
-            border_style=DIM,
-            header_style=Style(bold=True, color=RED),
-            title_style=Style(bold=True, color=RED),
-        )
-        table.add_column("ID", style=DIM, width=5, justify="right")
-        table.add_column("Timestamp", style=DIM, min_width=20)
-        table.add_column("Protocol", style=PURPLE, min_width=12)
-        table.add_column("Type", style=f"bold {YELLOW}", min_width=18)
+        table = bare_table()
+        table.title = f"[bold]Fuzz Crashes ({len(crashes)})[/bold]"
+        table.add_column("ID", style="bt.dim", width=5, justify="right")
+        table.add_column("Timestamp", style="bt.dim", min_width=20)
+        table.add_column("Protocol", style="bt.purple", min_width=12)
+        table.add_column("Type", style="bt.yellow", min_width=18)
         table.add_column("Severity", min_width=10)
         table.add_column("Payload", min_width=36)
         table.add_column("Repro?", width=6, justify="center")
@@ -1099,7 +1096,7 @@ def _crash_commands(fuzz_group):
                 repro_str,
             )
 
-        console.print(table)
+        print_table(table)
 
         envelope = build_fuzz_operation_result(
             target="",
@@ -1300,7 +1297,7 @@ def _crash_commands(fuzz_group):
 
         emit_cli_event(
             event_type="run_started",
-            module="fuzz",
+            module="fuzzing",
             run_id=run_id,
             message=f"Replaying crash #{crash_id}",
             details={"crash_id": crash_id},
@@ -1436,7 +1433,7 @@ def _crash_commands(fuzz_group):
 
         emit_cli_event(
             event_type="execution_result",
-            module="fuzz",
+            module="fuzzing",
             run_id=run_id,
             execution_id=f"crash_replay_{crash_id}",
             target=target_addr,
@@ -1445,7 +1442,7 @@ def _crash_commands(fuzz_group):
         )
         emit_cli_event(
             event_type="run_completed",
-            module="fuzz",
+            module="fuzzing",
             run_id=run_id,
             target=target_addr,
             message=f"Crash replay #{crash_id} complete",
@@ -1525,7 +1522,7 @@ def _crash_commands(fuzz_group):
 
         emit_cli_event(
             event_type="run_started",
-            module="fuzz",
+            module="fuzzing",
             run_id=run_id,
             message="Exporting crash database",
             details={"output": output, "format": fmt},
@@ -1548,14 +1545,14 @@ def _crash_commands(fuzz_group):
                 )
                 emit_cli_event(
                     event_type="artifact_saved",
-                    module="fuzz",
+                    module="fuzzing",
                     run_id=run_id,
                     message=f"Crash export written to {output}",
                     details={"path": output, "crash_count": crash_count},
                 )
             emit_cli_event(
                 event_type="run_completed",
-                module="fuzz",
+                module="fuzzing",
                 run_id=run_id,
                 message=f"Crash export complete ({crash_count} crashes)",
                 details={"output": output, "crash_count": crash_count},

@@ -95,13 +95,22 @@ CREATE TABLE IF NOT EXISTS crashes (
         'CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO'
     )),
     notes               TEXT,
-    payload_hash        TEXT    NOT NULL
+    payload_hash        TEXT    NOT NULL,
+    crash_signature     TEXT,
+    packet_sequence_json TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_crashes_hash     ON crashes(payload_hash);
 CREATE INDEX IF NOT EXISTS idx_crashes_protocol ON crashes(protocol);
 CREATE INDEX IF NOT EXISTS idx_crashes_severity ON crashes(severity);
 """
+
+# Index on crash_signature is created separately after the migration guard so
+# it is safe to run against both new databases (where the column is in the
+# CREATE TABLE) and existing databases that received the column via ALTER TABLE.
+_SIGNATURE_INDEX_SQL = (
+    "CREATE INDEX IF NOT EXISTS idx_crashes_signature ON crashes(crash_signature);"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -144,8 +153,29 @@ class CrashDB:
         self._create_tables()
 
     def _create_tables(self) -> None:
-        """Create the crashes table and indexes if they don't exist."""
+        """Create the crashes table and indexes if they don't exist.
+
+        Also runs schema migrations for columns added after initial release.
+        SQLite does not support ``ADD COLUMN IF NOT EXISTS``; catching
+        ``OperationalError`` for "duplicate column name" is the standard
+        migration pattern.
+        """
         self._conn.executescript(_SCHEMA_SQL)
+        # Migration: add crash_signature column (idempotent)
+        try:
+            self._conn.execute("ALTER TABLE crashes ADD COLUMN crash_signature TEXT")
+            self._conn.commit()
+        except sqlite3.OperationalError:
+            pass  # column already exists
+        # Migration: add packet_sequence_json column (idempotent)
+        try:
+            self._conn.execute("ALTER TABLE crashes ADD COLUMN packet_sequence_json TEXT")
+            self._conn.commit()
+        except sqlite3.OperationalError:
+            pass  # column already exists
+        # Create signature index now that the column is guaranteed present.
+        # Using execute() (not executescript()) so we stay in the WAL transaction.
+        self._conn.execute(_SIGNATURE_INDEX_SQL)
         self._conn.commit()
 
     # -- Hashing ------------------------------------------------------------
@@ -154,6 +184,26 @@ class CrashDB:
     def _payload_hash(payload: bytes) -> str:
         """Compute SHA-256 hex digest for deduplication."""
         return hashlib.sha256(payload).hexdigest()
+
+    @staticmethod
+    def _compute_signature(crash_type: str, response: bytes | None) -> str:
+        """Compute a behavioral crash signature independent of payload bytes.
+
+        The signature is derived from the crash type, the first 32 bytes of
+        the response (or empty if no response), and the total response length.
+        Two crashes triggered by different payloads but producing the same
+        behavioral fingerprint will share a signature and be deduplicated.
+
+        Args:
+            crash_type: The crash type string (e.g. ``"connection_drop"``).
+            response: Optional raw response bytes from the device.
+
+        Returns:
+            SHA-256 hex digest string.
+        """
+        resp_bytes = response or b""
+        raw = crash_type.encode() + resp_bytes[:32] + str(len(resp_bytes)).encode()
+        return hashlib.sha256(raw).hexdigest()
 
     # -- Logging ------------------------------------------------------------
 
@@ -167,28 +217,36 @@ class CrashDB:
         severity: CrashSeverity | str | None = None,
         payload_description: str = "",
         response_description: str = "",
-        mutation_log: str = "",
+        mutation_log: list[str] | str = "",
         session_id: str = "",
         notes: str = "",
+        packet_sequence: list[bytes] | None = None,
     ) -> int:
         """Log a crash to the database.
 
-        Deduplicates by ``(target_addr, protocol, payload_hash)``.  If an
-        identical payload was already logged for the same target and protocol,
-        the existing crash ID is returned without inserting a duplicate.
+        Deduplicates by ``(target_addr, protocol, crash_signature)`` — a
+        behavioral fingerprint derived from crash type and response bytes.
+        Two different payloads that produce the same crash behavior are
+        treated as the same bug and the existing crash ID is returned.
 
         Args:
             target: BD_ADDR of the target device.
             protocol: Protocol name (e.g. ``"l2cap"``, ``"rfcomm"``, ``"att"``).
-            payload: Raw payload bytes that triggered the crash.
+            payload: Raw payload bytes that triggered the crash (primary packet).
             crash_type: How the crash manifested.
             response: Optional raw response bytes from the device.
             severity: Optional severity classification.
             payload_description: Human-readable description of the payload.
             response_description: Human-readable description of the response.
-            mutation_log: Description of mutations applied to reach this payload.
+            mutation_log: Mutations applied to reach this payload.  Accepts
+                either a ``list[str]`` (stored as JSON array) or a plain
+                ``str`` (stored as-is) for backward compatibility.
             session_id: Fuzzing session identifier.
             notes: Free-form notes.
+            packet_sequence: Full multi-packet sequence that drove the target
+                to the vulnerable state (including setup packets).  If
+                provided, each packet is stored as a hex string in a JSON
+                array.  Useful for reproducing state-machine crashes.
 
         Returns:
             The crash ID (integer primary key).
@@ -201,12 +259,13 @@ class CrashDB:
 
         payload_hex = payload.hex()
         p_hash = self._payload_hash(payload)
+        crash_signature = self._compute_signature(crash_type_str, response)
 
-        # Deduplication check: same target + protocol + payload hash
+        # Behavioral deduplication: same target + protocol + crash_signature
         existing = self._conn.execute(
             "SELECT id FROM crashes "
-            "WHERE target_addr = ? AND protocol = ? AND payload_hash = ?",
-            (target, protocol, p_hash),
+            "WHERE target_addr = ? AND protocol = ? AND crash_signature = ?",
+            (target, protocol, crash_signature),
         ).fetchone()
 
         if existing is not None:
@@ -214,18 +273,31 @@ class CrashDB:
 
         response_hex = response.hex() if response else None
 
+        # Serialize mutation_log: store list as JSON array, str as-is
+        if isinstance(mutation_log, list):
+            mutation_log_stored: str | None = json.dumps(mutation_log) if mutation_log else None
+        else:
+            mutation_log_stored = mutation_log or None
+
+        # Serialize packet sequence as JSON array of hex strings
+        packet_sequence_json: str | None = None
+        if packet_sequence:
+            packet_sequence_json = json.dumps([p.hex() for p in packet_sequence])
+
         cursor = self._conn.execute(
             """INSERT INTO crashes (
                 target_addr, protocol, payload_hex, payload_len,
                 payload_description, crash_type, response_hex,
                 response_description, session_id, mutation_log,
-                severity, notes, payload_hash
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                severity, notes, payload_hash,
+                crash_signature, packet_sequence_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 target, protocol, payload_hex, len(payload),
                 payload_description or None, crash_type_str, response_hex,
                 response_description or None, session_id or None,
-                mutation_log or None, severity_str, notes or None, p_hash,
+                mutation_log_stored, severity_str, notes or None, p_hash,
+                crash_signature, packet_sequence_json,
             ),
         )
         self._conn.commit()
@@ -272,10 +344,14 @@ class CrashDB:
         return [dict(row) for row in rows]
 
     def get_unique_crashes(self) -> list[dict]:
-        """Retrieve crashes deduplicated by payload_hash.
+        """Retrieve crashes deduplicated by crash_signature.
 
-        For each unique payload hash, returns the first (earliest) crash
-        record.
+        For each unique behavioral fingerprint, returns the first (earliest)
+        crash record.  Crashes that share a signature (same bug triggered by
+        different payloads) are collapsed to a single representative record.
+
+        Falls back to deduplication by ``payload_hash`` for legacy records
+        that pre-date the ``crash_signature`` column.
 
         Returns:
             List of unique crash dicts ordered by timestamp descending.
@@ -283,7 +359,8 @@ class CrashDB:
         rows = self._conn.execute(
             """SELECT * FROM crashes
                WHERE id IN (
-                   SELECT MIN(id) FROM crashes GROUP BY payload_hash
+                   SELECT MIN(id) FROM crashes
+                   GROUP BY COALESCE(crash_signature, payload_hash)
                )
                ORDER BY timestamp DESC"""
         ).fetchall()
@@ -405,9 +482,15 @@ class CrashDB:
             "SELECT COUNT(DISTINCT payload_hash) AS cnt FROM crashes"
         ).fetchone()
 
+        unique_sigs = self._conn.execute(
+            "SELECT COUNT(DISTINCT crash_signature) AS cnt FROM crashes "
+            "WHERE crash_signature IS NOT NULL"
+        ).fetchone()
+
         return {
             "total": total,
             "unique_payloads": unique["cnt"] if unique else 0,
+            "unique_signatures": unique_sigs["cnt"] if unique_sigs else 0,
             "by_protocol": by_protocol,
             "by_severity": by_severity,
             "by_type": by_type,
@@ -473,14 +556,30 @@ class CrashDB:
             warning(f"Crash ID {crash_id} not found in database")
             return False
 
-        try:
-            payload = bytes.fromhex(crash["payload_hex"])
-        except ValueError as exc:
-            warning(f"Corrupted payload hex for crash {crash_id}: {exc}")
-            return False
+        # Build the packet list to replay.  If a multi-packet sequence was
+        # stored, send each packet in order (the setup sequence matters for
+        # state-machine crashes).  Fall back to single payload otherwise.
+        packet_sequence_json = crash.get("packet_sequence_json")
+        if packet_sequence_json:
+            try:
+                packets_to_send = [bytes.fromhex(h) for h in json.loads(packet_sequence_json)]
+            except (ValueError, json.JSONDecodeError) as exc:
+                warning(f"Corrupted packet_sequence_json for crash {crash_id}: {exc}")
+                packets_to_send = None
+        else:
+            packets_to_send = None
 
-        info(f"Reproducing crash {crash_id}: {len(payload)} byte payload "
-             f"via {crash.get('protocol', 'unknown')}")
+        if packets_to_send is None:
+            try:
+                payload = bytes.fromhex(crash["payload_hex"])
+            except ValueError as exc:
+                warning(f"Corrupted payload hex for crash {crash_id}: {exc}")
+                return False
+            packets_to_send = [payload]
+
+        total_bytes = sum(len(p) for p in packets_to_send)
+        info(f"Reproducing crash {crash_id}: {len(packets_to_send)} packet(s), "
+             f"{total_bytes} total bytes via {crash.get('protocol', 'unknown')}")
 
         try:
             if not transport.connect():
@@ -492,8 +591,11 @@ class CrashDB:
                 warning(f"Crash {crash_id}: connect failed but device is alive")
                 return False
 
-            sent = transport.send(payload)
-            info(f"Crash {crash_id}: sent {sent} bytes, waiting for response")
+            total_sent = 0
+            for pkt in packets_to_send:
+                sent = transport.send(pkt)
+                total_sent += sent
+            info(f"Crash {crash_id}: sent {total_sent} bytes ({len(packets_to_send)} packet(s)), waiting for response")
             response = transport.recv(recv_timeout=recv_timeout)
 
             if response is None:
@@ -540,7 +642,7 @@ class CrashDB:
     def __enter__(self) -> CrashDB:
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+    def __exit__(self, _exc_type, _exc_val, _exc_tb) -> None:
         self.close()
 
     def __repr__(self) -> str:

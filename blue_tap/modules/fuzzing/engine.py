@@ -31,10 +31,9 @@ import traceback
 logger = logging.getLogger(__name__)
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
+from collections.abc import Generator
 from typing import Any
 
-from rich.table import Table
-from rich.style import Style
 
 from blue_tap.utils.output import (
     console,
@@ -44,6 +43,8 @@ from blue_tap.utils.output import (
     warning,
     section,
     summary_panel,
+    bare_table,
+    print_table,
     CYAN,
     GREEN,
     YELLOW,
@@ -294,21 +295,30 @@ class _TargetedStrategyAdapter:
 
     def __init__(self) -> None:
         self._inner = TargetedStrategy()
-        self._iter = self._inner.generate_all()
+        self._protocol_iters: dict[str, Generator] = {}
+
+    def _get_iter(self, protocol: str) -> Generator:
+        if protocol not in self._protocol_iters:
+            self._protocol_iters[protocol] = self._inner.generate_all(protocol=protocol)
+        return self._protocol_iters[protocol]
 
     def generate(self, protocol: str) -> tuple[bytes | list[bytes], list[str]]:
+        it = self._get_iter(protocol)
         try:
-            payload, description = next(self._iter)
+            payload, description = next(it)
             return payload, [description]
         except StopIteration:
-            # Restart from the beginning
-            self._iter = self._inner.generate_all()
-            payload, description = next(self._iter)
-            return payload, [description]
+            self._protocol_iters[protocol] = self._inner.generate_all(protocol=protocol)
+            it = self._protocol_iters[protocol]
+            try:
+                payload, description = next(it)
+                return payload, [description]
+            except StopIteration:
+                raise ValueError(f"No targeted payloads for protocol {protocol!r}")
 
     def feedback(self, protocol: str, payload: bytes,
                  response: bytes | None, crash: bool = False) -> None:
-        pass  # Targeted strategy replays known patterns — no learning
+        pass
 
 
 
@@ -601,7 +611,7 @@ class FuzzCampaign:
                 if anomaly.score >= 9.0:
                     # Very high score — log as potential crash/leak for investigation
                     self._handle_crash(
-                        "unexpected_response", protocol, payload, mutation_log,
+                        "unexpected_response", protocol, [payload], mutation_log,
                     )
                     return  # Don't double-count (crash handler bumps anomaly weight)
                 elif anomaly.score >= 5.0:
@@ -619,6 +629,8 @@ class FuzzCampaign:
                 for log_entry in mutation_log:
                     if ":" in log_entry:
                         field_name = log_entry.split(":")[0].strip()
+                        if not field_name:
+                            continue
                         for anomaly in anomalies:
                             if anomaly.score >= 5.0:
                                 try:
@@ -645,8 +657,8 @@ class FuzzCampaign:
                         payload,
                         name=f"interesting_{self.stats.iterations}",
                     )
-                except (OSError, AttributeError):
-                    pass
+                except (OSError, AttributeError) as exc:
+                    logger.warning("Failed to add interesting seed to corpus: %s", exc)
 
     # ------------------------------------------------------------------
     # Crash handling
@@ -656,7 +668,7 @@ class FuzzCampaign:
         self,
         crash_type: str,
         protocol: str,
-        payload: bytes,
+        packets: list[bytes] | bytes,
         mutation_log: list[str],
     ) -> None:
         """Handle a detected crash: log, cooldown, verify target health.
@@ -665,9 +677,19 @@ class FuzzCampaign:
             crash_type: Type of crash (``connection_drop``, ``timeout``,
                 ``device_disappeared``, ``unexpected_response``).
             protocol: Protocol that was being fuzzed when crash occurred.
-            payload: The fuzz payload that triggered the crash.
+            packets: The full multi-packet sequence that triggered the crash
+                (or a single ``bytes`` payload for backward compatibility).
+                The last packet is treated as the primary fuzz payload;
+                all packets are stored for state-machine crash reproduction.
             mutation_log: Mutations applied to produce the payload.
         """
+        # Normalize to list so all paths see the same type.
+        if isinstance(packets, (bytes, bytearray)):
+            pkt_list = [bytes(packets)]
+        else:
+            pkt_list = list(packets)
+        primary_payload = pkt_list[-1] if pkt_list else b""
+
         severity = CRASH_SEVERITY.get(crash_type, "MEDIUM")
         self.stats.crashes += 1
 
@@ -686,10 +708,11 @@ class FuzzCampaign:
             self.crash_db.log_crash(
                 self.target,
                 protocol,
-                payload,
+                primary_payload,
                 crash_type,
                 severity=severity,
-                mutation_log="\n".join(mutation_log),
+                mutation_log=mutation_log,
+                packet_sequence=pkt_list if len(pkt_list) > 1 else None,
             )
         except Exception as exc:
             error(f"Failed to log crash: {exc}")
@@ -700,17 +723,17 @@ class FuzzCampaign:
         try:
             self.corpus.add_seed(
                 protocol,
-                payload,
+                primary_payload,
                 name=f"crash_{self.stats.crashes}",
             )
-        except (OSError, AttributeError):
-            pass
+        except (OSError, AttributeError) as exc:
+            logger.warning("Failed to add crash seed to corpus: %s", exc)
 
         # Bump anomaly weight so this seed is sampled more often going forward.
         try:
-            self.corpus.record_anomaly(protocol, payload)
-        except (OSError, AttributeError):
-            pass
+            self.corpus.record_anomaly(protocol, primary_payload)
+        except (OSError, AttributeError) as exc:
+            logger.warning("Failed to record anomaly weight: %s", exc)
 
         # Feed crash info to field weight tracker
         if self._field_tracker is not None:
@@ -726,14 +749,14 @@ class FuzzCampaign:
         # FuzzStrategy ABC guarantees feedback() exists — no hasattr needed.
         if self._strategy_obj is not None:
             try:
-                self._strategy_obj.feedback(protocol, payload, None, crash=True)
+                self._strategy_obj.feedback(protocol, primary_payload, None, crash=True)
             except Exception as exc:
                 logger.debug("Strategy crash feedback error: %s", exc)
 
         crash_num = self.stats.crashes
         emit_cli_event(
             event_type="execution_result",
-            module="fuzz",
+            module="fuzzing",
             run_id=self.run_id,
             target=self.target,
             message=f"Crash detected: {crash_type} ({severity}) on {protocol}",
@@ -741,7 +764,7 @@ class FuzzCampaign:
                 "crash_type": crash_type,
                 "severity": severity,
                 "protocol": protocol,
-                "payload_size": len(payload),
+                "payload_size": len(primary_payload),
             },
             echo=False,
         )
@@ -750,12 +773,13 @@ class FuzzCampaign:
             f"type=[bt.yellow]{crash_type}[/bt.yellow] "
             f"severity=[bt.yellow]{severity}[/bt.yellow] "
             f"protocol=[bt.cyan]{protocol}[/bt.cyan] "
-            f"payload_size={len(payload)}"
+            f"payload_size={len(primary_payload)} "
+            f"packets={len(pkt_list)}"
         )
 
         emit_cli_event(
             event_type="recovery_wait_started",
-            module="fuzz",
+            module="fuzzing",
             run_id=self.run_id,
             target=self.target,
             message=f"Recovery wait: {self.cooldown:.0f}s cooldown after {crash_type}",
@@ -764,12 +788,16 @@ class FuzzCampaign:
         )
         # Cooldown: wait for target recovery
         info(f"Cooling down {self.cooldown:.0f}s for target recovery...")
-        time.sleep(self.cooldown)
+        self._interruptible_sleep(self.cooldown)
+        if not self._running:
+            return
 
         # Verify target is still alive
         if not _check_target_alive(self.target):
             warning("Target not responding after cooldown. Extending wait...")
-            time.sleep(TARGET_DEAD_TIMEOUT)
+            self._interruptible_sleep(TARGET_DEAD_TIMEOUT)
+            if not self._running:
+                return
             if not _check_target_alive(self.target):
                 error("Target appears permanently down. Stopping campaign.")
                 self._running = False
@@ -777,7 +805,7 @@ class FuzzCampaign:
 
         emit_cli_event(
             event_type="recovery_wait_finished",
-            module="fuzz",
+            module="fuzzing",
             run_id=self.run_id,
             target=self.target,
             message=f"Target recovered after {crash_type} crash",
@@ -792,6 +820,12 @@ class FuzzCampaign:
             except Exception:
                 pass
             self.stats.reconnects += 1
+
+    def _interruptible_sleep(self, seconds: float) -> None:
+        """Sleep in 0.5s increments, checking ``_running`` between each."""
+        end = time.time() + seconds
+        while time.time() < end and self._running:
+            time.sleep(min(0.5, end - time.time()))
 
     # ------------------------------------------------------------------
     # Loop control
@@ -887,7 +921,7 @@ class FuzzCampaign:
         success("Target is alive.")
         emit_cli_event(
             event_type="run_started",
-            module="fuzz",
+            module="fuzzing",
             run_id=self.run_id,
             target=self.target,
             message=f"Fuzz campaign started: {len(self.protocols)} protocol(s), strategy={self.strategy}",
@@ -933,7 +967,7 @@ class FuzzCampaign:
         if self._analyzer is not None:
             emit_cli_event(
                 event_type="phase_started",
-                module="fuzz",
+                module="fuzzing",
                 run_id=self.run_id,
                 target=self.target,
                 message="Learning baseline response behavior",
@@ -968,7 +1002,7 @@ class FuzzCampaign:
         # Main fuzzing loop
         emit_cli_event(
             event_type="phase_started",
-            module="fuzz",
+            module="fuzzing",
             run_id=self.run_id,
             target=self.target,
             message="Main fuzzing loop started",
@@ -982,7 +1016,7 @@ class FuzzCampaign:
                 if protocol != _last_event_protocol:
                     emit_cli_event(
                         event_type="execution_started",
-                        module="fuzz",
+                        module="fuzzing",
                         run_id=self.run_id,
                         target=self.target,
                         message=f"Fuzzing protocol: {protocol}",
@@ -1021,7 +1055,9 @@ class FuzzCampaign:
 
                     response = None
                     t0 = time.time()
-                    for pkt in packets:
+                    for i, pkt in enumerate(packets):
+                        if i == len(packets) - 1:
+                            t0 = time.time()
                         transport.send(pkt)
                         self.stats.packets_sent += 1
                         self.stats.protocol_breakdown[protocol] = (
@@ -1059,7 +1095,7 @@ class FuzzCampaign:
                                 if health.value in ("rebooted", "zombie", "degraded", "unreachable"):
                                     emit_cli_event(
                                         event_type="recovery_wait_started",
-                                        module="fuzz",
+                                        module="fuzzing",
                                         run_id=self.run_id,
                                         target=self.target,
                                         message=f"Target health: {health.value}",
@@ -1071,21 +1107,21 @@ class FuzzCampaign:
                                 if health.value in ("rebooted", "zombie"):
                                     for payload, confidence in self._health_monitor.get_crash_candidates():
                                         self._handle_crash(
-                                            "device_disappeared", protocol, payload,
+                                            "device_disappeared", protocol, [payload],
                                             [f"reboot_candidate(conf={confidence:.1f})"],
                                         )
                             except Exception as exc:
                                 logger.debug("Health monitor error: %s", exc)
 
                 except ConnectionResetError:
-                    self._handle_crash("connection_drop", protocol, fuzz_case, mutation_log)
+                    self._handle_crash("connection_drop", protocol, packets, mutation_log)
                 except BrokenPipeError:
-                    self._handle_crash("connection_drop", protocol, fuzz_case, mutation_log)
+                    self._handle_crash("connection_drop", protocol, packets, mutation_log)
                 except TimeoutError:
-                    self._handle_crash("timeout", protocol, fuzz_case, mutation_log)
+                    self._handle_crash("timeout", protocol, packets, mutation_log)
                 except OSError as exc:
                     if "Host is down" in str(exc) or "No route" in str(exc):
-                        self._handle_crash("device_disappeared", protocol, fuzz_case, mutation_log)
+                        self._handle_crash("device_disappeared", protocol, packets, mutation_log)
                     else:
                         self.stats.errors += 1
 
@@ -1104,7 +1140,7 @@ class FuzzCampaign:
             error(f"Campaign terminated with unexpected error: {exc}\n{traceback.format_exc()}")
             emit_cli_event(
                 event_type="run_error",
-                module="fuzz",
+                module="fuzzing",
                 run_id=self.run_id,
                 target=self.target,
                 message=f"Campaign error: {exc}",
@@ -1172,7 +1208,7 @@ class FuzzCampaign:
             if error_text is not None:
                 emit_cli_event(
                     event_type="run_error",
-                    module="fuzz",
+                    module="fuzzing",
                     run_id=self.run_id,
                     target=self.target,
                     message=message,
@@ -1181,7 +1217,7 @@ class FuzzCampaign:
                 )
             emit_cli_event(
                 event_type="run_completed",
-                module="fuzz",
+                module="fuzzing",
                 run_id=self.run_id,
                 target=self.target,
                 message=message,
@@ -1194,7 +1230,7 @@ class FuzzCampaign:
 
         emit_cli_event(
             event_type="run_started",
-            module="fuzz",
+            module="fuzzing",
             run_id=self.run_id,
             target=self.target,
             message=f"Single-protocol fuzz: {protocol}, {len(cases)} cases",
@@ -1227,8 +1263,6 @@ class FuzzCampaign:
                 error_text=str(exc),
             )
 
-        t0 = start_epoch
-
         for i, payload in enumerate(cases):
             try:
                 if not transport.connected:
@@ -1236,6 +1270,7 @@ class FuzzCampaign:
                         errors += 1
                         continue
 
+                t_iter = time.time()
                 transport.send(payload)
                 sent += 1
 
@@ -1243,18 +1278,19 @@ class FuzzCampaign:
                     self._protocol_stats[protocol].packets_sent += 1
 
                 response = transport.recv(recv_timeout=recv_timeout) if hasattr(transport, 'recv') else None
+                latency_ms = (time.time() - t_iter) * 1000
 
-                # Response analysis if available
-                if self._analyzer is not None and response is not None:
-                    latency_ms = (time.time() - t0) * 1000 / max(sent, 1)
-                    try:
-                        self._analyzer.analyze(protocol, payload, response, latency_ms)
-                    except Exception:
-                        logger.debug("Response analysis failed for %s", protocol, exc_info=True)
+                # Route through the full response-analysis pipeline so anomalies
+                # and novel responses feed crash handling, corpus updates, and
+                # field-weight tracking — not just the analyzer in isolation.
+                try:
+                    self._analyze_response(protocol, payload, response, [f"case_{i+1}"], latency_ms)
+                except Exception:
+                    logger.debug("Response analysis failed for %s", protocol, exc_info=True)
 
             except (ConnectionResetError, BrokenPipeError):
                 crashes += 1
-                self._handle_crash("connection_drop", protocol, payload, [f"case_{i+1}"])
+                self._handle_crash("connection_drop", protocol, [payload], [f"case_{i+1}"])
                 transport.close()
                 time.sleep(2.0)
                 try:
@@ -1267,11 +1303,11 @@ class FuzzCampaign:
                     break
             except TimeoutError:
                 crashes += 1
-                self._handle_crash("timeout", protocol, payload, [f"case_{i+1}"])
+                self._handle_crash("timeout", protocol, [payload], [f"case_{i+1}"])
             except OSError as exc:
                 if "Host is down" in str(exc) or "No route" in str(exc):
                     crashes += 1
-                    self._handle_crash("device_disappeared", protocol, payload, [f"case_{i+1}"])
+                    self._handle_crash("device_disappeared", protocol, [payload], [f"case_{i+1}"])
                 else:
                     errors += 1
 
@@ -1379,14 +1415,9 @@ class FuzzCampaign:
 
     def _print_stats(self) -> None:
         """Print a Rich table with current campaign statistics."""
-        table = Table(
-            title=f"[bold {RED}]Fuzz Campaign Status[/bold {RED}]",
-            show_lines=False,
-            border_style=DIM,
-            header_style=Style(bold=True, color=CYAN),
-            title_style=Style(bold=True, color=RED),
-        )
-        table.add_column("Metric", style="bold white", min_width=18)
+        table = bare_table()
+        table.title = "[bold]Fuzz Campaign Status[/bold]"
+        table.add_column("Metric", style="bt.dim", min_width=18)
         table.add_column("Value", min_width=16)
 
         table.add_row("Runtime", f"[{CYAN}]{_format_duration(self.stats.runtime_seconds)}[/{CYAN}]")
@@ -1414,9 +1445,7 @@ class FuzzCampaign:
             f"[{RED}]{self.crash_db.crash_count()}[/{RED}]",
         )
 
-        console.print()
-        console.print(table)
-        console.print()
+        print_table(table)
 
     def _print_final_summary(self) -> None:
         """Print a detailed final summary with per-protocol breakdown and crash list."""
@@ -1437,13 +1466,9 @@ class FuzzCampaign:
 
         # Per-protocol breakdown
         if self.stats.protocol_breakdown:
-            proto_table = Table(
-                title=f"[bold {CYAN}]Per-Protocol Breakdown[/bold {CYAN}]",
-                show_lines=False,
-                border_style=DIM,
-                header_style=Style(bold=True, color=CYAN),
-            )
-            proto_table.add_column("Protocol", style=f"bold {PURPLE}", min_width=16)
+            proto_table = bare_table()
+            proto_table.title = "[bold]Per-Protocol Breakdown[/bold]"
+            proto_table.add_column("Protocol", style="bt.purple", min_width=16)
             proto_table.add_column("Packets", justify="right", min_width=10)
             proto_table.add_column("% of Total", justify="right", min_width=10)
 
@@ -1455,7 +1480,7 @@ class FuzzCampaign:
             ):
                 pct = (count / total) * 100
                 proto_table.add_row(proto, f"{count:,}", f"{pct:.1f}%")
-            console.print(proto_table)
+            print_table(proto_table)
 
         # Crash listing
         crash_count = self.crash_db.crash_count()
@@ -1464,18 +1489,14 @@ class FuzzCampaign:
             info(f"[bt.red]{crash_count} crash(es)[/bt.red] logged to: {self._fuzz_dir}")
             try:
                 crashes = self.crash_db.get_crashes()
-                crash_table = Table(
-                    title=f"[bold {RED}]Crashes[/bold {RED}]",
-                    show_lines=True,
-                    border_style=DIM,
-                    header_style=Style(bold=True, color=RED),
-                )
-                crash_table.add_column("#", style=DIM, width=4, justify="right")
-                crash_table.add_column("Type", style=f"bold {YELLOW}", min_width=18)
+                crash_table = bare_table()
+                crash_table.title = "[bold]Crashes[/bold]"
+                crash_table.add_column("#", style="bt.dim", width=4, justify="right")
+                crash_table.add_column("Type", style="bt.yellow", min_width=18)
                 crash_table.add_column("Severity", min_width=10)
-                crash_table.add_column("Protocol", style=PURPLE, min_width=12)
+                crash_table.add_column("Protocol", style="bt.purple", min_width=12)
                 crash_table.add_column("Payload Size", justify="right", min_width=10)
-                crash_table.add_column("Timestamp", style=DIM, min_width=20)
+                crash_table.add_column("Timestamp", style="bt.dim", min_width=20)
 
                 sev_styles = {
                     "CRITICAL": f"bold {RED}",
@@ -1496,7 +1517,7 @@ class FuzzCampaign:
                         crash.get("timestamp", ""),
                     )
 
-                console.print(crash_table)
+                print_table(crash_table)
                 if crash_count > 20:
                     info(f"... and {crash_count - 20} more. See {self._fuzz_dir}")
             except Exception:
@@ -1512,7 +1533,7 @@ class FuzzCampaign:
         """Clean up transports, save state, print summary, log to session."""
         emit_cli_event(
             event_type="run_completed",
-            module="fuzz",
+            module="fuzzing",
             run_id=self.run_id,
             target=self.target,
             message=f"Fuzz campaign completed: {self.stats.iterations:,} iterations, {self.stats.crashes} crashes",
@@ -1541,7 +1562,7 @@ class FuzzCampaign:
                 json.dump(self._build_summary(), f, indent=2, default=str)
             emit_cli_event(
                 event_type="artifact_saved",
-                module="fuzz",
+                module="fuzzing",
                 run_id=self.run_id,
                 target=self.target,
                 message=f"Campaign stats saved: {stats_path}",
@@ -1780,17 +1801,17 @@ class FuzzCampaign:
             try:
                 campaign._state_tracker = StateTracker.from_dict(state["state_tracker"])
             except Exception as exc:
-                logger.debug("State tracker restore failed: %s", exc)
+                logger.warning("State tracker restore failed: %s", exc)
         if _HAS_FIELD_WEIGHTS and "field_tracker" in state:
             try:
                 campaign._field_tracker = FieldWeightTracker.from_dict(state["field_tracker"])
             except Exception as exc:
-                logger.debug("Field tracker restore failed: %s", exc)
+                logger.warning("Field tracker restore failed: %s", exc)
         if _HAS_HEALTH_MONITOR and "health_monitor" in state:
             try:
                 campaign._health_monitor = TargetHealthMonitor.from_dict(state["health_monitor"])
             except Exception as exc:
-                logger.debug("Health monitor restore failed: %s", exc)
+                logger.warning("Health monitor restore failed: %s", exc)
         # Restore CoverageGuidedStrategy from serialised snapshot, then reload interesting inputs
         if _HAS_STRATEGIES and "strategy_state" in state:
             try:
@@ -1834,7 +1855,7 @@ class FuzzCampaign:
     # Signal handling
     # ------------------------------------------------------------------
 
-    def _handle_interrupt(self, signum: int, frame: Any) -> None:
+    def _handle_interrupt(self, _signum: int, _frame: Any) -> None:
         """Handle SIGINT (Ctrl+C) for graceful campaign shutdown.
 
         Sets the running flag to False so the main loop exits cleanly.
@@ -1844,7 +1865,7 @@ class FuzzCampaign:
         self._running = False
         emit_cli_event(
             event_type="run_aborted",
-            module="fuzz",
+            module="fuzzing",
             run_id=self.run_id,
             target=self.target,
             message="Fuzz campaign aborted by operator (SIGINT)",

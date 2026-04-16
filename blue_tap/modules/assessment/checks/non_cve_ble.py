@@ -264,3 +264,76 @@ def check_eatt_support(address: str, l2cap_timeout: float) -> list[dict]:
     except OSError:
         return findings
     return findings
+
+
+# ---------------------------------------------------------------------------
+# Native Module classes
+# ---------------------------------------------------------------------------
+
+from typing import Any
+
+from blue_tap.framework.module import Module, RunContext
+from blue_tap.framework.module.options import OptAddress, OptFloat, OptString
+from blue_tap.modules.assessment.base import CveCheckModule
+
+
+class PairingMethodModule(CveCheckModule):
+    """Pairing method posture assessment."""
+
+    module_id = "assessment.pairing_method"
+    name = "Pairing Method Posture"
+    description = "Assess pairing method; Just Works allows interposition attacks"
+    protocols = ("Classic", "BLE", "SMP")
+    requires = ("adapter",)
+    destructive = False
+    category = "posture"
+    references = ()
+    options = (
+        OptAddress("RHOST", required=True, description="Target address"),
+        OptString("HCI", default="", description="Local HCI adapter"),
+    )
+
+    check_fn = staticmethod(check_pairing_method)
+    option_param_map = {"RHOST": "address", "HCI": "hci"}
+
+
+class WritableGattModule(CveCheckModule):
+    """Writable GATT surface exposure assessment."""
+
+    module_id = "assessment.writable_gatt"
+    name = "Writable GATT Surface"
+    description = "Enumerate writable GATT characteristics accessible without bonding"
+    protocols = ("BLE", "GATT")
+    requires = ("ble_target",)
+    destructive = False
+    category = "exposure"
+    references = ()
+    options = (OptAddress("RHOST", required=True, description="Target BLE address"),)
+
+    check_fn = staticmethod(check_writable_gatt)
+    option_param_map = {"RHOST": "address"}
+
+
+class EattSupportModule(CveCheckModule):
+    """EATT capability assessment."""
+
+    module_id = "assessment.eatt_support"
+    name = "EATT Capability"
+    description = "Probe for EATT bearer support and assess associated attack surface"
+    protocols = ("BLE", "EATT", "L2CAP")
+    requires = ("ble_target",)
+    destructive = False
+    category = "posture"
+    references = ()
+    options = (
+        OptAddress("RHOST", required=True, description="Target BLE address"),
+        OptFloat("L2CAP_TIMEOUT", default=5.0, description="L2CAP connection timeout"),
+    )
+
+    check_fn = staticmethod(check_eatt_support)
+
+    def _execute_check(self, ctx: Any) -> list[dict]:
+        """Execute check with timeout parameter."""
+        target = ctx.options.get("RHOST", "")
+        timeout = ctx.options.get("L2CAP_TIMEOUT", 5.0)
+        return check_eatt_support(target, timeout)

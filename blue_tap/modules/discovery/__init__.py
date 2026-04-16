@@ -1,29 +1,9 @@
-"""Target discovery and inventory collection."""
+"""Target discovery and inventory collection.
 
-from blue_tap.framework.registry import ModuleDescriptor, ModuleFamily, get_registry
+The native ``ScannerModule`` lives in ``scanner.py`` next to its hardware
+call path. Importing it here triggers Module auto-registration. There is
+no separate ``discovery/modules/`` wrapper package — that layer was
+collapsed on 2026-04-12.
+"""
 
-_registry = get_registry()
-
-
-def _register_once(descriptor: ModuleDescriptor) -> None:
-    try:
-        _registry.get(descriptor.module_id)
-    except KeyError:
-        _registry.register(descriptor)
-
-
-_register_once(
-    ModuleDescriptor(
-        module_id="discovery.scanner",
-        family=ModuleFamily.DISCOVERY,
-        name="Bluetooth Scanner",
-        description="Discover nearby Classic and BLE devices via HCI inquiry and LE scan",
-        protocols=("Classic", "BLE"),
-        requires=("adapter",),
-        destructive=False,
-        requires_pairing=False,
-        schema_prefix="blue_tap.scan.result",
-        has_report_adapter=True,
-        entry_point="blue_tap.hardware.scanner:BluetoothScanner",
-    )
-)
+from blue_tap.modules.discovery import scanner  # noqa: F401

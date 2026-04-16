@@ -277,26 +277,7 @@ class Corpus:
         return removed
 
     # ------------------------------------------------------------------
-    # Built-in seed generation
-    # ------------------------------------------------------------------
-
-    def generate_builtin_seeds(self, protocol: str) -> list[bytes]:
-        """Generate seeds for *protocol* using the real protocol builders.
-
-        Delegates to :func:`generate_full_corpus` which uses the actual
-        protocol-aware packet construction libraries from
-        ``blue_tap.modules.fuzzing.protocols.*``.  This method is a convenience wrapper
-        for single-protocol generation.
-
-        Returns:
-            List of seed bytes generated and added to the corpus.
-        """
-        results = generate_full_corpus(self, protocols=[protocol], show_progress=False)
-        count = results.get(protocol, 0)
-        return self.get_all_seeds(protocol) if count > 0 else []
-
-    # Placeholder seed generators removed — all seed generation now uses
-    # the real protocol builders via generate_full_corpus().
+    # All seed generation uses the real protocol builders via generate_full_corpus().
 
 
 # ---------------------------------------------------------------------------

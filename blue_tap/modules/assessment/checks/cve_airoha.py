@@ -354,3 +354,67 @@ def _check_airoha_race_link_key(address: str) -> list[dict]:
         cve="CVE-2025-20702", status="inconclusive", confidence="medium",
         evidence=evidence,
     )]
+
+
+# ---------------------------------------------------------------------------
+# Native Module classes
+# ---------------------------------------------------------------------------
+
+from typing import Any
+
+from blue_tap.framework.module import Module, RunContext
+from blue_tap.framework.module.options import OptAddress
+from blue_tap.modules.assessment.base import CveCheckModule, ServiceDiscoveryMixin
+
+
+class Cve202520700Module(CveCheckModule):
+    """CVE-2025-20700: Airoha RACE BLE unauthenticated access."""
+
+    module_id = "assessment.cve_2025_20700"
+    name = "Airoha RACE GATT"
+    description = "CVE-2025-20700: Airoha RACE GATT unauthenticated BLE access"
+    protocols = ("BLE", "GATT")
+    requires = ("ble_target",)
+    destructive = False
+    references = ("CVE-2025-20700",)
+    options = (OptAddress("RHOST", required=True, description="Target BLE address"),)
+
+    check_fn = staticmethod(_check_airoha_race_gatt)
+    option_param_map = {"RHOST": "address"}
+
+
+class Cve202520701Module(CveCheckModule, ServiceDiscoveryMixin):
+    """CVE-2025-20701: Airoha RACE BR/EDR unauthenticated RFCOMM."""
+
+    module_id = "assessment.cve_2025_20701"
+    name = "Airoha RACE BR/EDR"
+    description = "CVE-2025-20701: Airoha RACE BR/EDR unauthenticated RFCOMM access"
+    protocols = ("Classic", "RFCOMM")
+    requires = ("classic_target",)
+    destructive = False
+    references = ("CVE-2025-20701",)
+    options = (OptAddress("RHOST", required=True, description="Target BR/EDR address"),)
+
+    check_fn = staticmethod(_check_airoha_race_bredr)
+
+    def _execute_check(self, ctx: Any) -> list[dict]:
+        """Execute check with service discovery."""
+        target = ctx.options.get("RHOST", "")
+        services = self._get_services(ctx)
+        return _check_airoha_race_bredr(target, services)
+
+
+class Cve202520702Module(CveCheckModule):
+    """CVE-2025-20702: Airoha RACE link key extraction."""
+
+    module_id = "assessment.cve_2025_20702"
+    name = "Airoha RACE Link Key"
+    description = "CVE-2025-20702: Airoha RACE link key extraction via flash read"
+    protocols = ("Classic", "BLE")
+    requires = ("classic_target",)
+    destructive = False
+    references = ("CVE-2025-20702",)
+    options = (OptAddress("RHOST", required=True, description="Target address"),)
+
+    check_fn = staticmethod(_check_airoha_race_link_key)
+    option_param_map = {"RHOST": "address"}

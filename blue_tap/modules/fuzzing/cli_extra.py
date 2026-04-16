@@ -26,12 +26,10 @@ from rich.progress import (
     TimeElapsedColumn,
     TaskProgressColumn,
 )
-from rich.style import Style
-from rich.table import Table
 
 from blue_tap.utils.output import (
     console, info, success, error, warning, verbose, target as style_target,
-    summary_panel, section, phase,
+    summary_panel, section, phase, bare_table, print_table,
     CYAN, GREEN, RED, YELLOW, DIM, PURPLE,
 )
 from blue_tap.utils.interactive import resolve_address
@@ -1092,17 +1090,13 @@ def register_extra_commands(fuzz_group):
         # --list: show table of supported CVEs
         if list_cves:
             cve_list = strategy.list_cves()
-            table = Table(
-                title=f"[bold {CYAN}]Supported CVEs[/bold {CYAN}]",
-                show_lines=True,
-                border_style=DIM,
-                header_style=Style(bold=True, color=CYAN),
-            )
-            table.add_column("CVE ID", style=YELLOW, width=22)
-            table.add_column("Name", style="bold white", max_width=35)
-            table.add_column("Year", style=DIM, width=6, justify="right")
-            table.add_column("Protocol", style=CYAN, width=10)
-            table.add_column("Layer", style=DIM, width=16)
+            table = bare_table()
+            table.title = "[bold]Supported CVEs[/bold]"
+            table.add_column("CVE ID", style="bt.yellow", width=22)
+            table.add_column("Name", max_width=35)
+            table.add_column("Year", style="bt.dim", width=6, justify="right")
+            table.add_column("Protocol", style="bt.cyan", width=10)
+            table.add_column("Layer", width=16)
             table.add_column("Severity", width=10)
 
             sev_styles = {
@@ -1125,9 +1119,7 @@ def register_extra_commands(fuzz_group):
                     sev_display,
                 )
 
-            console.print()
-            console.print(table)
-            console.print()
+            print_table(table)
             info(f"Total: {len(cve_list)} supported CVE patterns")
             return
 
@@ -1227,7 +1219,7 @@ def register_extra_commands(fuzz_group):
         run_id = make_fuzz_run_id()
         emit_cli_event(
             event_type="run_started",
-            module="fuzz",
+            module="fuzzing",
             run_id=run_id,
             target=target,
             message=f"Starting pcap replay: {capture_file} → {target}",
@@ -1270,18 +1262,14 @@ def register_extra_commands(fuzz_group):
                     warning(f"No frames match protocol filter: {protocol}")
                     return
 
-                table = Table(
-                    title=f"[bold {CYAN}]Capture Frames[/bold {CYAN}]",
-                    show_lines=False,
-                    border_style=DIM,
-                    header_style=Style(bold=True, color=CYAN),
-                )
-                table.add_column("#", style=DIM, width=6, justify="right")
-                table.add_column("Dir", style=YELLOW, width=10)
-                table.add_column("Protocol", style=CYAN, width=18)
-                table.add_column("CID", style=DIM, width=8)
-                table.add_column("Handle", style=DIM, width=8)
-                table.add_column("Size", style=GREEN, width=8, justify="right")
+                table = bare_table()
+                table.title = "[bold]Capture Frames[/bold]"
+                table.add_column("#", style="bt.dim", width=6, justify="right")
+                table.add_column("Dir", style="bt.yellow", width=10)
+                table.add_column("Protocol", style="bt.cyan", width=18)
+                table.add_column("CID", style="bt.dim", width=8)
+                table.add_column("Handle", style="bt.dim", width=8)
+                table.add_column("Size", style="bt.green", width=8, justify="right")
 
                 for f in frame_list:
                     dir_style = GREEN if f["direction"] == "sent" else YELLOW
@@ -1294,9 +1282,7 @@ def register_extra_commands(fuzz_group):
                         f"{f['size']}B",
                     )
 
-                console.print()
-                console.print(table)
-                console.print()
+                print_table(table)
                 info(f"Showing {len(frame_list)} frames")
                 return
 
@@ -1339,7 +1325,7 @@ def register_extra_commands(fuzz_group):
 
         emit_cli_event(
             event_type="execution_result",
-            module="fuzz",
+            module="fuzzing",
             run_id=run_id,
             target=target,
             message=(
@@ -1358,7 +1344,7 @@ def register_extra_commands(fuzz_group):
         )
         emit_cli_event(
             event_type="run_completed",
-            module="fuzz",
+            module="fuzzing",
             run_id=run_id,
             target=target,
             message=f"Pcap replay complete: {capture_file}",
@@ -1494,7 +1480,7 @@ def register_extra_commands(fuzz_group):
         run_id = make_fuzz_run_id()
         emit_cli_event(
             event_type="run_started",
-            module="fuzz",
+            module="fuzzing",
             run_id=run_id,
             target=target,
             message=f"Starting crash minimization for crash_id={crash_id} protocol={protocol}",
@@ -1557,7 +1543,7 @@ def register_extra_commands(fuzz_group):
 
             emit_cli_event(
                 event_type="phase_started",
-                module="fuzz",
+                module="fuzzing",
                 run_id=run_id,
                 target=target,
                 message=f"Running {strategy} reduction strategy on crash_id={crash_id}",
@@ -1595,7 +1581,7 @@ def register_extra_commands(fuzz_group):
 
         emit_cli_event(
             event_type="execution_result",
-            module="fuzz",
+            module="fuzzing",
             run_id=run_id,
             target=target,
             message=(
@@ -1615,7 +1601,7 @@ def register_extra_commands(fuzz_group):
         )
         emit_cli_event(
             event_type="run_completed",
-            module="fuzz",
+            module="fuzzing",
             run_id=run_id,
             target=target,
             message=f"Crash minimization complete for crash_id={crash_id}",
@@ -1776,7 +1762,7 @@ def register_extra_commands(fuzz_group):
 
         emit_cli_event(
             event_type="run_started",
-            module="fuzz",
+            module="fuzzing",
             run_id=run_id,
             message=f"Generating corpus for protocol={protocol}",
             details={"protocol": protocol, "corpus_dir": corpus_dir},
@@ -1786,15 +1772,11 @@ def register_extra_commands(fuzz_group):
             short_names = _ALL_PROTOCOLS if protocol == "all" else [protocol]
             protocols = _expand_protocol_names(short_names)
 
-            table = Table(
-                title=f"[bold {CYAN}]Seed Corpus Generation[/bold {CYAN}]",
-                show_lines=True,
-                border_style=DIM,
-                header_style=Style(bold=True, color=CYAN),
-            )
-            table.add_column("Protocol", style=CYAN, width=12)
-            table.add_column("Seeds", style=YELLOW, justify="right", width=10)
-            table.add_column("Bytes", style=DIM, justify="right", width=12)
+            table = bare_table()
+            table.title = "[bold]Seed Corpus Generation[/bold]"
+            table.add_column("Protocol", style="bt.cyan", width=12)
+            table.add_column("Seeds", style="bt.yellow", justify="right", width=10)
+            table.add_column("Bytes", style="bt.dim", justify="right", width=12)
 
             total_seeds = 0
             total_bytes = 0
@@ -1821,22 +1803,20 @@ def register_extra_commands(fuzz_group):
                 f"[bold]{_format_bytes(total_bytes)}[/bold]",
             )
 
-            console.print()
-            console.print(table)
-            console.print()
+            print_table(table)
 
         success(f"Generated {total_seeds} seeds in {corpus_dir}")
 
         emit_cli_event(
             event_type="artifact_saved",
-            module="fuzz",
+            module="fuzzing",
             run_id=run_id,
             message=f"Corpus written to {corpus_dir} ({total_seeds} seeds)",
             details={"corpus_dir": corpus_dir, "total_seeds": total_seeds, "total_bytes": total_bytes},
         )
         emit_cli_event(
             event_type="run_completed",
-            module="fuzz",
+            module="fuzzing",
             run_id=run_id,
             message=f"Corpus generation complete: {total_seeds} seeds across {len(protocols)} protocols",
             details={"total_seeds": total_seeds, "protocol_count": len(protocols)},
@@ -1928,15 +1908,11 @@ def register_extra_commands(fuzz_group):
             info("Corpus is empty. It will be auto-generated on the next fuzz command.")
             return
 
-        table = Table(
-            title=f"[bold {CYAN}]Seed Corpus[/bold {CYAN}]",
-            show_lines=True,
-            border_style=DIM,
-            header_style=Style(bold=True, color=CYAN),
-        )
-        table.add_column("Protocol", style=CYAN, width=12)
-        table.add_column("Seeds", style=YELLOW, justify="right", width=10)
-        table.add_column("Interesting", style=PURPLE, justify="right", width=12)
+        table = bare_table()
+        table.title = "[bold]Seed Corpus[/bold]"
+        table.add_column("Protocol", style="bt.cyan", width=12)
+        table.add_column("Seeds", style="bt.yellow", justify="right", width=10)
+        table.add_column("Interesting", style="bt.purple", justify="right", width=12)
 
         # Count interesting per protocol
         base = Path(corpus_dir)
@@ -1955,9 +1931,7 @@ def register_extra_commands(fuzz_group):
             f"[bold {PURPLE}]{stats.interesting_count}[/bold {PURPLE}]",
         )
 
-        console.print()
-        console.print(table)
-        console.print()
+        print_table(table)
 
         summary_panel("Corpus Info", {
             "Directory": corpus_dir,
@@ -2010,7 +1984,7 @@ def register_extra_commands(fuzz_group):
 
         emit_cli_event(
             event_type="run_started",
-            module="fuzz",
+            module="fuzzing",
             run_id=run_id,
             message=f"Minimizing corpus at {corpus_dir}",
             details={"corpus_dir": corpus_dir},
@@ -2019,16 +1993,12 @@ def register_extra_commands(fuzz_group):
         with phase("Corpus Minimization"):
             before_count = corpus.seed_count()
 
-            table = Table(
-                title=f"[bold {CYAN}]Corpus Minimization[/bold {CYAN}]",
-                show_lines=True,
-                border_style=DIM,
-                header_style=Style(bold=True, color=CYAN),
-            )
-            table.add_column("Protocol", style=CYAN, width=12)
-            table.add_column("Before", style=YELLOW, justify="right", width=10)
-            table.add_column("After", style=GREEN, justify="right", width=10)
-            table.add_column("Removed", style=RED, justify="right", width=10)
+            table = bare_table()
+            table.title = "[bold]Corpus Minimization[/bold]"
+            table.add_column("Protocol", style="bt.cyan", width=12)
+            table.add_column("Before", style="bt.yellow", justify="right", width=10)
+            table.add_column("After", style="bt.green", justify="right", width=10)
+            table.add_column("Removed", style="bt.red", justify="right", width=10)
 
             # Get per-protocol counts before
             before_per_proto = {}
@@ -2060,9 +2030,7 @@ def register_extra_commands(fuzz_group):
                 f"[bold {RED}]{total_removed}[/bold {RED}]",
             )
 
-            console.print()
-            console.print(table)
-            console.print()
+            print_table(table)
 
         if removed > 0:
             success(f"Removed {removed} duplicate seeds ({before_count} -> {corpus.seed_count()})")
@@ -2071,7 +2039,7 @@ def register_extra_commands(fuzz_group):
 
         emit_cli_event(
             event_type="run_completed",
-            module="fuzz",
+            module="fuzzing",
             run_id=run_id,
             message=f"Corpus minimization complete: removed {removed} duplicates",
             details={"before": before_count, "after": corpus.seed_count(), "removed": removed},

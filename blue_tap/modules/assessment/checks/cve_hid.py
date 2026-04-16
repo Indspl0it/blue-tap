@@ -132,3 +132,51 @@ def _check_hogp_unbonded_write(address: str) -> list[dict]:
         )]
 
     return []
+
+
+# ---------------------------------------------------------------------------
+# Native Module classes
+# ---------------------------------------------------------------------------
+
+from typing import Any
+
+from blue_tap.framework.module import Module, RunContext
+from blue_tap.framework.module.options import OptAddress
+from blue_tap.modules.assessment.base import CveCheckModule, ServiceDiscoveryMixin
+
+
+class Cve20200556Module(CveCheckModule, ServiceDiscoveryMixin):
+    """CVE-2020-0556: BlueZ HID unbonded connection vulnerability."""
+
+    module_id = "assessment.cve_2020_0556"
+    name = "HID Unbonded Connection"
+    description = "CVE-2020-0556/CVE-2023-45866: HID unbonded keystroke injection"
+    protocols = ("Classic", "HID", "L2CAP")
+    requires = ("classic_target",)
+    destructive = False
+    references = ("CVE-2020-0556", "CVE-2023-45866")
+    options = (OptAddress("RHOST", required=True, description="Target BR/EDR address"),)
+
+    check_fn = staticmethod(_check_hid_unbonded_connection)
+
+    def _execute_check(self, ctx: Any) -> list[dict]:
+        """Execute check with service discovery."""
+        target = ctx.options.get("RHOST", "")
+        services = self._get_services(ctx)
+        return _check_hid_unbonded_connection(target, services)
+
+
+class Cve202345866Module(CveCheckModule):
+    """CVE-2023-45866: BLE HOGP unbonded write vulnerability."""
+
+    module_id = "assessment.cve_2023_45866"
+    name = "HOGP Unbonded Write"
+    description = "CVE-2023-45866: HOGP accepts unbonded writes (bonding bypass)"
+    protocols = ("BLE", "HOGP", "GATT")
+    requires = ("ble_target",)
+    destructive = False
+    references = ("CVE-2023-45866",)
+    options = (OptAddress("RHOST", required=True, description="Target BLE address"),)
+
+    check_fn = staticmethod(_check_hogp_unbonded_write)
+    option_param_map = {"RHOST": "address"}

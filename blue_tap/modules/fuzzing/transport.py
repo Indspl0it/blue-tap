@@ -319,7 +319,7 @@ class BluetoothTransport(ABC):
             )
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+    def __exit__(self, _exc_type, _exc_val, _exc_tb) -> None:
         self.close()
 
     def __repr__(self) -> str:
@@ -719,11 +719,18 @@ class LMPTransport(BluetoothTransport):
     # -- Abstract interface (placeholders -- real work is in connect()) ----
 
     def _create_socket(self) -> socket.socket:
-        """Placeholder -- LMP transport uses HCI VSC, not a regular socket."""
-        return socket.socket()  # Will be closed immediately by connect() override
+        """Not used — LMPTransport overrides connect() to use HCI VSC."""
+        raise NotImplementedError(
+            "LMPTransport does not use a regular socket. "
+            "Use connect() which opens an HCI VSC socket instead."
+        )
 
     def _connect_socket(self, sock: socket.socket) -> None:
-        """Placeholder -- connection handled in connect() override."""
+        """Not used — LMPTransport overrides connect() to use HCI VSC."""
+        raise NotImplementedError(
+            "LMPTransport does not use a regular socket. "
+            "Use connect() which opens an HCI VSC socket instead."
+        )
 
     # -- Connection management ---------------------------------------------
 
@@ -978,12 +985,18 @@ class RawACLTransport(BluetoothTransport):
         self._rx_queue: collections.deque | None = None
 
     def _create_socket(self) -> socket.socket:
-        """Placeholder — RawACLTransport uses HCI VSC socket, not L2CAP."""
-        return socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        """Not used — RawACLTransport overrides connect() to use HCI VSC."""
+        raise NotImplementedError(
+            "RawACLTransport does not use a regular socket. "
+            "Use connect() which opens an HCI VSC socket instead."
+        )
 
     def _connect_socket(self, sock: socket.socket) -> None:
-        """Placeholder — connection managed via HCI."""
-        pass
+        """Not used — RawACLTransport overrides connect() to use HCI VSC."""
+        raise NotImplementedError(
+            "RawACLTransport does not use a regular socket. "
+            "Use connect() which opens an HCI VSC socket instead."
+        )
 
     def connect(self) -> bool:
         """Open HCI VSC socket and find the ACL connection handle."""
@@ -1120,3 +1133,168 @@ class RawACLTransport(BluetoothTransport):
         state = "connected" if self._connected else "disconnected"
         handle = f" handle=0x{self._connection_handle:04X}" if self._connection_handle else ""
         return f"<RawACLTransport addr={self.address} hci{self.hci_dev}{handle} {state}>"
+
+
+# ---------------------------------------------------------------------------
+# Native Module class (replaces modules/fuzzing/modules/transport.py wrapper)
+# ---------------------------------------------------------------------------
+
+from blue_tap.framework.contracts.result_schema import (  # noqa: E402
+    build_run_envelope,
+    make_evidence,
+    make_execution,
+)
+from blue_tap.framework.module import Module, RunContext  # noqa: E402
+from blue_tap.framework.module.options import (  # noqa: E402
+    OptAddress,
+    OptBool,
+    OptFloat,
+    OptInt,
+    OptString,
+)
+from blue_tap.framework.registry import ModuleFamily  # noqa: E402
+
+_TRANSPORT_TYPES = ("l2cap", "rfcomm", "ble", "raw_acl")
+
+
+class FuzzTransportModule(Module):
+    """Fuzz Transport.
+
+    Bluetooth transport abstractions for L2CAP, RFCOMM, BLE, and raw ACL fuzzing.
+    Use this module to test transport connectivity before running a full campaign.
+    """
+
+    module_id = "fuzzing.transport"
+    family = ModuleFamily.FUZZING
+    name = "Fuzz Transport"
+    description = "Fuzz transport: L2CAP, RFCOMM, BLE ATT/SMP, and raw ACL"
+    protocols = ("Classic", "BLE", "L2CAP", "RFCOMM", "ATT", "SMP", "LMP")
+    requires = ("adapter", "target")
+    destructive = True
+    requires_pairing = False
+    schema_prefix = "blue_tap.fuzz.result"
+    has_report_adapter = False
+    references = ()
+    options = (
+        OptAddress("RHOST", required=True, description="Target Bluetooth address"),
+        OptString("TYPE", default="l2cap", description=f"Transport type ({', '.join(_TRANSPORT_TYPES)})"),
+        OptInt("PSM", default=1, description="L2CAP PSM (for l2cap transport)"),
+        OptInt("CHANNEL", default=1, description="RFCOMM channel (for rfcomm transport)"),
+        OptString("HCI", default="", description="Local HCI adapter"),
+        OptFloat("TIMEOUT", default=5.0, description="Connection timeout in seconds"),
+        OptBool("TEST_SEND", default=True, description="Send test payload to verify connectivity"),
+    )
+
+    def run(self, ctx: RunContext) -> dict:
+        """Test transport connectivity."""
+        import logging as _logging
+
+        _log = _logging.getLogger(__name__)
+
+        target = ctx.options.get("RHOST", "")
+        transport_type = ctx.options.get("TYPE", "l2cap").lower()
+        psm = ctx.options.get("PSM", 1)
+        channel = ctx.options.get("CHANNEL", 1)
+        hci = ctx.options.get("HCI", "")
+        timeout = ctx.options.get("TIMEOUT", 5.0)
+        test_send = ctx.options.get("TEST_SEND", True)
+        started_at = ctx.started_at
+
+        if transport_type == "l2cap":
+            transport = L2CAPTransport(target, psm=psm, timeout=timeout)
+        elif transport_type == "rfcomm":
+            transport = RFCOMMTransport(target, channel=channel, timeout=timeout)
+        elif transport_type == "ble":
+            transport = BLETransport(
+                target,
+                address_type=BLETransport._detect_address_type(target),
+                timeout=timeout,
+            )
+        elif transport_type == "raw_acl":
+            hci_idx = int(hci.replace("hci", "")) if hci.startswith("hci") else 0
+            transport = RawACLTransport(target, hci_dev=hci_idx, timeout=timeout)
+        else:
+            return build_run_envelope(
+                schema=self.schema_prefix,
+                module=self.module_id,
+                target=target,
+                adapter=hci,
+                started_at=started_at,
+                executions=[make_execution(
+                    execution_id="transport_test",
+                    kind="probe",
+                    id="transport_test",
+                    title="Transport Test",
+                    module=self.module_id,
+                    module_id=self.module_id,
+                    protocol=transport_type,
+                    execution_status="failed",
+                    module_outcome="not_applicable",
+                    evidence=make_evidence(
+                        raw={"error": f"Unknown transport type: {transport_type}"},
+                        summary=f"Unknown transport type: {transport_type}",
+                    ),
+                    destructive=False,
+                    requires_pairing=False,
+                )],
+                summary={"outcome": "not_applicable", "error": f"Unknown transport: {transport_type}"},
+                module_data={"error": f"Unknown transport type: {transport_type}"},
+                run_id=ctx.run_id,
+            )
+
+        connected = False
+        sent = False
+        result: dict = {}
+
+        try:
+            connected = transport.connect()
+            if connected and test_send:
+                try:
+                    transport.send(b"\x00" * 4)
+                    sent = True
+                except Exception as e:
+                    _log.warning("Test send failed: %s", e)
+                    result["send_error"] = str(e)
+        except Exception as e:
+            _log.exception("Transport connection failed: %s", e)
+            result["connect_error"] = str(e)
+        finally:
+            try:
+                transport.close()
+            except Exception:
+                pass
+
+        # Fuzzing family outcomes: crash_found, timeout, corpus_grown,
+        # no_findings (canonical) plus legacy completed/not_applicable. The
+        # transport probe itself is a no-crash reachability check — successful
+        # connect is "no_findings", failed connect is "not_applicable".
+        outcome = "no_findings" if connected else "not_applicable"
+        exec_status = "completed" if connected else "failed"
+
+        return build_run_envelope(
+            schema=self.schema_prefix,
+            module=self.module_id,
+            target=target,
+            adapter=hci,
+            started_at=started_at,
+            executions=[make_execution(
+                execution_id="transport_test",
+                kind="probe",
+                id="transport_test",
+                title=f"Transport Test ({transport_type})",
+                module=self.module_id,
+                module_id=self.module_id,
+                protocol=transport_type,
+                execution_status=exec_status,
+                module_outcome=outcome,
+                evidence=make_evidence(
+                    raw={"connected": connected, "sent": sent, "type": transport_type},
+                    summary=f"Transport {transport_type}: {'connected' if connected else 'failed'}",
+                ),
+                destructive=True,
+                requires_pairing=False,
+            )],
+            summary={"outcome": outcome, "connected": connected, "sent": sent, "type": transport_type},
+            module_data={**result, "connected": connected, "sent": sent},
+            run_id=ctx.run_id,
+        )

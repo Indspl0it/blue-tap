@@ -76,3 +76,31 @@ def _check_bluefrag_boundary_probe(address: str, hci: str) -> list[dict]:
         )]
     finally:
         transport.close()
+
+
+# ---------------------------------------------------------------------------
+# Native Module class
+# ---------------------------------------------------------------------------
+
+from blue_tap.framework.module import Module, RunContext
+from blue_tap.framework.module.options import OptAddress, OptString
+from blue_tap.modules.assessment.base import CveCheckModule
+
+
+class Cve20200022Module(CveCheckModule):
+    """CVE-2020-0022: BlueFrag boundary condition vulnerability."""
+
+    module_id = "assessment.cve_2020_0022"
+    name = "BlueFrag Boundary Probe"
+    description = "CVE-2020-0022 BlueFrag: ACL fragment boundary heap corruption"
+    protocols = ("Classic", "L2CAP", "ACL")
+    requires = ("classic_target", "adapter")
+    destructive = False
+    references = ("CVE-2020-0022",)
+    options = (
+        OptAddress("RHOST", required=True, description="Target BR/EDR address"),
+        OptString("HCI", default="", description="Local HCI adapter"),
+    )
+
+    check_fn = staticmethod(_check_bluefrag_boundary_probe)
+    option_param_map = {"RHOST": "address", "HCI": "hci"}

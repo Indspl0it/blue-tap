@@ -269,3 +269,56 @@ def _check_avrcp_getcap_leak(address: str, services: list[dict]) -> list[dict]:
             f"(jitter at offset {jitter_offset})"
         ),
     )]
+
+
+# ---------------------------------------------------------------------------
+# Native Module classes
+# ---------------------------------------------------------------------------
+
+from typing import Any
+
+from blue_tap.framework.module import Module, RunContext
+from blue_tap.framework.module.options import OptAddress
+from blue_tap.modules.assessment.base import CveCheckModule, ServiceDiscoveryMixin
+
+
+class Cve20210507Module(CveCheckModule, ServiceDiscoveryMixin):
+    """CVE-2021-0507: AVRCP REGISTER_NOTIFICATION OOB write."""
+
+    module_id = "assessment.cve_2021_0507"
+    name = "AVRCP Metadata OOB"
+    description = "CVE-2021-0507: AVRCP REGISTER_NOTIFICATION OOB write on Android 8.1-11"
+    protocols = ("Classic", "AVRCP", "AVCTP", "L2CAP")
+    requires = ("classic_target",)
+    destructive = False
+    references = ("CVE-2021-0507",)
+    options = (OptAddress("RHOST", required=True, description="Target BR/EDR address"),)
+
+    check_fn = staticmethod(_check_avrcp_metamsg_oob)
+
+    def _execute_check(self, ctx: Any) -> list[dict]:
+        """Execute check with service discovery."""
+        target = ctx.options.get("RHOST", "")
+        services = self._get_services(ctx)
+        return _check_avrcp_metamsg_oob(target, services)
+
+
+class Cve202239176Module(CveCheckModule, ServiceDiscoveryMixin):
+    """CVE-2022-39176: AVRCP GetCapabilities info leak."""
+
+    module_id = "assessment.cve_2022_39176"
+    name = "AVRCP GetCapabilities Leak"
+    description = "CVE-2022-39176: AVRCP GetCapabilities leaks uninitialized stack memory"
+    protocols = ("Classic", "AVRCP", "AVCTP", "L2CAP")
+    requires = ("classic_target",)
+    destructive = False
+    references = ("CVE-2022-39176",)
+    options = (OptAddress("RHOST", required=True, description="Target BR/EDR address"),)
+
+    check_fn = staticmethod(_check_avrcp_getcap_leak)
+
+    def _execute_check(self, ctx: Any) -> list[dict]:
+        """Execute check with service discovery."""
+        target = ctx.options.get("RHOST", "")
+        services = self._get_services(ctx)
+        return _check_avrcp_getcap_leak(target, services)
