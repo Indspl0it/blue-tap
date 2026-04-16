@@ -64,13 +64,16 @@ def restore_original_mac(hci: str, method: str = "auto") -> dict:
     info(f"Restoring {hci} to original MAC: {original}")
     spoof_result = spoof_address(hci, original, method)
     if spoof_result["success"]:
-        # Remove saved entry
+        # Remove saved entry using atomic write (tmp → rename) so the MAC file
+        # is never in a partially-written state.
         try:
             with open(_ORIGINAL_MAC_FILE) as f:
                 data = json.load(f)
             data.pop(hci, None)
-            with open(_ORIGINAL_MAC_FILE, "w") as f:
-                json.dump(data, f)
+            tmp_path = _ORIGINAL_MAC_FILE + ".tmp"
+            with open(tmp_path, "w") as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp_path, _ORIGINAL_MAC_FILE)
         except (json.JSONDecodeError, OSError):
             pass
     return {"success": spoof_result["success"],

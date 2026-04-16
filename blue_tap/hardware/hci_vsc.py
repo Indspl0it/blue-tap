@@ -226,6 +226,44 @@ def parse_lmp_tx_log(event_params: bytes) -> dict | None:
     }
 
 
+def parse_start_encryption_req(lmp_payload: bytes) -> dict | None:
+    """Extract EN_RAND from an ``LMP_start_encryption_req`` PDU.
+
+    The PDU layout per BT Core Spec Vol 2 Part C §4.2.5 is::
+
+        Byte 0     TID + opcode (opcode 0x11 = LMP_START_ENCRYPTION_REQ)
+        Bytes 1-16 EN_RAND (128-bit random)
+
+    This parser consumes the raw LMP payload as emitted by the DarkFirmware
+    LMP monitor and returns the extracted EN_RAND plus metadata. Returns
+    ``None`` when the payload is not a valid start_encryption_req.
+
+    The extracted EN_RAND is one of the four inputs required to drive a
+    real E0 cipher (``blue_tap.modules.exploitation._e0``) during KNOB
+    key recovery — the others are K_C (the candidate), the master's
+    BD_ADDR, and CLK26_1.
+
+    Args:
+        lmp_payload: LMP payload bytes (byte 0 = opcode+TID, rest = params).
+
+    Returns:
+        {"opcode": 0x11, "tid": int, "en_rand": bytes (16)} or None.
+    """
+    if len(lmp_payload) < 17:
+        return None
+    tid_opcode = lmp_payload[0]
+    tid = (tid_opcode >> 7) & 1
+    opcode = tid_opcode & 0x7F
+    if opcode != 0x11:  # LMP_START_ENCRYPTION_REQ
+        return None
+    en_rand = lmp_payload[1:17]
+    return {
+        "opcode": opcode,
+        "tid": tid,
+        "en_rand": bytes(en_rand),
+    }
+
+
 def parse_acl_tx_log(event_params: bytes) -> dict | None:
     """Parse a 16-byte DarkFirmware ACL TX log from HCI Event 0xFF (Hook 3).
 
@@ -474,13 +512,23 @@ class HCIVSCSocket:
         self.open()
         return self
 
-    def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
+    def __exit__(self, _exc_type: object, _exc_val: object, _exc_tb: object) -> None:
         self.close()
 
     def __repr__(self) -> str:
         state = "open" if self._sock is not None else "closed"
         monitor = "monitoring" if self._monitor_thread and self._monitor_thread.is_alive() else "idle"
         return f"<HCIVSCSocket hci{self._hci_dev} {state} {monitor}>"
+
+    def raw_socket(self) -> socket.socket | None:
+        """Return the underlying raw socket, or *None* if not open.
+
+        Intended for callers that need direct socket access (e.g. low-level
+        probe routines).  The socket is the same object used by :meth:`send_vsc`
+        and :meth:`recv_event`; callers MUST hold ``_lock`` (or perform their
+        own serialisation) if they write to the socket concurrently.
+        """
+        return self._sock
 
     # ------------------------------------------------------------------
     # Low-level send / recv
@@ -568,20 +616,28 @@ class HCIVSCSocket:
             self._cc_ready.wait(timeout=min(remaining, 0.5))
             self._cc_ready.clear()
 
-            # Drain the CC queue looking for our opcode
-            checked: list[tuple[int, bytes]] = []
-            while self._cc_queue:
-                cc_opcode, cc_params = self._cc_queue.popleft()
-                if cc_opcode == opcode:
-                    # Put back any non-matching events
-                    for item in checked:
-                        self._cc_queue.appendleft(item)
-                    return cc_params
-                checked.append((cc_opcode, cc_params))
+            # Guard the entire read-pop-inspect-push sequence with _lock so
+            # concurrent callers can't see a torn view of _cc_queue.  This is
+            # safe because 9.1 removed the blocking select/recv from under this
+            # lock; the monitor thread only appends while not holding _lock.
+            with self._lock:
+                checked: list[tuple[int, bytes]] = []
+                while self._cc_queue:
+                    cc_opcode, cc_params = self._cc_queue.popleft()
+                    if cc_opcode == opcode:
+                        # Put back any non-matching events. We popped in
+                        # insertion order (oldest first), so appendleft in
+                        # REVERSE to preserve FIFO ordering for the next
+                        # caller — appending in forward order would invert
+                        # the queue and break event sequencing under load.
+                        for item in reversed(checked):
+                            self._cc_queue.appendleft(item)
+                        return cc_params
+                    checked.append((cc_opcode, cc_params))
 
-            # None matched; put them all back
-            for item in checked:
-                self._cc_queue.appendleft(item)
+                # None matched; put them all back preserving FIFO order.
+                for item in reversed(checked):
+                    self._cc_queue.appendleft(item)
 
     def recv_event(self, timeout: float = 5.0) -> tuple[int, bytes] | None:
         """Read one HCI event from the socket.
@@ -602,12 +658,16 @@ class HCIVSCSocket:
         if self._sock is None:
             raise OSError("HCI socket is not open")
 
-        with self._lock:
-            ready, _, _ = select.select([self._sock], [], [], timeout)
-            if not ready:
-                return None
+        # Release _lock during blocking syscalls (select + recv) so concurrent
+        # send_vsc() calls are not blocked for the full timeout duration.
+        # We re-acquire _lock only for shared-state mutations (none needed here
+        # since _sock itself is stable; sendall callers hold the lock for their
+        # own atomic send).
+        ready, _, _ = select.select([self._sock], [], [], timeout)
+        if not ready:
+            return None
 
-            data = self._sock.recv(512)
+        data = self._sock.recv(512)
 
         if len(data) < 3:
             logger.debug("Runt HCI event (%d bytes)", len(data))
@@ -928,11 +988,14 @@ class HCIVSCSocket:
 
             event_code, event_params = result
 
-            # Route command-complete events to send_vsc() via queue
+            # Route command-complete events to send_vsc() via queue.
+            # Hold _lock while appending so _wait_cc_from_monitor's drain loop
+            # (which also holds _lock) sees a consistent queue state.
             if event_code == self.HCI_CMD_COMPLETE and len(event_params) >= 3:
                 cc_opcode = struct.unpack_from("<H", event_params, 1)[0]
                 cc_return = event_params[3:]
-                self._cc_queue.append((cc_opcode, cc_return))
+                with self._lock:
+                    self._cc_queue.append((cc_opcode, cc_return))
                 self._cc_ready.set()
                 continue
 

@@ -285,9 +285,16 @@ def _resolve_missing_classic_names(devices: list[dict], hci: str, time_budget: f
             verbose(f"Name resolution failed for {dev['address']} ({dev['oui_vendor']})")
 
 
-def scan_classic(duration: int = 10, hci: str = "hci0") -> list[dict]:
+def scan_classic(duration: int = 10, hci: str | None = None) -> list[dict]:
     """Scan for Bluetooth Classic devices using inquiry plus bounded name resolution."""
 
+    if hci is None:
+
+
+        from blue_tap.hardware.adapter import resolve_active_hci
+
+
+        hci = resolve_active_hci()
     started = time.time()
     devices = _run_classic_inquiry(duration, hci)
     elapsed = time.time() - started
@@ -542,9 +549,16 @@ def _merge_scan_results(classic: list[dict], ble: list[dict]) -> tuple[list[dict
     return merged_devices, candidate_summary
 
 
-def scan_all(duration: int = 10, hci: str = "hci0") -> list[dict]:
+def scan_all(duration: int = 10, hci: str | None = None) -> list[dict]:
     """Scan both Classic and BLE, exact-merge same-address devices, annotate hints."""
 
+    if hci is None:
+
+
+        from blue_tap.hardware.adapter import resolve_active_hci
+
+
+        hci = resolve_active_hci()
     classic = scan_classic(duration, hci)
     ble = scan_ble_sync(duration, adapter=hci)
     devices, candidates = _merge_scan_results(classic, ble)
@@ -566,14 +580,21 @@ def _build_collector_entry(collector_id: str, title: str, devices: list[dict], *
     }
 
 
-def scan_classic_result(duration: int = 10, hci: str = "hci0") -> dict:
+def scan_classic_result(duration: int = 10, hci: str | None = None) -> dict:
     """Structured Classic scan result envelope."""
 
+    if hci is None:
+
+
+        from blue_tap.hardware.adapter import resolve_active_hci
+
+
+        hci = resolve_active_hci()
     started_at = now_iso()
     run_id = make_run_id("scan")
     emit_cli_event(
         event_type="run_started",
-        module="scan",
+        module="discovery",
         run_id=run_id,
         target="range_scan",
         adapter=hci,
@@ -603,7 +624,7 @@ def scan_classic_result(duration: int = 10, hci: str = "hci0") -> dict:
     )
     emit_cli_event(
         event_type="run_completed",
-        module="scan",
+        module="discovery",
         run_id=run_id,
         target="range_scan",
         adapter=hci,
@@ -619,7 +640,7 @@ def scan_ble_result_sync(duration: int = 10, passive: bool = False, adapter: str
     run_id = make_run_id("scan")
     emit_cli_event(
         event_type="run_started",
-        module="scan",
+        module="discovery",
         run_id=run_id,
         target="range_scan",
         adapter=adapter or "",
@@ -649,7 +670,7 @@ def scan_ble_result_sync(duration: int = 10, passive: bool = False, adapter: str
     )
     emit_cli_event(
         event_type="run_completed",
-        module="scan",
+        module="discovery",
         run_id=run_id,
         target="range_scan",
         adapter=adapter or "",
@@ -658,14 +679,21 @@ def scan_ble_result_sync(duration: int = 10, passive: bool = False, adapter: str
     return result
 
 
-def scan_all_result(duration: int = 10, hci: str = "hci0") -> dict:
+def scan_all_result(duration: int = 10, hci: str | None = None) -> dict:
     """Structured combined scan result envelope."""
 
+    if hci is None:
+
+
+        from blue_tap.hardware.adapter import resolve_active_hci
+
+
+        hci = resolve_active_hci()
     started_at = now_iso()
     run_id = make_run_id("scan")
     emit_cli_event(
         event_type="run_started",
-        module="scan",
+        module="discovery",
         run_id=run_id,
         target="combined_range_scan",
         adapter=hci,
@@ -713,7 +741,7 @@ def scan_all_result(duration: int = 10, hci: str = "hci0") -> dict:
     )
     emit_cli_event(
         event_type="run_completed",
-        module="scan",
+        module="discovery",
         run_id=run_id,
         target="combined_range_scan",
         adapter=hci,
@@ -726,8 +754,13 @@ def scan_all_result(duration: int = 10, hci: str = "hci0") -> dict:
 # Name Resolution
 # ============================================================================
 
-def resolve_name(address: str, hci: str = "hci0", retries: int = 2, timeout: int = 10) -> str:
+def resolve_name(address: str, hci: str | None = None, retries: int = 2, timeout: int = 10) -> str:
     """Resolve the friendly name of a BT device with retry."""
+    if hci is None:
+
+        from blue_tap.hardware.adapter import resolve_active_hci
+
+        hci = resolve_active_hci()
     for attempt in range(retries + 1):
         result = run_cmd(["hcitool", "-i", hci, "name", address], timeout=timeout)
         if result.returncode == 0 and result.stdout.strip():

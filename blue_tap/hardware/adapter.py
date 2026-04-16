@@ -10,6 +10,92 @@ from blue_tap.utils.output import info, success, error, warning
 logger = logging.getLogger(__name__)
 
 
+# Module-level cache for the resolved active HCI. Populated on first call and
+# reused for the lifetime of the process so every module sees the same adapter
+# the startup DarkFirmware probe chose. Cleared by ``reset_active_hci_cache()``
+# when hardware state changes (adapter list refreshed, hot-plug).
+_ACTIVE_HCI_CACHE: str | None = None
+
+
+def resolve_active_hci(explicit: str | None = None) -> str:
+    """Return the HCI adapter modules should use by default.
+
+    Resolution order:
+      1. ``explicit`` argument (caller passed one — always wins).
+      2. ``BT_TAP_DARKFIRMWARE_HCI`` env var (set by ``_init_darkfirmware_hooks``
+         at CLI startup so every subsequent module inherits the dongle HCI).
+      3. ``DarkFirmwareManager.find_rtl8761b_hci()`` — USB VID:PID probe for the
+         RTL8761B dongle (matches what startup does).
+      4. First UP adapter reported by ``hciconfig`` — graceful fallback when no
+         Realtek dongle is present (e.g. during non-DarkFirmware smoke tests).
+      5. ``"hci0"`` — last-resort literal so callers always get a string.
+
+    Result is cached for the life of the process after the first successful
+    hardware probe so repeated calls don't re-run ``lsusb``/``hciconfig``.
+    """
+    global _ACTIVE_HCI_CACHE
+
+    if explicit:
+        return explicit
+
+    if _ACTIVE_HCI_CACHE is not None:
+        return _ACTIVE_HCI_CACHE
+
+    env_hci = os.environ.get("BT_TAP_DARKFIRMWARE_HCI")
+    if env_hci:
+        _ACTIVE_HCI_CACHE = env_hci
+        logger.debug("Active HCI resolved from env", extra={"hci": env_hci})
+        return env_hci
+
+    try:
+        from blue_tap.hardware.firmware import DarkFirmwareManager
+        rtl_hci = DarkFirmwareManager().find_rtl8761b_hci()
+        if rtl_hci:
+            _ACTIVE_HCI_CACHE = rtl_hci
+            logger.debug("Active HCI resolved from RTL8761B probe", extra={"hci": rtl_hci})
+            return rtl_hci
+    except Exception as exc:
+        logger.debug("RTL8761B probe failed during resolve_active_hci: %s", exc)
+
+    try:
+        for adapter in get_hci_adapters() or []:
+            if adapter.get("status") == "UP":
+                name = adapter["name"]
+                _ACTIVE_HCI_CACHE = name
+                logger.debug("Active HCI resolved from first UP adapter", extra={"hci": name})
+                return name
+    except Exception as exc:
+        logger.debug("hciconfig probe failed during resolve_active_hci: %s", exc)
+
+    logger.warning("No active HCI could be resolved — defaulting to hci0")
+    return "hci0"
+
+
+def reset_active_hci_cache() -> None:
+    """Clear the cached active HCI.
+
+    Call when adapters are added/removed (hot-plug, firmware reload, test setup)
+    so the next ``resolve_active_hci()`` re-probes the hardware.
+    """
+    global _ACTIVE_HCI_CACHE
+    _ACTIVE_HCI_CACHE = None
+
+
+def is_darkfirmware_active(hci: str | None = None) -> bool:
+    """Return True if DarkFirmware is currently loaded on ``hci``.
+
+    When ``hci`` is None, resolves via ``resolve_active_hci()`` so callers that
+    just want "is DarkFirmware up anywhere" don't need to know the adapter.
+    """
+    target_hci = hci or resolve_active_hci()
+    try:
+        from blue_tap.hardware.firmware import DarkFirmwareManager
+        return DarkFirmwareManager().is_darkfirmware_loaded(target_hci)
+    except Exception as exc:
+        logger.debug("DarkFirmware probe failed on %s: %s", target_hci, exc)
+        return False
+
+
 def _adapter_exists(hci: str) -> bool:
     """Check if an HCI adapter exists on the system."""
     result = run_cmd(["hciconfig", hci])
@@ -167,7 +253,7 @@ def _detect_chipset(hci: str, hciconfig_output: str = "") -> str:
     """Detect adapter chipset from /sys/class/bluetooth and USB info.
 
     Args:
-        hci: HCI adapter name (e.g., "hci0")
+        hci: HCI adapter name (e.g., "<hciX>")
         hciconfig_output: Pre-fetched hciconfig -a output to avoid redundant call
     """
     sys_path = f"/sys/class/bluetooth/{hci}"
@@ -247,7 +333,7 @@ def _lookup_usb_chipset(vid: str, pid: str) -> str:
 def recommend_adapter_roles(adapters: list[dict] | None = None) -> dict:
     """Recommend which adapter to use for scanning vs spoofing.
 
-    Returns {"scan": "hci0", "spoof": "hci1", "notes": [...]}
+    Returns {"scan": "<hciX>", "spoof": "hci1", "notes": [...]}
     When only one adapter is available, returns it for both roles with warnings.
     """
     if adapters is None:
@@ -312,7 +398,7 @@ def _hci_cmd(hci: str, *args: str) -> bool:
     return True
 
 
-def adapter_up(hci: str = "hci0") -> dict:
+def adapter_up(hci: str | None = None) -> dict:
     """Bring an adapter up.
 
     Returns:
@@ -327,7 +413,7 @@ def adapter_up(hci: str = "hci0") -> dict:
     return {"success": False, "hci": hci, "operation": "up", "error": f"hciconfig {hci} up failed"}
 
 
-def adapter_down(hci: str = "hci0") -> dict:
+def adapter_down(hci: str | None = None) -> dict:
     """Bring an adapter down.
 
     Returns:
@@ -342,7 +428,7 @@ def adapter_down(hci: str = "hci0") -> dict:
     return {"success": False, "hci": hci, "operation": "down", "error": f"hciconfig {hci} down failed"}
 
 
-def adapter_reset(hci: str = "hci0") -> dict:
+def adapter_reset(hci: str | None = None) -> dict:
     """Reset an adapter.
 
     Returns:
@@ -367,7 +453,7 @@ def set_device_class(hci: str, device_class: str = "0x5a020c") -> dict:
       0x7a020c - Smart Phone
 
     Args:
-        hci: HCI adapter name (e.g., "hci0")
+        hci: HCI adapter name (e.g., "<hciX>")
         device_class: Hex string with or without 0x prefix, range 0x000000-0xFFFFFF
 
     Raises:
@@ -403,7 +489,7 @@ def set_device_name(hci: str, name: str) -> dict:
     """Set the Bluetooth device name (useful for impersonation).
 
     Args:
-        hci: HCI adapter name (e.g., "hci0")
+        hci: HCI adapter name (e.g., "<hciX>")
         name: Device name; must be at most 248 bytes when UTF-8 encoded (Bluetooth spec limit)
 
     Raises:

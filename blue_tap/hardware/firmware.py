@@ -115,57 +115,98 @@ SEC_OFF_KEY_MATERIAL_COPY = 0x51   # 16 bytes: link key material (copied during 
 SEC_OFF_SC_FLAG = 0x214            # Secure Connections enabled flag
 
 
+def _cleanup_tmp(path: str) -> None:
+    """Remove a leftover tmp file, silently ignoring errors."""
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
 class DarkFirmwareManager:
     """Manage DarkFirmware installation, detection, and BDADDR patching."""
 
-    def detect_rtl8761b(self, hci: str = "hci1") -> bool:
-        """Detect RTL8761B via sysfs modalias or hciconfig manufacturer.
+    def find_rtl8761b_hci(self) -> str | None:
+        """Discover the HCI interface that belongs to the RTL8761B dongle.
 
-        Checks USB VID:PID 2357:0604 or Manufacturer ID 93 (Realtek).
+        Does NOT accept an hci argument — it finds the right adapter by USB
+        identity so the caller never has to guess hci0/hci1/hci2.
+
+        Strategy:
+          1. ``lsusb -d 2357:0604`` — fast-fail if the USB device is absent.
+          2. Walk ``/sys/class/bluetooth/hci*`` — for each interface read its
+             USB modalias and match VID:PID ``2357:0604`` (TP-Link UB500) or
+             ``0BDA:8771`` (generic Realtek RTL8761B).
+          3. Fallback: ``hciconfig -a`` manufacturer string ("Realtek" / "(93)").
+
+        Returns the HCI name (e.g. ``<hciX>``) or ``None`` if the dongle is not
+        present or cannot be mapped.
         """
-        # Method 1: Check sysfs modalias for USB VID:PID
-        sys_path = f"/sys/class/bluetooth/{hci}/device"
-        if os.path.islink(sys_path):
-            real_path = os.path.realpath(sys_path)
-            for parent in [real_path, os.path.dirname(real_path)]:
+        import glob
+
+        # Step 1: confirm USB device exists before touching sysfs
+        lsusb_result = run_cmd(["lsusb", "-d", USB_VID_PID])
+        if lsusb_result.returncode != 0 or not lsusb_result.stdout.strip():
+            return None
+
+        # Step 2: map USB VID:PID → HCI via sysfs modalias
+        for hci_path in sorted(glob.glob("/sys/class/bluetooth/hci*")):
+            hci_name = os.path.basename(hci_path)
+            device_link = os.path.join(hci_path, "device")
+            if not os.path.islink(device_link):
+                continue
+            real_path = os.path.realpath(device_link)
+            for parent in (real_path, os.path.dirname(real_path)):
                 modalias_file = os.path.join(parent, "modalias")
-                if os.path.exists(modalias_file):
-                    try:
-                        with open(modalias_file) as f:
-                            modalias = f.read().strip()
-                        # USB modalias: usb:v2357p0604...
-                        if "v2357p0604" in modalias.upper().replace("V", "v").replace("P", "p"):
-                            info(f"RTL8761B detected on {hci} via sysfs modalias")
-                            return True
-                        # Also check for Realtek RTL8761B generic VID
-                        if "v0BDAp8771" in modalias.upper().replace("V", "v").replace("P", "p"):
-                            info(f"RTL8761B detected on {hci} via sysfs modalias (Realtek VID)")
-                            return True
-                    except OSError:
-                        pass
+                if not os.path.exists(modalias_file):
+                    continue
+                try:
+                    modalias = open(modalias_file).read().strip().lower()
+                    # USB modalias format: usb:v2357p0604d...
+                    if "v2357p0604" in modalias or "v0bdap8771" in modalias:
+                        return hci_name
+                except OSError:
+                    continue
 
-        # Method 2: Check hciconfig manufacturer
-        result = run_cmd(["hciconfig", "-a", hci])
-        if result.returncode == 0:
-            output = result.stdout
-            # Manufacturer ID 93 = Realtek
-            mfr_m = re.search(r"Manufacturer:\s*(.+)", output)
+        # Step 3: fallback — hciconfig manufacturer string
+        for hci_path in sorted(glob.glob("/sys/class/bluetooth/hci*")):
+            hci_name = os.path.basename(hci_path)
+            result = run_cmd(["hciconfig", "-a", hci_name])
+            if result.returncode != 0:
+                continue
+            mfr_m = re.search(r"Manufacturer:\s*(.+)", result.stdout)
             if mfr_m:
-                manufacturer = mfr_m.group(1).strip().lower()
-                if "realtek" in manufacturer or "(93)" in manufacturer:
-                    info(f"RTL8761B detected on {hci} via manufacturer: {mfr_m.group(1).strip()}")
-                    return True
+                mfr = mfr_m.group(1).strip().lower()
+                if "realtek" in mfr or "(93)" in mfr:
+                    return hci_name
 
-        # Method 3: Check lsusb for VID:PID
-        result = run_cmd(["lsusb", "-d", USB_VID_PID])
-        if result.returncode == 0 and result.stdout.strip():
-            info(f"RTL8761B detected via lsusb ({USB_VID_PID})")
-            return True
+        return None
 
-        warning(f"RTL8761B not detected on {hci}")
-        return False
+    def detect_rtl8761b(self, hci: str | None = None) -> bool:
+        """Return True if an RTL8761B is present and maps to ``hci`` (or any HCI if None).
 
-    def is_darkfirmware_loaded(self, hci: str = "hci1") -> bool:
+        Prefer ``find_rtl8761b_hci()`` for discovery — this method exists for
+        backwards-compatibility and targeted per-adapter checks.
+        """
+        if hci is None:
+
+            from blue_tap.hardware.adapter import resolve_active_hci
+
+            hci = resolve_active_hci()
+        found = self.find_rtl8761b_hci()
+        if found is None:
+            return False
+        if hci is not None and found != hci:
+            return False
+        return True
+
+    def _resolve_hci(self, hci: str | None) -> str | None:
+        """Return ``hci`` if given, otherwise discover the RTL8761B HCI via USB VID:PID."""
+        if hci is not None:
+            return hci
+        return self.find_rtl8761b_hci()
+
+    def is_darkfirmware_loaded(self, hci: str | None = None) -> bool:
         """Check if DarkFirmware is active using two firmware-level probes.
 
         Primary: Read Hook 1 backup at 0x80133FFC via VSC 0xFC61.  Stock
@@ -176,6 +217,15 @@ class DarkFirmwareManager:
         DarkFirmware echoes it back as a vendor event (0xFF) before the
         command-complete; stock firmware returns only the command-complete.
         """
+        if hci is None:
+
+            from blue_tap.hardware.adapter import resolve_active_hci
+
+            hci = resolve_active_hci()
+        hci = self._resolve_hci(hci)
+        if hci is None:
+            return False
+
         try:
             from blue_tap.hardware.hci_vsc import HCIVSCSocket
 
@@ -226,7 +276,7 @@ class DarkFirmwareManager:
             + probe_payload
         )
 
-        raw_sock = sock._sock  # noqa: SLF001
+        raw_sock = sock.raw_socket()
         if raw_sock is None:
             return False
 
@@ -258,7 +308,7 @@ class DarkFirmwareManager:
             success(f"DarkFirmware confirmed on {hci} (LMP TX vendor-event echo)")
         return saw_vendor_event
 
-    def init_hooks(self, hci: str = "hci1") -> dict:
+    def init_hooks(self, hci: str | None = None) -> dict:
         """Activate Hooks 3+4 by writing backup pointers to RAM.
 
         Hooks 1+2 are persistent in the firmware binary — they survive USB
@@ -274,11 +324,20 @@ class DarkFirmwareManager:
             {"hook1": bool, "hook2": bool, "hook3": bool, "hook4": bool,
              "all_ok": bool}
         """
+        if hci is None:
+
+            from blue_tap.hardware.adapter import resolve_active_hci
+
+            hci = resolve_active_hci()
         result = {
             "hook1": False, "hook2": False,
             "hook3": False, "hook4": False,
             "all_ok": False,
         }
+
+        hci = self._resolve_hci(hci)
+        if hci is None:
+            return result
 
         try:
             from blue_tap.hardware.hci_vsc import HCIVSCSocket
@@ -350,7 +409,7 @@ class DarkFirmwareManager:
 
         return result
 
-    def get_firmware_status(self, hci: str = "hci1") -> dict:
+    def get_firmware_status(self, hci: str | None = None) -> dict:
         """Return firmware status information.
 
         Returns:
@@ -358,6 +417,11 @@ class DarkFirmwareManager:
              original_backed_up: bool, capabilities: list[str],
              hooks: dict}
         """
+        if hci is None:
+
+            from blue_tap.hardware.adapter import resolve_active_hci
+
+            hci = resolve_active_hci()
         status: dict = {
             "installed": os.path.exists(FIRMWARE_PATH),
             "loaded": False,
@@ -366,6 +430,10 @@ class DarkFirmwareManager:
             "capabilities": [],
             "hooks": {},
         }
+
+        hci = self._resolve_hci(hci)
+        if hci is None:
+            return status
 
         status["bdaddr"] = self.get_current_bdaddr(hci)
 
@@ -399,15 +467,23 @@ class DarkFirmwareManager:
 
         return status
 
-    def get_current_bdaddr(self, hci: str = "hci1") -> str:
+    def get_current_bdaddr(self, hci: str | None = None) -> str:
         """Read BDADDR from hciconfig output for the given HCI device."""
+        if hci is None:
+
+            from blue_tap.hardware.adapter import resolve_active_hci
+
+            hci = resolve_active_hci()
+        hci = self._resolve_hci(hci)
+        if hci is None:
+            return ""
         result = run_cmd(["hciconfig", hci])
         if result.returncode != 0:
             return ""
         m = re.search(r"BD Address:\s+([0-9A-Fa-f:]{17})", result.stdout)
         return m.group(1) if m else ""
 
-    def patch_bdaddr(self, target_mac: str, hci: str = "hci1") -> bool:
+    def patch_bdaddr(self, target_mac: str, hci: str | None = None) -> bool:
         """Patch BDADDR in firmware file and USB reset to apply.
 
         Steps:
@@ -420,6 +496,15 @@ class DarkFirmwareManager:
 
         Requires root for firmware file write.
         """
+        if hci is None:
+
+            from blue_tap.hardware.adapter import resolve_active_hci
+
+            hci = resolve_active_hci()
+        hci = self._resolve_hci(hci)
+        if hci is None:
+            return False
+
         # Validate MAC format
         from blue_tap.utils.bt_helpers import validate_mac, normalize_mac
         target_mac = normalize_mac(target_mac)
@@ -446,15 +531,22 @@ class DarkFirmwareManager:
 
         info(f"Patching BDADDR in firmware: {target_mac} (offset 0x{BDADDR_OFFSET:X})")
 
+        # Atomic patch: copy → modify tmp → os.replace so the target is never
+        # in a partially-written state even if the process is killed mid-patch.
+        tmp_path = FIRMWARE_PATH + ".tmp"
         try:
-            with open(FIRMWARE_PATH, "r+b") as fw:
+            shutil.copy2(FIRMWARE_PATH, tmp_path)
+            with open(tmp_path, "r+b") as fw:
                 fw.seek(BDADDR_OFFSET)
                 fw.write(mac_reversed)
+            os.replace(tmp_path, FIRMWARE_PATH)
             success(f"Firmware BDADDR patched to {target_mac}")
         except PermissionError:
+            _cleanup_tmp(tmp_path)
             error(f"Permission denied writing to {FIRMWARE_PATH} — run as root")
             return False
         except OSError as exc:
+            _cleanup_tmp(tmp_path)
             error(f"Failed to patch firmware: {exc}")
             return False
 
@@ -477,7 +569,7 @@ class DarkFirmwareManager:
             warning("Adapter may need additional time or manual replug to apply")
             return False
 
-    def patch_bdaddr_ram(self, target_mac: str, hci: str = "hci0") -> bool:
+    def patch_bdaddr_ram(self, target_mac: str, hci: str | None = None) -> bool:
         """Live-patch BDADDR in controller RAM without modifying the firmware file.
 
         Writes the new BDADDR to all known locations in the RTL8761B's RAM
@@ -504,11 +596,16 @@ class DarkFirmwareManager:
 
         Args:
             target_mac: Target MAC address (XX:XX:XX:XX:XX:XX).
-            hci: HCI device name (default "hci0").
+            hci: HCI device name (default "<hciX>").
 
         Returns:
             True if all RAM writes succeeded and verification passed.
         """
+        if hci is None:
+
+            from blue_tap.hardware.adapter import resolve_active_hci
+
+            hci = resolve_active_hci()
         from blue_tap.utils.bt_helpers import validate_mac, normalize_mac
 
         target_mac = normalize_mac(target_mac)
@@ -531,67 +628,44 @@ class DarkFirmwareManager:
 
         info(f"RAM BDADDR patch: {current_addr} → {target_mac}")
 
+        # Known BDADDR locations in RTL8761B RAM (DarkFirmware binary, v1).
+        # Discovered by prior full-RAM scan; using fixed addresses is ~instant
+        # vs. the 53K VSC reads a dynamic scan requires (which times out).
+        _KNOWN_BDADDR_ADDRS = [
+            0x80111605,  # patch area — firmware's own BDADDR for LMP
+            0x801200A0,  # HCI state — controller active BD_ADDR
+            0x80120470,  # HCI state — advertising/scan response
+            0x80122DFC,  # HCI state — page scan address
+            0x8012384E,  # HCI state — event filter address
+        ]
+
         hci_idx = int(hci.replace("hci", "")) if hci.startswith("hci") else 0
 
         try:
             from blue_tap.hardware.hci_vsc import HCIVSCSocket
 
             with HCIVSCSocket(hci_dev=hci_idx) as sock:
-                # Step 1: Scan RAM for current BDADDR to find all copies dynamically
-                # This handles different firmware versions that may store BDADDR
-                # at different offsets.
-                bdaddr_locations: list[int] = []
-                prev_data = b""
-
-                for addr in range(0x80100000, 0x80134000, 4):
-                    data = sock.read_memory(addr, 4)
-                    if not data or len(data) < 4:
-                        prev_data = b""
-                        continue
-
-                    window = prev_data + data
-                    for i in range(len(window) - 5):
-                        if window[i:i + 6] == current_bytes:
-                            actual_addr = (addr - len(prev_data)) + i
-                            bdaddr_locations.append(actual_addr)
-                    prev_data = data
-
-                if not bdaddr_locations:
-                    error("No BDADDR copies found in RAM — cannot patch")
-                    return False
-
-                info(f"Found {len(bdaddr_locations)} BDADDR copies in RAM")
-
-                # Step 2: Write new BDADDR to each location
-                # Memory writes must be 4-byte aligned, so handle unaligned
-                # 6-byte writes by reading the surrounding word, modifying,
-                # and writing back.
+                # Write new BDADDR to each known location and verify.
                 patched = 0
-                for loc in bdaddr_locations:
+                verified = 0
+                for loc in _KNOWN_BDADDR_ADDRS:
                     ok = self._write_bdaddr_at(sock, loc, target_bytes)
                     if ok:
                         patched += 1
-                        info(f"  Patched {loc:#010x}")
+                        readback = self._read_bytes_at(sock, loc, 6)
+                        if readback == target_bytes:
+                            verified += 1
+                        else:
+                            warning(f"  Verify failed at {loc:#010x}")
                     else:
-                        warning(f"  Failed to patch {loc:#010x}")
+                        warning(f"  Write failed at {loc:#010x}")
 
                 if patched == 0:
                     error("All RAM BDADDR writes failed")
                     return False
 
-                # Step 3: Verify by reading back
-                verified = 0
-                for loc in bdaddr_locations:
-                    readback = self._read_bytes_at(sock, loc, 6)
-                    if readback == target_bytes:
-                        verified += 1
-                    else:
-                        warning(
-                            f"  Verify failed at {loc:#010x}: "
-                            f"got {readback.hex()} expected {target_bytes.hex()}"
-                        )
-
-                info(f"Verified {verified}/{len(bdaddr_locations)} locations")
+                info(f"Patched {patched}/{len(_KNOWN_BDADDR_ADDRS)} locations, "
+                     f"{verified} verified")
 
         except PermissionError:
             error("Cannot access HCI socket — need root or CAP_NET_RAW")
@@ -808,7 +882,7 @@ class DarkFirmwareManager:
         new_value: int,
         verify_opcode_byte: int,
         label: str,
-        hci: str = "hci1",
+        hci: str | None = None,
     ) -> bool:
         """Patch a single byte in both the firmware file (persistent) and RAM (immediate).
 
@@ -830,6 +904,13 @@ class DarkFirmwareManager:
         Returns:
             True if both file and RAM patches succeeded.
         """
+        if hci is None:
+
+            from blue_tap.hardware.adapter import resolve_active_hci
+
+            hci = resolve_active_hci()
+        hci = self._resolve_hci(hci)
+
         # --- Step 1: Patch the firmware FILE (persistent across resets) ---
         if not os.path.exists(FIRMWARE_PATH):
             error(f"Firmware file not found: {FIRMWARE_PATH}")
@@ -861,10 +942,18 @@ class DarkFirmwareManager:
         if current_value == new_value:
             info(f"{label.capitalize()} already set to {new_value} in firmware file")
         else:
-            # Write the new value to the firmware file
-            with open(FIRMWARE_PATH, "r+b") as f:
-                f.seek(file_offset)
-                f.write(bytes([new_value]))
+            # Atomic patch: copy → modify tmp → os.replace, same as patch_bdaddr.
+            tmp_path = FIRMWARE_PATH + ".tmp"
+            try:
+                shutil.copy2(FIRMWARE_PATH, tmp_path)
+                with open(tmp_path, "r+b") as f:
+                    f.seek(file_offset)
+                    f.write(bytes([new_value]))
+                os.replace(tmp_path, FIRMWARE_PATH)
+            except OSError as exc:
+                _cleanup_tmp(tmp_path)
+                error(f"Atomic firmware byte patch failed: {exc}")
+                return False
 
             # Verify file write
             with open(FIRMWARE_PATH, "rb") as f:
@@ -878,7 +967,10 @@ class DarkFirmwareManager:
             success(f"{label.capitalize()} patched in firmware file: {current_value} → {new_value}")
 
         # --- Step 2: Patch live RAM (immediate effect, no reset needed) ---
-        hci_idx = int(hci.replace("hci", "")) if hci.startswith("hci") else 1
+        if hci is None:
+            return True  # File patch succeeded; no adapter to RAM-patch
+
+        hci_idx = int(hci.replace("hci", ""))
 
         try:
             from blue_tap.hardware.hci_vsc import HCIVSCSocket
@@ -914,7 +1006,7 @@ class DarkFirmwareManager:
 
         return True
 
-    def patch_send_length(self, new_length: int, hci: str = "hci1") -> bool:
+    def patch_send_length(self, new_length: int, hci: str | None = None) -> bool:
         """Patch the LMP send length limit — persistent across resets.
 
         Patches both the firmware file on disk AND the live RAM.  Every
@@ -935,6 +1027,11 @@ class DarkFirmwareManager:
         Returns:
             True if the persistent patch was applied.
         """
+        if hci is None:
+
+            from blue_tap.hardware.adapter import resolve_active_hci
+
+            hci = resolve_active_hci()
         if not 1 <= new_length <= 255:
             error(f"Send length must be 1-255, got {new_length}")
             return False
@@ -948,11 +1045,16 @@ class DarkFirmwareManager:
             hci=hci,
         )
 
-    def restore_send_length(self, hci: str = "hci1") -> bool:
+    def restore_send_length(self, hci: str | None = None) -> bool:
         """Restore the original 10-byte LMP send length limit."""
+        if hci is None:
+
+            from blue_tap.hardware.adapter import resolve_active_hci
+
+            hci = resolve_active_hci()
         return self.patch_send_length(LMP_SEND_LENGTH_DEFAULT, hci)
 
-    def patch_connection_index(self, index: int, hci: str = "hci1") -> bool:
+    def patch_connection_index(self, index: int, hci: str | None = None) -> bool:
         """Patch which ACL connection slot receives LMP injection — persistent.
 
         Patches both firmware file and live RAM.  Connection index survives
@@ -965,6 +1067,11 @@ class DarkFirmwareManager:
         Returns:
             True if the persistent patch was applied.
         """
+        if hci is None:
+
+            from blue_tap.hardware.adapter import resolve_active_hci
+
+            hci = resolve_active_hci()
         if not 0 <= index <= 11:
             error(f"Connection index must be 0-11, got {index}")
             return False
@@ -978,15 +1085,20 @@ class DarkFirmwareManager:
             hci=hci,
         )
 
-    def restore_connection_index(self, hci: str = "hci1") -> bool:
+    def restore_connection_index(self, hci: str | None = None) -> bool:
         """Restore the original connection index 0."""
+        if hci is None:
+
+            from blue_tap.hardware.adapter import resolve_active_hci
+
+            hci = resolve_active_hci()
         return self.patch_connection_index(LMP_CONNECTION_INDEX_DEFAULT, hci)
 
     # ------------------------------------------------------------------
     # Memory dumping
     # ------------------------------------------------------------------
 
-    def dump_memory(self, start: int, end: int, output: str, hci: str = "hci1") -> bool:
+    def dump_memory(self, start: int, end: int, output: str, hci: str | None = None) -> bool:
         """Dump controller memory range to a file via sequential VSC 0xFC61 reads.
 
         Reads 4 bytes at a time. Invalid memory returns 0xDEADBEEF. Progress
@@ -1001,6 +1113,15 @@ class DarkFirmwareManager:
         Returns:
             True on success, False on failure.
         """
+        if hci is None:
+
+            from blue_tap.hardware.adapter import resolve_active_hci
+
+            hci = resolve_active_hci()
+        hci = self._resolve_hci(hci)
+        if hci is None:
+            return False
+
         if end <= start:
             error(f"End address (0x{end:08X}) must be greater than start (0x{start:08X})")
             return False
@@ -1011,7 +1132,7 @@ class DarkFirmwareManager:
             f"({total_bytes:,} bytes) to {output}"
         )
 
-        hci_idx = int(hci.replace("hci", "")) if hci.startswith("hci") else 1
+        hci_idx = int(hci.replace("hci", ""))
         valid_bytes = 0
         invalid_regions: list[tuple[int, int]] = []  # (region_start, region_end)
         in_invalid = False
@@ -1105,7 +1226,7 @@ class DarkFirmwareManager:
     # Connection state inspection
     # ------------------------------------------------------------------
 
-    def dump_connections(self, hci: str = "hci1") -> list[dict]:
+    def dump_connections(self, hci: str | None = None) -> list[dict]:
         """Read all 12 connection slots from firmware RAM.
 
         Reads the bos[] array at CONNECTION_TABLE_BASE. Each slot is
@@ -1116,7 +1237,16 @@ class DarkFirmwareManager:
             List of dicts with keys: slot, raw_hex, bd_addr (if parseable),
             active (bool based on non-zero check).
         """
-        hci_idx = int(hci.replace("hci", "")) if hci.startswith("hci") else 1
+        if hci is None:
+
+            from blue_tap.hardware.adapter import resolve_active_hci
+
+            hci = resolve_active_hci()
+        hci = self._resolve_hci(hci)
+        if hci is None:
+            return []
+
+        hci_idx = int(hci.replace("hci", ""))
         results: list[dict] = []
         active_count = 0
 
@@ -1138,13 +1268,29 @@ class DarkFirmwareManager:
                             warning(f"Read failed at slot {slot_idx} offset {offset}: {exc}")
                             data += b"\x00" * 4
 
-                    # Parse BD address from first 6 bytes (offset may vary)
-                    bd_bytes = data[:6]
-                    all_zero = all(b == 0 for b in bd_bytes)
-                    all_ff = all(b == 0xFF for b in bd_bytes)
-                    active = not all_zero and not all_ff
-
-                    bd_addr = ":".join(f"{b:02X}" for b in reversed(bd_bytes)) if active else ""
+                    # Probe candidate BD_ADDR offsets within the slot.
+                    # RTL8761B struct (0x2B8 bytes) — offset 0 contains other
+                    # fields; BD_ADDR is typically at 0x04 or 0x08.
+                    # We try [0x04, 0x08, 0x00] in order and accept the first
+                    # that looks like a real OUI-bearing address.
+                    bd_addr = ""
+                    active = False
+                    for bd_off in (0x04, 0x08, 0x00):
+                        if len(data) < bd_off + 6:
+                            continue
+                        bd = data[bd_off:bd_off + 6]
+                        # Reject: all-zero, all-FF, or OUI (upper 3 bytes) is
+                        # all-zero or all-FF — those are padding / uninit memory.
+                        if all(b == 0x00 for b in bd):
+                            continue
+                        if all(b == 0xFF for b in bd):
+                            continue
+                        oui = bd[3:]  # MSB end in little-endian layout
+                        if all(b == 0x00 for b in oui) or all(b == 0xFF for b in oui):
+                            continue
+                        bd_addr = ":".join(f"{b:02X}" for b in reversed(bd))
+                        active = True
+                        break
 
                     entry: dict = {
                         "slot": slot_idx,
@@ -1157,7 +1303,7 @@ class DarkFirmwareManager:
 
                     if active:
                         active_count += 1
-                        info(f"  Slot {slot_idx}: ACTIVE — BD_ADDR {bd_addr} (may be wrong offset)")
+                        info(f"  Slot {slot_idx}: ACTIVE — BD_ADDR {bd_addr}")
                     else:
                         info(f"  Slot {slot_idx}: inactive")
 
@@ -1179,7 +1325,7 @@ class DarkFirmwareManager:
         return results
 
     def dump_connection_raw(
-        self, slot: int, hci: str = "hci1"
+        self, slot: int, hci: str | None = None
     ) -> bytes:
         """Raw hex dump of a specific connection slot.
 
@@ -1191,6 +1337,15 @@ class DarkFirmwareManager:
             Raw bytes of the full slot (CONNECTION_SLOT_SIZE bytes),
             or empty bytes on failure.
         """
+        if hci is None:
+
+            from blue_tap.hardware.adapter import resolve_active_hci
+
+            hci = resolve_active_hci()
+        hci = self._resolve_hci(hci)
+        if hci is None:
+            return b""
+
         if not 0 <= slot < CONNECTION_MAX_SLOTS:
             error(f"Slot index must be 0-{CONNECTION_MAX_SLOTS - 1}, got {slot}")
             return b""
@@ -1198,7 +1353,7 @@ class DarkFirmwareManager:
         slot_addr = CONNECTION_TABLE_BASE + (slot * CONNECTION_SLOT_SIZE)
         info(f"Dumping connection slot {slot} at 0x{slot_addr:08X} ({CONNECTION_SLOT_SIZE} bytes)...")
 
-        hci_idx = int(hci.replace("hci", "")) if hci.startswith("hci") else 1
+        hci_idx = int(hci.replace("hci", ""))
         data = b""
 
         try:
@@ -1497,7 +1652,7 @@ class DarkFirmwareWatchdog:
 
     Usage::
 
-        watchdog = DarkFirmwareWatchdog("hci0")
+        watchdog = DarkFirmwareWatchdog("<hciX>")
         watchdog.start()      # Background threads start
         # ... long fuzzing session ...
         watchdog.stop()       # Clean shutdown
@@ -1505,7 +1660,7 @@ class DarkFirmwareWatchdog:
 
     def __init__(
         self,
-        hci: str = "hci1",
+        hci: str | None = None,
         poll_interval: float = 30.0,
         on_reinit: object | None = None,
     ) -> None:
@@ -1516,7 +1671,15 @@ class DarkFirmwareWatchdog:
             on_reinit:     Optional callback ``(hci: str, event: str) -> None``
                            called after successful re-initialization.
         """
+        if hci is None:
+
+            from blue_tap.hardware.adapter import resolve_active_hci
+
+            hci = resolve_active_hci()
         import threading
+
+        if hci is None:
+            hci = DarkFirmwareManager().find_rtl8761b_hci()
 
         self.hci = hci
         self.poll_interval = poll_interval
@@ -1640,7 +1803,14 @@ class DarkFirmwareWatchdog:
                 pass
 
     def _udev_monitor_loop(self) -> None:
-        """Watch udevadm monitor for USB add/remove events on RTL8761B."""
+        """Watch udevadm monitor for USB add/remove events on RTL8761B.
+
+        Spawns a single ``udevadm monitor`` subprocess and consumes its stdout.
+        The process is always terminated on exit (clean stop or error) so
+        watchdog teardown does not leak a zombie reader. If udevadm is missing
+        or the subprocess dies unexpectedly the loop falls back to polling-only
+        mode instead of respawning in a tight loop.
+        """
         import subprocess
 
         while not self._stop_event.is_set():
@@ -1655,13 +1825,15 @@ class DarkFirmwareWatchdog:
                 # udevadm not available — fall back to polling only
                 info("DarkFirmware watchdog: udevadm not found, using polling only")
                 return
-            except Exception:
+            except Exception as exc:
+                warning(f"DarkFirmware watchdog: failed to start udevadm ({exc}); polling only")
                 return
 
             try:
                 while not self._stop_event.is_set():
-                    line = proc.stdout.readline()
+                    line = proc.stdout.readline() if proc.stdout else ""
                     if not line:
+                        # EOF or subprocess died — escape outer respawn loop.
                         break
 
                     # Look for RTL8761B VID:PID in udev events
@@ -1678,13 +1850,14 @@ class DarkFirmwareWatchdog:
             finally:
                 try:
                     proc.terminate()
-                    proc.wait(timeout=2)
+                    proc.wait(timeout=2.0)
                 except Exception:
                     try:
                         proc.kill()
                     except Exception:
                         pass
-
-            # If udevadm exits, wait a bit and restart
+            # Subprocess exited without a stop signal — don't respawn, the
+            # periodic health check loop still covers the watchdog purpose.
             if not self._stop_event.is_set():
-                self._stop_event.wait(5.0)
+                info("DarkFirmware watchdog: udev monitor exited; using polling only")
+            return
