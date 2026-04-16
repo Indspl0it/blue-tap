@@ -41,7 +41,8 @@ classifiers = [
 Homepage = "https://github.com/Indspl0it/blue-tap"
 Repository = "https://github.com/Indspl0it/blue-tap"
 Issues = "https://github.com/Indspl0it/blue-tap/issues"
-Changelog = "https://github.com/Indspl0it/blue-tap/blob/main/docs/CHANGELOG.md"
+Changelog = "https://github.com/Indspl0it/blue-tap/blob/main/docs/changelog.md"
+Documentation = "https://Indspl0it.github.io/blue-tap/"
 
 [project.optional-dependencies]
 dev = ["pytest", "ruff"]
