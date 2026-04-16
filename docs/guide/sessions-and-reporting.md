@@ -1,0 +1,357 @@
+# Sessions and Reporting
+
+---
+
+## Sessions
+
+A session is a named directory that accumulates all command outputs from a Blue-Tap run. Sessions are auto-created with the format `blue-tap_YYYYMMDD_HHMMSS`.
+
+Every command you run --- discovery, recon, vulnscan, extraction, fuzzing, DoS --- writes its results as a JSON envelope into the session directory. This gives you a complete, timestamped record of everything that happened during an assessment, which feeds directly into report generation.
+
+### Directory Structure
+
+```
+sessions/
+  blue-tap_20260416_143022/
+    session.json              # Session metadata
+    001_scan_classic.json     # Discovery results
+    002_recon_auto.json       # Reconnaissance envelope
+    003_vulnscan.json         # Assessment results
+    004_dos.json              # DoS check results
+    005_fuzz_campaign.json    # Fuzzing campaign results
+    pbap/                     # Extracted contacts (vCards)
+      pb.vcf
+      ich.vcf
+      photos/
+    map/                      # Extracted messages
+      inbox/
+    audio/                    # Captured audio files
+      hfp_record_20260416_144510.wav
+    fuzz/                     # Fuzzing data
+      corpus/
+        sdp/
+        l2cap/
+      crashes/
+        crash_001_sdp.bin
+    at/                       # AT command extracts
+    report.html               # Generated report
+    report.json               # JSON export
+```
+
+### session.json
+
+The `session.json` file is the session's metadata record. It tracks what was done, when, and against which targets.
+
+```json
+{
+  "session_id": "blue-tap_20260416_143022",
+  "created_at": "2026-04-16T14:30:22Z",
+  "updated_at": "2026-04-16T16:45:10Z",
+  "adapter": "hci0",
+  "targets": [
+    {
+      "address": "AA:BB:CC:DD:EE:FF",
+      "name": "MyCarAudio",
+      "type": "classic",
+      "first_seen": "2026-04-16T14:30:45Z"
+    }
+  ],
+  "commands": [
+    {
+      "index": 1,
+      "command": "scan classic -d 15",
+      "started_at": "2026-04-16T14:30:22Z",
+      "completed_at": "2026-04-16T14:30:37Z",
+      "envelope": "001_scan_classic.json"
+    },
+    {
+      "index": 2,
+      "command": "recon auto AA:BB:CC:DD:EE:FF",
+      "started_at": "2026-04-16T14:31:02Z",
+      "completed_at": "2026-04-16T14:33:45Z",
+      "envelope": "002_recon_auto.json"
+    },
+    {
+      "index": 3,
+      "command": "vulnscan AA:BB:CC:DD:EE:FF",
+      "started_at": "2026-04-16T14:34:00Z",
+      "completed_at": "2026-04-16T14:38:22Z",
+      "envelope": "003_vulnscan.json"
+    }
+  ],
+  "notes": []
+}
+```
+
+### Storage Location
+
+Session directory is resolved in priority order:
+
+1. `BT_TAP_SESSIONS_DIR` environment variable
+2. `./sessions` relative to the current working directory
+3. `~/.blue-tap` in the user's home directory
+
+### Atomic Writes
+
+All session file writes use atomic operations: write to a temporary file, `fsync`, then `os.replace` to the target path. This prevents corrupted session data if the process is interrupted.
+
+### Managing Sessions Across Multiple Days
+
+Real assessments often span multiple days. Blue-Tap creates a new session for each invocation, but you can consolidate work in several ways.
+
+**Continue a session.** Set the `BT_TAP_SESSIONS_DIR` environment variable to point to the same directory across days. Each invocation creates a new session, but all sessions are co-located for reporting.
+
+**Generate a combined report.** The `report` command can aggregate multiple sessions:
+
+```bash
+# Report from the current session (default)
+blue-tap report --format html
+
+# Report from a specific session
+blue-tap report --session blue-tap_20260416_143022 --format html
+
+# Report combining all sessions in the directory
+blue-tap report --all --format html
+```
+
+!!! tip "Multi-Day Assessments"
+    Name your session directory after the engagement: `export BT_TAP_SESSIONS_DIR=./sessions/client-ivi-audit-2026`. All days of testing write to the same parent directory, and the final report aggregates everything.
+
+### CLI
+
+```bash
+# List all sessions
+blue-tap session list
+```
+
+```
+$ blue-tap session list
+
+  Sessions (./sessions/):
+  ──────────────────────────────────────────────────────────────
+  Session ID                   Created           Commands  Targets
+  ──────────────────────────────────────────────────────────────
+  blue-tap_20260416_143022     2026-04-16 14:30  8         1
+  blue-tap_20260415_091500     2026-04-15 09:15  12        3
+  blue-tap_20260414_160000     2026-04-14 16:00  5         1
+  ──────────────────────────────────────────────────────────────
+```
+
+```bash
+# Show session details
+blue-tap session show blue-tap_20260416_143022
+```
+
+```
+$ blue-tap session show blue-tap_20260416_143022
+
+  Session: blue-tap_20260416_143022
+  Created: 2026-04-16 14:30:22
+  Updated: 2026-04-16 16:45:10
+  Adapter: hci0
+
+  Targets:
+    AA:BB:CC:DD:EE:FF  MyCarAudio  (Classic)
+
+  Commands (8):
+    #  Time   Command                              Envelope
+    1  14:30  scan classic -d 15                    001_scan_classic.json
+    2  14:31  recon auto AA:BB:CC:DD:EE:FF          002_recon_auto.json
+    3  14:34  vulnscan AA:BB:CC:DD:EE:FF             003_vulnscan.json
+    4  14:39  extract AA:BB:CC:DD:EE:FF contacts     004_pbap.json
+    5  14:42  extract AA:BB:CC:DD:EE:FF messages     005_map.json
+    6  14:50  dos AA:BB:CC:DD:EE:FF                  006_dos.json
+    7  15:00  fuzz campaign AA:BB:CC:DD:EE:FF        007_fuzz.json
+    8  16:45  report --format html                   ---
+
+  Artifacts:
+    pbap/pb.vcf                          142 KB  847 contacts
+    map/inbox/                           89 KB   20 messages
+    audio/hfp_record_20260416_144510.wav 480 KB  30s recording
+    fuzz/crashes/crash_001_sdp.bin       48 B    CRITICAL
+```
+
+---
+
+## Reporting
+
+### Generate a Report
+
+```bash
+# HTML report (default)
+blue-tap report --format html --output report.html
+
+# JSON export
+blue-tap report --format json --output report.json
+```
+
+### HTML Report
+
+Professional styled report designed to be handed directly to stakeholders. The report is a single self-contained HTML file --- no external dependencies, no JavaScript, no CDN links. It can be opened in any browser, emailed as an attachment, or printed to PDF.
+
+**Characteristics:**
+
+- **Print-friendly**: clean layout when printed or exported to PDF
+- **Inline SVG charts**: donut charts for vulnerability distribution, bar charts for severity breakdown
+- **Responsive CSS**: renders well on screens of any width
+- **Color-coded severity badges**: `CRITICAL` (red), `HIGH` (orange), `MEDIUM` (yellow), `LOW` (blue), `INFO` (gray)
+
+### Report Sections
+
+The HTML report is organized into sections that follow the assessment lifecycle. Here's what each section contains and how it looks.
+
+**Executive Summary** --- the first page. Designed for non-technical stakeholders.
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  BLUE-TAP SECURITY ASSESSMENT REPORT                     │
+│                                                          │
+│  Overall Risk: ██ CRITICAL                               │
+│                                                          │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌─────────┐ │
+│  │ Devices  │  │ Vulns    │  │ Checks   │  │ Crashes │ │
+│  │    1     │  │   4      │  │  47/52   │  │   3     │ │
+│  │  found   │  │  found   │  │  passed  │  │  found  │ │
+│  └──────────┘  └──────────┘  └──────────┘  └─────────┘ │
+│                                                          │
+│  The target IVI system (MyCarAudio) has 4 confirmed      │
+│  vulnerabilities including 1 CRITICAL (CVE-2020-0022)    │
+│  and 2 HIGH severity findings. The fuzzing campaign      │
+│  discovered 3 unique crashes, one of which causes a      │
+│  permanent denial of service requiring a power cycle.    │
+│  PBAP data extraction revealed 847 contacts from the     │
+│  current pairing and 2 stale phonebook caches from       │
+│  previous pairings.                                      │
+└─────────────────────────────────────────────────────────┘
+```
+
+| Section | Contents |
+|---------|----------|
+| **Executive Summary** | Overall risk rating, narrative summary, metric cards (devices found, vulnerabilities, checks passed/failed) |
+| **Scope and Methodology** | Target list, adapter, scan modes, modules executed |
+| **Timeline** | Chronological sequence of commands with timestamps |
+| **Discovered Devices** | All devices found during discovery, with CoD, name, RSSI, vendor |
+| **Vulnerabilities** | CVE findings with severity, description, evidence, remediation |
+| **Attacks** | Exploitation results with success/failure status and evidence |
+| **Fuzzing Campaigns** | Campaign statistics, crash summaries, fuzzing intelligence metrics |
+| **LMP Captures** | LMP frame captures (if DarkFirmware was used) |
+| **Reconnaissance** | Service enumeration, profile details, version information |
+| **DoS Tests** | Denial-of-service check results with recovery status |
+| **Data Extraction** | Extracted contacts, messages, files, AT command results |
+| **Audio** | Audio capture/injection results with file references |
+| **Appendix** | Analyst notes, raw command outputs, configuration details |
+
+!!! info "Section Visibility"
+    Sections are only included if the corresponding module was executed. A quick scan-and-vulnscan assessment won't have fuzzing, DoS, or extraction sections. The report adapts to what was actually done.
+
+### Vulnerability Section Detail
+
+Each vulnerability entry in the report includes:
+
+```
+┌───────────────────────────────────────────────────────────────┐
+│  CVE-2020-0022 (BlueFrag)                     ██ CRITICAL    │
+│                                                               │
+│  Description: ACL fragment reassembly buffer overflow in      │
+│  Android Bluetooth stack. Crafted L2CAP fragments trigger     │
+│  an integer overflow in reassembly buffer calculation.        │
+│                                                               │
+│  Evidence:                                                    │
+│  - Target responded to crafted ACL fragment with connection   │
+│    reset (matching known-vulnerable behavior)                 │
+│  - Android version: 9.0 (within affected range 8.0-9.0)      │
+│                                                               │
+│  Affected versions: Android 8.0 - 9.0                        │
+│  Remediation: Update to Android 10+ or apply patch level      │
+│  2020-02-05 or later.                                         │
+│                                                               │
+│  References:                                                  │
+│  - https://nvd.nist.gov/vuln/detail/CVE-2020-0022            │
+│  - https://insinuator.net/2020/04/cve-2020-0022/             │
+└───────────────────────────────────────────────────────────────┘
+```
+
+### JSON Report
+
+Structured export for integration with other tools, dashboards, or vulnerability management systems.
+
+| Key | Description |
+|-----|-------------|
+| `generated` | ISO 8601 timestamp of report generation |
+| `tool` | Tool name and version |
+| `version` | Report schema version |
+| `risk_rating` | Overall risk rating (CRITICAL / HIGH / MEDIUM / LOW / INFO) |
+| `scope` | Target devices, adapter, scan parameters |
+| `summary` | Narrative summary and metric counts |
+| `timeline` | Array of timestamped command entries |
+| `modules` | Module execution metadata |
+| `executions` | All ExecutionRecord envelopes |
+| `vulnerabilities` | Vulnerability findings with severity and evidence |
+| `fuzzing` | Fuzzing campaign results and crash data |
+| `notes` | Analyst notes and annotations |
+
+### Report Adapter Pipeline
+
+Understanding how data flows from module execution to report output helps when interpreting results or troubleshooting missing sections.
+
+```
+Module execution
+    │
+    ▼
+RunEnvelope (JSON)          ← Module writes structured results
+    │
+    ▼
+Session store               ← Envelope saved to session directory
+    │
+    ▼
+Report generator            ← Reads all envelopes from session
+    │
+    ├──▶ Discovery adapter  ← Transforms scan envelopes → device table
+    ├──▶ Vulnscan adapter   ← Transforms check results → vulnerability cards
+    ├──▶ Attack adapter     ← Transforms exploit results → attack summary
+    ├──▶ Data adapter       ← Transforms PBAP/MAP/AT → extraction summary
+    ├──▶ Audio adapter      ← Transforms HFP/A2DP/AVRCP → audio summary
+    ├──▶ DoS adapter        ← Transforms check results → DoS table
+    ├──▶ Fuzz adapter       ← Transforms campaign data → crash report
+    ├──▶ Recon adapter      ← Transforms enumeration → service tables
+    ├──▶ Firmware adapter   ← Transforms DarkFirmware ops → firmware section
+    ├──▶ LMP capture adapter← Transforms LMP frames → capture table
+    └──▶ Spoof adapter      ← Transforms spoofing ops → spoof summary
+    │
+    ▼
+HTML renderer               ← Assembles sections, applies CSS, generates SVG charts
+    │
+    ▼
+report.html                 ← Single self-contained file
+```
+
+Each adapter implements the `ReportAdapter` contract from `blue_tap.framework.contracts.report_contract`. The adapter receives the raw `RunEnvelope` data and transforms it into `SectionBlock` objects that the renderer knows how to display.
+
+### Report Adapters
+
+11 adapters transform module-specific envelope data into report sections:
+
+| Adapter | Module Data |
+|---------|-------------|
+| `discovery` | Scan results, device list |
+| `vulnscan` | Vulnerability check results |
+| `attack` | Exploitation outcomes |
+| `data` | PBAP, MAP, OPP, AT extraction |
+| `audio` | HFP, A2DP, AVRCP operations |
+| `dos` | DoS check results and recovery |
+| `firmware` | DarkFirmware operations |
+| `fuzz` | Fuzzing campaigns and crashes |
+| `lmp_capture` | LMP frame captures |
+| `recon` | Reconnaissance enumerations |
+| `spoof` | MAC/name spoofing operations |
+
+!!! info "Custom Adapters"
+    Each adapter implements the `ReportAdapter` contract from `blue_tap.framework.contracts.report_contract`. To add reporting for a new module, create an adapter in `blue_tap/framework/reporting/adapters/` and register it. See the [Report Adapters developer guide](../developer/report-adapters.md) for implementation details.
+
+---
+
+## Next Steps
+
+- **Automate report generation**: Include `report --format html` as the last step in an [auto mode](automation.md) run or [playbook](automation.md#playbooks).
+- **Custom playbooks**: Define assessment sequences that produce consistent reports across engagements. See [Automation](automation.md).
+- **Developer integration**: For adding reporting to custom modules, see [Writing a Module](../developer/writing-a-module.md) and [Report Adapters](../developer/report-adapters.md).
