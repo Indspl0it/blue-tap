@@ -41,10 +41,15 @@ def _runtime_str(seconds: float) -> str:
 
 
 class FuzzReportAdapter(ReportAdapter):
-    module = "fuzz"
+    module = "fuzzing"
 
     def accepts(self, envelope: dict[str, Any]) -> bool:
-        return envelope.get("module") == self.module or envelope.get("schema") == "blue_tap.fuzz.result"
+        """Accept legacy ``module="fuzz"`` and modern ``fuzzing.*`` envelopes."""
+        module = str(envelope.get("module", ""))
+        schema = str(envelope.get("schema", ""))
+        if module == self.module or module.startswith("fuzzing."):
+            return True
+        return schema == "blue_tap.fuzz.result"
 
     def ingest(self, envelope: dict[str, Any], report_state: dict[str, Any]) -> None:
         report_state.setdefault("fuzz_runs", []).append(envelope)

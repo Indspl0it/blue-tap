@@ -9,10 +9,28 @@ from blue_tap.framework.contracts.result_schema import envelope_executions, enve
 
 
 class VulnscanReportAdapter(ReportAdapter):
-    module = "vulnscan"
+    module = "assessment"
 
     def accepts(self, envelope: dict[str, Any]) -> bool:
-        return envelope.get("module") == self.module or envelope.get("schema") == "blue_tap.vulnscan.result"
+        """Accept any vulnscan-family envelope.
+
+        Includes:
+        - Legacy ``module="vulnscan"`` / ``schema="blue_tap.vulnscan.result"``
+          (the fleet and vuln_scanner aggregators).
+        - Per-CVE check envelopes from ``assessment.*`` modules which use
+          schemas like ``blue_tap.assessment.cve_check.result`` — these were
+          invisible to the report before because the adapter only matched
+          the legacy shape, so single-CVE runs never appeared in reports.
+        """
+        module = str(envelope.get("module", ""))
+        schema = str(envelope.get("schema", ""))
+        if module == self.module or module.startswith("assessment."):
+            return True
+        if schema == "blue_tap.vulnscan.result":
+            return True
+        if schema.startswith("blue_tap.assessment."):
+            return True
+        return False
 
     def ingest(self, envelope: dict[str, Any], report_state: dict[str, Any]) -> None:
         report_state.setdefault("vuln_scan_runs", []).append(envelope)

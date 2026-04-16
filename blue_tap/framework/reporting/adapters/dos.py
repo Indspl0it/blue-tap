@@ -20,10 +20,17 @@ def _extract_cves(execution: dict[str, Any]) -> str:
 
 
 class DosReportAdapter(ReportAdapter):
-    module = "dos"
+    module = "exploitation.dos"
 
     def accepts(self, envelope: dict[str, Any]) -> bool:
-        return envelope.get("module") == self.module or envelope.get("schema") == "blue_tap.dos.result"
+        """Accept ``module="dos"`` and exploitation DoS sub-family envelopes."""
+        module = str(envelope.get("module", ""))
+        schema = str(envelope.get("schema", ""))
+        if module == self.module:
+            return True
+        if module.startswith("exploitation.dos") or module.startswith("exploitation.dos_"):
+            return True
+        return schema == "blue_tap.dos.result"
 
     def ingest(self, envelope: dict[str, Any], report_state: dict[str, Any]) -> None:
         report_state.setdefault("dos_runs", []).append(envelope)

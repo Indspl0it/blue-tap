@@ -12,7 +12,19 @@ class DataReportAdapter(ReportAdapter):
     module = "data"
 
     def accepts(self, envelope: dict[str, Any]) -> bool:
-        return envelope.get("module") == self.module or envelope.get("schema") == "blue_tap.data.result"
+        """Accept legacy data envelopes plus PBAP/MAP/OPP/bluesnarfer modules."""
+        module = str(envelope.get("module", ""))
+        schema = str(envelope.get("schema", ""))
+        if module == self.module:
+            return True
+        if module in (
+            "post_exploitation.pbap",
+            "post_exploitation.map",
+            "post_exploitation.opp",
+            "post_exploitation.bluesnarfer",
+        ) or module.startswith("post_exploitation.contacts.") or module.startswith("post_exploitation.data."):
+            return True
+        return schema == "blue_tap.data.result"
 
     def ingest(self, envelope: dict[str, Any], report_state: dict[str, Any]) -> None:
         report_state.setdefault("data_runs", []).append(envelope)

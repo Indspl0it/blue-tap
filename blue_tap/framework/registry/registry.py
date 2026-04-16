@@ -28,6 +28,9 @@ class ModuleRegistry:
     def get(self, module_id: str) -> ModuleDescriptor:
         return self._modules[module_id]
 
+    def try_get(self, module_id: str) -> "ModuleDescriptor | None":
+        return self._modules.get(module_id)
+
     def list_all(self) -> list[ModuleDescriptor]:
         return sorted(self._modules.values(), key=lambda d: d.module_id)
 

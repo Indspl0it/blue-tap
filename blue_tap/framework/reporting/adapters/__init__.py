@@ -2,7 +2,6 @@
 
 from blue_tap.framework.reporting.adapters.attack import AttackReportAdapter
 from blue_tap.framework.reporting.adapters.audio import AudioReportAdapter
-from blue_tap.framework.reporting.adapters.auto import AutoReportAdapter
 from blue_tap.framework.reporting.adapters.data import DataReportAdapter
 from blue_tap.framework.reporting.adapters.discovery import DiscoveryReportAdapter
 from blue_tap.framework.reporting.adapters.dos import DosReportAdapter
@@ -23,7 +22,6 @@ REPORT_ADAPTERS = (
     DiscoveryReportAdapter(),
     VulnscanReportAdapter(),
     AttackReportAdapter(),
-    AutoReportAdapter(),
     DataReportAdapter(),
     AudioReportAdapter(),
     DosReportAdapter(),
@@ -34,8 +32,8 @@ REPORT_ADAPTERS = (
     SpoofReportAdapter(),
 )
 
-# Set of module names already covered by the static tuple — used to avoid duplicates
-_BUILTIN_MODULES: frozenset[str] = frozenset(a.module for a in REPORT_ADAPTERS)
+# Set of adapter class identities already covered by the static tuple
+_BUILTIN_ADAPTER_CLASSES: frozenset[type] = frozenset(type(a) for a in REPORT_ADAPTERS)
 
 
 def get_report_adapters() -> tuple:
@@ -46,6 +44,10 @@ def get_report_adapters() -> tuple:
     on their :class:`~blue_tap.framework.registry.ModuleDescriptor`.  This function
     imports those classes at call time (lazy) and appends them to the static tuple.
 
+    Dedup: adapters are identified by class. A plugin descriptor that points to an
+    already-built-in adapter class (or to the same class as another plugin
+    descriptor) is loaded only once.
+
     Returns:
         Tuple of :class:`~blue_tap.framework.contracts.report_contract.ReportAdapter`
         instances.  Safe to call multiple times (re-imports on each call; callers
@@ -54,19 +56,20 @@ def get_report_adapters() -> tuple:
     from blue_tap.framework.registry import get_registry
 
     extra: list = []
+    seen_classes: set[type] = set(_BUILTIN_ADAPTER_CLASSES)
     try:
         registry = get_registry()
         for desc in registry.list_all():
             if not desc.report_adapter_path:
                 continue
-            if desc.module_id.split(".", 1)[1] in _BUILTIN_MODULES:
-                # Built-in module — already covered by the static tuple
-                continue
             try:
                 module_path, class_name = desc.report_adapter_path.rsplit(":", 1)
                 mod = importlib.import_module(module_path)
                 cls = getattr(mod, class_name)
+                if cls in seen_classes:
+                    continue
                 extra.append(cls())
+                seen_classes.add(cls)
                 _logger.debug(
                     "Loaded plugin report adapter %s for module %s",
                     desc.report_adapter_path,
@@ -99,7 +102,6 @@ def get_adapters_for_report(schema: str) -> list:
 __all__ = [
     "AttackReportAdapter",
     "AudioReportAdapter",
-    "AutoReportAdapter",
     "DataReportAdapter",
     "DiscoveryReportAdapter",
     "DosReportAdapter",

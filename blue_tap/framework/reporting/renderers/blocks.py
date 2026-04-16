@@ -147,13 +147,29 @@ def render_badge_group(badges: list[dict]) -> str:
 
 
 def _badge_class(status: str) -> str:
-    """Map a status string to a CSS badge class."""
+    """Map a status string to a CSS badge class.
+
+    In pentest reports, ``confirmed`` and ``success`` are attack outcomes — they
+    mean the target is vulnerable and should render as red (``badge-danger``).
+    ``completed`` is an execution-lifecycle status meaning "finished without a
+    crash"; it is neutral and renders as ``badge-info`` so a successful scan or
+    non-vulnerable target doesn't look like a critical finding.
+    """
     status_lower = str(status).lower()
-    if status_lower in ("confirmed", "success", "completed", "high"):
+    if status_lower in ("confirmed", "success", "high", "vulnerable"):
         return "badge-danger"
     if status_lower in ("inconclusive", "recovered", "medium", "warning"):
         return "badge-warning"
-    if status_lower in ("not_applicable", "skipped", "low", "info"):
+    if status_lower in (
+        "completed",
+        "observed",
+        "not_applicable",
+        "skipped",
+        "low",
+        "info",
+        "safe",
+        "not_detected",
+    ):
         return "badge-info"
     if status_lower in ("failed", "error", "critical", "unresponsive"):
         return "badge-critical"

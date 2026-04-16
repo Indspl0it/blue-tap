@@ -2,11 +2,6 @@
 
 from blue_tap.framework.envelopes.attack import build_attack_result, artifact_if_file as attack_artifact_if_file
 from blue_tap.framework.envelopes.audio import build_audio_result, artifact_if_file as audio_artifact_if_file
-from blue_tap.framework.envelopes.auto import (
-    make_auto_run_id,
-    build_auto_phase_execution,
-    build_auto_result,
-)
 from blue_tap.framework.envelopes.data import build_data_result, artifact_if_path as data_artifact_if_path
 from blue_tap.framework.envelopes.firmware import (
     make_firmware_run_id,
@@ -44,10 +39,6 @@ __all__ = [
     # audio
     "build_audio_result",
     "audio_artifact_if_file",
-    # auto
-    "make_auto_run_id",
-    "build_auto_phase_execution",
-    "build_auto_result",
     # data
     "build_data_result",
     "data_artifact_if_path",

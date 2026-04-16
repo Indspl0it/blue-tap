@@ -25,9 +25,9 @@ class ModuleDescriptor:
     report_adapter_path: str | None = None
     """Dotted import path to the ReportAdapter class for this module.
 
-    Format: ``'package.module:ClassName'``
-    Used by :func:`~blue_tap.framework.reporting.adapters.get_report_adapters`
-    to dynamically load third-party adapters registered via the plugin system.
+    Format: ``'package.module:ClassName'``. Used by
+    :func:`~blue_tap.framework.reporting.adapters.get_report_adapters` to
+    dynamically load third-party adapters registered via the plugin system.
     Built-in adapters leave this ``None`` and are listed in the static
     ``REPORT_ADAPTERS`` tuple instead.
 
@@ -35,6 +35,12 @@ class ModuleDescriptor:
 
         report_adapter_path="my_plugin.adapters:MyModuleAdapter"
     """
+
+    category: str | None = None
+    """Sub-category within a family (e.g., 'pairing', 'l2cap', 'ble' for DoS)."""
+
+    references: tuple[str, ...] = ()
+    """External references (CVEs, RFCs, specifications) associated with the module."""
 
     def __post_init__(self) -> None:
         if not re.match(r"^[a-z0-9_]+\.[a-z0-9_]+$", self.module_id):

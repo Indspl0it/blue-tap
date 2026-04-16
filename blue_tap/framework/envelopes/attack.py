@@ -45,7 +45,7 @@ def build_attack_result(
         kind="operation",
         id=operation,
         title=title,
-        module="attack",
+        module="exploitation",
         protocol=protocol,
         execution_status=EXECUTION_COMPLETED,
         module_outcome=module_outcome,
@@ -59,7 +59,7 @@ def build_attack_result(
     )
     return build_run_envelope(
         schema="blue_tap.attack.result",
-        module="attack",
+        module="exploitation",
         target=target,
         adapter=adapter,
         operator_context={"operation": operation},

@@ -9,10 +9,15 @@ from blue_tap.framework.contracts.result_schema import envelope_executions
 
 
 class ReconReportAdapter(ReportAdapter):
-    module = "recon"
+    module = "reconnaissance"
 
     def accepts(self, envelope: dict[str, Any]) -> bool:
-        return envelope.get("module") == self.module or envelope.get("schema") == "blue_tap.recon.result"
+        """Accept legacy ``module="recon"`` and modern ``reconnaissance.*`` envelopes."""
+        module = str(envelope.get("module", ""))
+        schema = str(envelope.get("schema", ""))
+        if module == self.module or module.startswith("reconnaissance."):
+            return True
+        return schema == "blue_tap.recon.result"
 
     def ingest(self, envelope: dict[str, Any], report_state: dict[str, Any]) -> None:
         report_state.setdefault("recon_runs", []).append(envelope)

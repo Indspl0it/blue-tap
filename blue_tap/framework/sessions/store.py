@@ -23,10 +23,63 @@ import json
 import logging
 import os
 from datetime import datetime
+from typing import Any
 
 from blue_tap.framework.contracts.result_schema import looks_like_run_envelope, validate_run_envelope
 
 _logger = logging.getLogger(__name__)
+
+
+def _atomic_write_bytes_or_text(filepath: str, content: str | bytes) -> None:
+    """Write ``content`` to ``filepath`` atomically via tempfile + os.replace.
+
+    The temp file lives in the same directory as the target so the final
+    rename is atomic on POSIX. On failure the temp file is best-effort
+    unlinked before the exception propagates, leaving no partial state behind.
+    """
+    directory = os.path.dirname(filepath) or "."
+    os.makedirs(directory, exist_ok=True)
+    tmp_path = f"{filepath}.tmp"
+    mode = "wb" if isinstance(content, bytes) else "w"
+    try:
+        with open(tmp_path, mode) as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, filepath)
+    except Exception:
+        if os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        raise
+
+
+def _atomic_write_json(filepath: str, payload: dict | list) -> None:
+    """JSON-serialise ``payload`` and write it atomically to ``filepath``."""
+    text = json.dumps(payload, indent=2, default=str)
+    _atomic_write_bytes_or_text(filepath, text)
+
+
+def resolve_sessions_base_dir() -> str:
+    """Return the directory containing per-session subdirectories.
+
+    Resolution order (first wins):
+      1. ``BT_TAP_SESSIONS_DIR`` environment variable — explicit override
+      2. ``./sessions`` if it exists in the current working directory — legacy layout
+      3. ``~/.blue-tap`` — user-scoped default
+
+    The returned path is the *parent* of individual session dirs. The ``sessions``
+    suffix is owned by ``Session.__init__`` (``SESSIONS_DIR``).
+    """
+    override = os.environ.get("BT_TAP_SESSIONS_DIR")
+    if override:
+        return override
+    cwd_sessions = os.path.join(".", "sessions")
+    if os.path.isdir(cwd_sessions):
+        return "."
+    return os.path.expanduser("~/.blue-tap")
 
 
 # Module-level active session (set by CLI --session flag)
@@ -99,12 +152,14 @@ class Session:
 
     SESSIONS_DIR = "sessions"
 
-    def __init__(self, name: str, base_dir: str = "."):
+    def __init__(self, name: str, base_dir: str | None = None):
         # Sanitize name to prevent path traversal
         safe_name = os.path.basename(name)
         if not safe_name or safe_name != name:
             raise ValueError(f"Invalid session name: {name!r} (must be a simple name, no path separators)")
         self.name = safe_name
+        if base_dir is None:
+            base_dir = resolve_sessions_base_dir()
         self.dir = os.path.join(base_dir, self.SESSIONS_DIR, safe_name)
         self.meta_file = os.path.join(self.dir, "session.json")
         self.command_count = 0
@@ -125,6 +180,7 @@ class Session:
             "last_updated": datetime.now().isoformat(),
             "adapter": "",
             "targets": [],
+            "hosts": [],
             "commands": [],
             "files": [],
         }
@@ -142,16 +198,36 @@ class Session:
         self.command_count = len(self.metadata.get("commands", []))
 
     def _save_meta(self):
-        """Write session metadata to disk."""
+        """Write session metadata to disk atomically.
+
+        Writes to a temp file in the same directory, fsyncs, then renames on top
+        of the target. A crash mid-write leaves the previous session.json intact
+        instead of producing a truncated file that ``_load`` would interpret as
+        corrupt and silently recreate.
+        """
         self.metadata["last_updated"] = datetime.now().isoformat()
-        with open(self.meta_file, "w") as f:
-            json.dump(self.metadata, f, indent=2, default=str)
+        tmp_path = f"{self.meta_file}.tmp"
+        try:
+            with open(tmp_path, "w") as f:
+                json.dump(self.metadata, f, indent=2, default=str)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, self.meta_file)
+        except Exception:
+            if os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+            raise
 
     def log(self, command: str, data: dict | list | str,
             category: str = "general", target: str = "") -> str:
         """Log a command result to the session.
 
-        Creates a numbered JSON file and adds an entry to the command log.
+        Creates a numbered JSON file atomically (temp write + rename) so a
+        crash mid-write does not leave a truncated command artefact that the
+        report generator would skip silently.
         """
         self.command_count += 1
         seq = f"{self.command_count:03d}"
@@ -180,8 +256,7 @@ class Session:
                 command,
                 category,
             )
-        with open(filepath, "w") as f:
-            json.dump(entry, f, indent=2, default=str)
+        _atomic_write_json(filepath, entry)
 
         # Update command log
         log_entry = {
@@ -203,44 +278,105 @@ class Session:
         self._save_meta()
         return filepath
 
-    def save_raw(self, filename: str, content: str | bytes,
-                 subdir: str = "") -> str:
-        """Save a raw file to the session directory."""
-        if subdir:
-            target_dir = os.path.join(self.dir, subdir)
-            os.makedirs(target_dir, exist_ok=True)
-            filepath = os.path.join(target_dir, filename)
-        else:
-            filepath = os.path.join(self.dir, filename)
+    def save_raw(self, filename: str, content: str | bytes | None = None,
+                 subdir: str = "", *,
+                 data: str | bytes | None = None,
+                 artifact_type: str | None = None) -> str:
+        """Save a raw file to the session directory atomically.
 
-        mode = "wb" if isinstance(content, bytes) else "w"
-        with open(filepath, mode) as f:
-            f.write(content)
+        ``content`` and ``data`` are accepted as aliases; exactly one must be
+        provided. ``artifact_type`` groups files into a per-type subdirectory
+        when ``subdir`` is not explicitly set (e.g., ``artifact_type="pcap"``
+        → ``<session>/pcap/<filename>``).
+
+        Writes via tempfile + ``os.replace`` so a crash mid-write never leaves
+        a partially-written artefact on disk. Path traversal is blocked by
+        anchoring the final path under ``self.dir``.
+        """
+        if content is None and data is None:
+            raise TypeError("save_raw requires either 'content' or 'data'")
+        if content is None:
+            content = data
+
+        if not subdir and artifact_type:
+            subdir = artifact_type
+
+        safe_filename = os.path.basename(filename)
+        if not safe_filename or safe_filename != filename:
+            raise ValueError(f"Invalid artifact filename: {filename!r}")
+
+        if subdir:
+            # Only allow single-level subdirs; reject path traversal attempts.
+            safe_subdir = os.path.basename(subdir)
+            if not safe_subdir or safe_subdir != subdir:
+                raise ValueError(f"Invalid subdir: {subdir!r}")
+            target_dir = os.path.join(self.dir, safe_subdir)
+            os.makedirs(target_dir, exist_ok=True)
+            filepath = os.path.join(target_dir, safe_filename)
+        else:
+            filepath = os.path.join(self.dir, safe_filename)
+
+        _atomic_write_bytes_or_text(filepath, content)
 
         self.metadata.setdefault("files", []).append({
             "path": os.path.relpath(filepath, self.dir),
             "timestamp": datetime.now().isoformat(),
             "size": len(content),
+            "artifact_type": artifact_type or "",
         })
         self._save_meta()
         return filepath
 
+    def log_host(self, addr: str, name: str = "", device_type: str = "",
+                manufacturer: str = "") -> None:
+        """Upsert a discovered device into the session hosts table.
+
+        Keyed on ``addr`` (normalised to upper-case). Updates ``name``,
+        ``type``, ``manufacturer`` only when the incoming value is non-empty
+        so a later call with less information doesn't erase existing data.
+        """
+        addr = addr.upper().strip()
+        if not addr:
+            return
+        hosts: list[dict] = self.metadata.setdefault("hosts", [])
+        for host in hosts:
+            if host.get("addr", "").upper() == addr:
+                if name:
+                    host["name"] = name
+                if device_type:
+                    host["type"] = device_type
+                if manufacturer:
+                    host["manufacturer"] = manufacturer
+                host["last_seen"] = datetime.now().isoformat()
+                self._save_meta()
+                return
+        hosts.append({
+            "addr": addr,
+            "name": name,
+            "type": device_type,
+            "manufacturer": manufacturer,
+            "last_seen": datetime.now().isoformat(),
+        })
+        self._save_meta()
+
+    def get_hosts(self) -> list[dict]:
+        """Return all discovered hosts for this session."""
+        return list(self.metadata.get("hosts", []))
+
     def get_all_data(self) -> dict:
         """Collect all session data for report generation.
 
-        Reads all numbered JSON files and organizes by category.
-        Returns a dict ready for ReportGenerator.
+        Reads every numbered JSON command file and groups it by the
+        ``category`` field recorded at write time. Unknown categories are
+        preserved under their own key rather than collapsing into
+        ``general`` — this matters because ``_infer_log_category`` derives
+        categories from the envelope schema (``blue_tap.<category>.result``)
+        and produces values like ``assessment`` and ``vulnscan`` that were
+        not enumerated in the legacy hardcoded list. Dropping them into
+        ``general`` made the report generator skip them entirely.
         """
-        collected = {
+        collected: dict[str, Any] = {
             "session": self.metadata,
-            "scan": [],
-            "recon": [],
-            "vuln": [],
-            "attack": [],
-            "data": [],
-            "fuzz": [],
-            "dos": [],
-            "audio": [],
             "general": [],
         }
 
@@ -251,13 +387,10 @@ class Session:
             try:
                 with open(filepath) as f:
                     entry = json.load(f)
-                category = entry.get("category", "general")
-                if category in collected:
-                    collected[category].append(entry)
-                else:
-                    collected["general"].append(entry)
             except (json.JSONDecodeError, OSError):
-                pass
+                continue
+            category = entry.get("category", "general") or "general"
+            collected.setdefault(category, []).append(entry)
 
         # Also collect raw files (vCards, audio, etc.)
         collected["raw_files"] = self.metadata.get("files", [])
@@ -295,4 +428,14 @@ __all__ = [
     "save_file",
     "set_adapter",
     "set_session",
+    "log_host",
 ]
+
+
+def log_host(addr: str, name: str = "", device_type: str = "",
+             manufacturer: str = "") -> None:
+    """Log a discovered host to the active session (module-level convenience)."""
+    session = get_session()
+    if session is not None:
+        session.log_host(addr, name=name, device_type=device_type,
+                         manufacturer=manufacturer)

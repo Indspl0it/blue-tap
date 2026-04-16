@@ -89,8 +89,15 @@ def build_fuzz_result(
     total_cases = int(result.get("total_cases", sent) or sent)
     crash_db_path = str(result.get("crash_db_path", "") or "")
 
-    execution_status = EXECUTION_COMPLETED if sent > 0 or crashes > 0 else EXECUTION_FAILED
-    module_outcome = "crash_detected" if crashes > 0 else "completed"
+    if crashes > 0:
+        execution_status = EXECUTION_COMPLETED
+        module_outcome = "crash_detected"
+    elif sent > 0:
+        execution_status = EXECUTION_COMPLETED
+        module_outcome = "degraded" if errors > 0 else "completed"
+    else:
+        execution_status = EXECUTION_FAILED
+        module_outcome = "not_applicable"
 
     artifacts = []
     if crash_db_path:
@@ -136,7 +143,7 @@ def build_fuzz_result(
         kind="probe",
         id=command,
         title=f"Fuzz command: {command}",
-        module="fuzz",
+        module="fuzzing",
         protocol=protocol,
         execution_status=execution_status,
         module_outcome=module_outcome,
@@ -161,7 +168,7 @@ def build_fuzz_result(
 
     return build_run_envelope(
         schema="blue_tap.fuzz.result",
-        module="fuzz",
+        module="fuzzing",
         target=target,
         adapter=adapter,
         operator_context={"run_type": "single_protocol_run", "command": command, **dict(operator_context or {})},
@@ -221,12 +228,19 @@ def build_fuzz_protocol_execution(
 
     if crashes > 0:
         module_outcome = "crash_detected"
+        execution_status = EXECUTION_COMPLETED
     elif errors > 0 and packets_sent == 0:
+        # Transport failure — nothing was sent
         module_outcome = "not_applicable"
+        execution_status = EXECUTION_FAILED
+    elif errors > 0:
+        # Some packets landed but others errored — degraded, not clean
+        module_outcome = "degraded"
+        execution_status = EXECUTION_COMPLETED
     else:
+        # Clean run, no crashes observed
         module_outcome = "completed"
-
-    execution_status = EXECUTION_COMPLETED if packets_sent > 0 else EXECUTION_FAILED
+        execution_status = EXECUTION_COMPLETED
 
     observations = [
         f"Sent {packets_sent:,} packets to {protocol}",
@@ -267,7 +281,7 @@ def build_fuzz_protocol_execution(
         kind="probe",
         id=f"fuzz_{protocol}",
         title=f"Fuzz protocol: {protocol}",
-        module="fuzz",
+        module="fuzzing",
         protocol=protocol,
         execution_status=execution_status,
         module_outcome=module_outcome,
@@ -369,7 +383,7 @@ def build_fuzz_campaign_result(
         kind="phase",
         id="campaign",
         title="Fuzz Campaign",
-        module="fuzz",
+        module="fuzzing",
         protocol="multi",
         execution_status=EXECUTION_COMPLETED,
         module_outcome="crash_detected" if crash_count else "completed",
@@ -391,7 +405,7 @@ def build_fuzz_campaign_result(
     )
     return build_run_envelope(
         schema="blue_tap.fuzz.result",
-        module="fuzz",
+        module="fuzzing",
         target=target,
         adapter=adapter,
         operator_context={
@@ -451,7 +465,7 @@ def build_fuzz_operation_result(
         kind="probe",
         id=operation,
         title=title,
-        module="fuzz",
+        module="fuzzing",
         protocol=protocol,
         execution_status=EXECUTION_COMPLETED,
         module_outcome=module_outcome,
@@ -468,7 +482,7 @@ def build_fuzz_operation_result(
     )
     return build_run_envelope(
         schema="blue_tap.fuzz.result",
-        module="fuzz",
+        module="fuzzing",
         target=target,
         adapter=adapter,
         operator_context={"run_type": "operation", "operation": operation},

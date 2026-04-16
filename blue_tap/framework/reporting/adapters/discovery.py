@@ -9,10 +9,21 @@ from blue_tap.framework.contracts.result_schema import envelope_executions, enve
 
 
 class DiscoveryReportAdapter(ReportAdapter):
-    module = "scan"
+    module = "discovery"
 
     def accepts(self, envelope: dict[str, Any]) -> bool:
-        return envelope.get("module") == self.module or envelope.get("schema") == "blue_tap.scan.result"
+        """Accept legacy ``module="scan"`` and modern ``discovery.*`` envelopes.
+
+        Modules now record their full ``module_id`` (e.g. ``discovery.scanner``)
+        in the envelope ``module`` field. The previous strict equality check
+        against ``"scan"`` made the discovery scanner invisible to the report
+        once the module name was corrected.
+        """
+        module = str(envelope.get("module", ""))
+        schema = str(envelope.get("schema", ""))
+        if module == self.module or module.startswith("discovery."):
+            return True
+        return schema == "blue_tap.scan.result"
 
     def ingest(self, envelope: dict[str, Any], report_state: dict[str, Any]) -> None:
         report_state.setdefault("scan_runs", []).append(envelope)

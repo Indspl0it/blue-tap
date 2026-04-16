@@ -64,7 +64,7 @@ def _collector_execution(
         kind="collector",
         id=collector_id,
         title=title,
-        module="scan",
+        module="discovery",
         protocol="Discovery",
         execution_status=EXECUTION_COMPLETED,
         module_outcome="observed",
@@ -105,7 +105,7 @@ def build_scan_result(
     ]
     return build_run_envelope(
         schema="blue_tap.scan.result",
-        module="scan",
+        module="discovery",
         target="range_scan" if scan_mode != "all" else "combined_range_scan",
         adapter=adapter,
         operator_context={

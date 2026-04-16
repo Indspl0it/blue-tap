@@ -35,6 +35,7 @@ CANONICAL_EVENT_TYPES: frozenset[str] = frozenset({
     "execution_started",
     "execution_result",
     "execution_skipped",
+    "execution_observation",
     "pairing_required",
     "recovery_wait_started",
     "recovery_wait_progress",

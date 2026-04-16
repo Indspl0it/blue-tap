@@ -85,7 +85,7 @@ def build_recon_result(
     )
     return build_run_envelope(
         schema="blue_tap.recon.result",
-        module="recon",
+        module="reconnaissance",
         target=target,
         adapter=adapter,
         operator_context={"operation": operation, **dict(operator_context or {})},
@@ -143,7 +143,7 @@ def build_recon_execution(
         kind="collector",
         id=operation,
         title=title,
-        module="recon",
+        module="reconnaissance",
         protocol=protocol,
         execution_status=execution_status,
         module_outcome=module_outcome,

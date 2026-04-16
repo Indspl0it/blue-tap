@@ -12,7 +12,18 @@ class AudioReportAdapter(ReportAdapter):
     module = "audio"
 
     def accepts(self, envelope: dict[str, Any]) -> bool:
-        return envelope.get("module") == self.module or envelope.get("schema") == "blue_tap.audio.result"
+        """Accept legacy audio envelopes plus A2DP/AVRCP/HFP modules."""
+        module = str(envelope.get("module", ""))
+        schema = str(envelope.get("schema", ""))
+        if module == self.module:
+            return True
+        if module in (
+            "post_exploitation.a2dp",
+            "post_exploitation.avrcp",
+            "post_exploitation.hfp",
+        ) or module.startswith("post_exploitation.media."):
+            return True
+        return schema == "blue_tap.audio.result"
 
     def ingest(self, envelope: dict[str, Any], report_state: dict[str, Any]) -> None:
         report_state.setdefault("audio_runs", []).append(envelope)
