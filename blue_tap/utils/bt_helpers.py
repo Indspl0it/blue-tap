@@ -176,8 +176,13 @@ def get_hci_adapters() -> list[dict]:
     return adapters
 
 
-def get_adapter_address(hci: str = "hci0") -> str | None:
+def get_adapter_address(hci: str | None = None) -> str | None:
     """Get the BD address of an adapter."""
+    if hci is None:
+
+        from blue_tap.hardware.adapter import resolve_active_hci
+
+        hci = resolve_active_hci()
     result = run_cmd(["hciconfig", hci])
     if result.returncode != 0:
         return None
@@ -194,13 +199,18 @@ class AdapterNotReady(Exception):
     pass
 
 
-def get_adapter_state(hci: str = "hci0") -> dict:
+def get_adapter_state(hci: str | None = None) -> dict:
     """Get current adapter state: exists, up/down, scanning, connected devices.
 
     Returns:
         {"exists": bool, "up": bool, "scanning": bool,
          "address": str, "raw_status": str}
     """
+    if hci is None:
+
+        from blue_tap.hardware.adapter import resolve_active_hci
+
+        hci = resolve_active_hci()
     state = {
         "exists": False,
         "up": False,
@@ -238,7 +248,7 @@ def get_adapter_state(hci: str = "hci0") -> dict:
     return state
 
 
-def ensure_adapter_ready(hci: str = "hci0", timeout: int = 15,
+def ensure_adapter_ready(hci: str | None = None, timeout: int = 15,
                           auto_up: bool = True) -> bool:
     """Ensure the BT adapter is present and UP before proceeding.
 
@@ -249,7 +259,7 @@ def ensure_adapter_ready(hci: str = "hci0", timeout: int = 15,
       - Adapter missing → fails immediately with clear error
 
     Args:
-        hci: Adapter name (e.g., "hci0")
+        hci: Adapter name (e.g., "<hciX>")
         timeout: Max seconds to wait for adapter to become ready
         auto_up: If True, attempt to bring adapter up if it's down
 
@@ -259,6 +269,11 @@ def ensure_adapter_ready(hci: str = "hci0", timeout: int = 15,
     Raises:
         AdapterNotReady: If adapter doesn't exist at all.
     """
+    if hci is None:
+
+        from blue_tap.hardware.adapter import resolve_active_hci
+
+        hci = resolve_active_hci()
     import time
     from blue_tap.utils.output import info, warning, error
 
@@ -308,12 +323,17 @@ def ensure_adapter_ready(hci: str = "hci0", timeout: int = 15,
     return False
 
 
-def wait_for_adapter(hci: str = "hci0", timeout: int = 30) -> bool:
+def wait_for_adapter(hci: str | None = None, timeout: int = 30) -> bool:
     """Wait for an adapter to appear (e.g., after USB replug).
 
     Polls hciconfig until the adapter shows up or timeout expires.
     Useful after MAC spoofing operations that require physical replug.
     """
+    if hci is None:
+
+        from blue_tap.hardware.adapter import resolve_active_hci
+
+        hci = resolve_active_hci()
     import time
     from blue_tap.utils.output import info
 

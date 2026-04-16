@@ -7,13 +7,20 @@ from blue_tap.utils.output import (
 )
 
 
-# Cache last scan results so we don't re-scan within the same session
+# Cache last scan results so we don't re-scan within the same session.
+# Thread-safety: NOT thread-safe. CLI is single-threaded; revisit if a web
+# interface or concurrent session handling is added in the future.
 _cached_devices: list[dict] = []
 
 
-def _scan_devices(scan_duration: int = 8, hci: str = "hci0",
+def _scan_devices(scan_duration: int = 8, hci: str | None = None,
                     include_ble: bool = False) -> list[dict]:
     """Run a BT scan and return device list."""
+    if hci is None:
+
+        from blue_tap.hardware.adapter import resolve_active_hci
+
+        hci = resolve_active_hci()
     global _cached_devices
 
     section("Device Discovery", style="bt.cyan")
@@ -39,7 +46,7 @@ def _scan_devices(scan_duration: int = 8, hci: str = "hci0",
 def pick_device(
     prompt: str = "Select device",
     scan_duration: int = 8,
-    hci: str = "hci0",
+    hci: str | None = None,
     rescan: bool = False,
 ) -> str | None:
     """Scan for devices and let the user pick one by number.
@@ -47,13 +54,18 @@ def pick_device(
     Returns the selected MAC address, or None if cancelled.
     Reuses cached scan results if available (pass rescan=True to force).
     """
+    if hci is None:
+
+        from blue_tap.hardware.adapter import resolve_active_hci
+
+        hci = resolve_active_hci()
     devices = _cached_devices if (_cached_devices and not rescan) else _scan_devices(scan_duration, hci)
 
     if not devices:
         return None
 
     # Show numbered table
-    console.print(device_table(devices))
+    device_table(devices)
     console.print()
 
     # Prompt for selection
@@ -75,7 +87,7 @@ def pick_device(
             devices = _scan_devices(scan_duration, hci)
             if not devices:
                 return None
-            console.print(device_table(devices))
+            device_table(devices)
             console.print()
             continue
 
@@ -97,12 +109,17 @@ def pick_two_devices(
     prompt1: str = "Select TARGET (IVI/Car)",
     prompt2: str = "Select VICTIM (Phone/Driver)",
     scan_duration: int = 10,
-    hci: str = "hci0",
+    hci: str | None = None,
 ) -> tuple[str, str] | None:
     """Scan for devices and let the user pick two: target IVI and victim phone.
 
     Returns (ivi_address, phone_address) or None if cancelled.
     """
+    if hci is None:
+
+        from blue_tap.hardware.adapter import resolve_active_hci
+
+        hci = resolve_active_hci()
     devices = _scan_devices(scan_duration, hci)
 
     if not devices:
@@ -113,7 +130,7 @@ def pick_two_devices(
         warning("Only 1 device found — you can still select it as target")
 
     # Show table
-    console.print(device_table(devices))
+    device_table(devices)
     console.print()
 
     # Pick first device (IVI)
@@ -141,7 +158,7 @@ def pick_two_devices(
 
     console.print()
     info("Remaining devices:")
-    console.print(device_table(remaining))
+    device_table(remaining)
     console.print()
 
     phone_addr = _pick_from_list(remaining, prompt2)
@@ -185,7 +202,7 @@ def resolve_address(
     address: str | None,
     prompt: str = "Select device",
     scan_duration: int = 8,
-    hci: str = "hci0",
+    hci: str | None = None,
 ) -> str | None:
     """Return address if provided, otherwise launch interactive picker.
 
@@ -196,6 +213,11 @@ def resolve_address(
         if not address:
             return
     """
+    if hci is None:
+
+        from blue_tap.hardware.adapter import resolve_active_hci
+
+        hci = resolve_active_hci()
     if address:
         from blue_tap.utils.bt_helpers import validate_mac
         # Normalize common separators before validation

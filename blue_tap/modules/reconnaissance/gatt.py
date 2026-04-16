@@ -1,8 +1,30 @@
-"""BLE GATT service enumeration and characteristic reading."""
+"""BLE GATT service enumeration and characteristic reading.
+
+Owns both:
+
+1. Module-level helpers (``enumerate_services_sync``,
+   ``enumerate_services_detailed_sync``, ``lookup_uuid``,
+   ``classify_automotive_service``, ``flatten_gatt_entries``,
+   ``summarize_gatt_security``). These are called from assessment/,
+   exploitation/, and the recon campaign — keep them intact.
+2. The native ``GattEnumModule`` — registered Module subclass for
+   ``reconnaissance.gatt``.
+"""
 
 import asyncio
+import logging
 
+from blue_tap.framework.contracts.result_schema import (
+    build_run_envelope,
+    make_evidence,
+    make_execution,
+)
+from blue_tap.framework.module import Module, RunContext
+from blue_tap.framework.module.options import OptAddress, OptString
+from blue_tap.framework.registry import ModuleFamily
 from blue_tap.utils.output import info, success, error, warning
+
+logger = logging.getLogger(__name__)
 
 
 # Standard GATT Service UUIDs (Bluetooth SIG assigned)
@@ -498,3 +520,106 @@ async def subscribe_notifications(address: str, uuid: str, duration: int = 30):
         error(f"Notification subscribe failed: {e}")
 
     return notifications
+
+
+# ── Native Module class ─────────────────────────────────────────────────────
+
+class GattEnumModule(Module):
+    """GATT Enumeration.
+
+    Walk the GATT attribute tree and decode service/characteristic UUIDs on
+    a BLE target. Calls ``enumerate_services_detailed_sync`` from this same
+    file.
+    """
+
+    module_id = "reconnaissance.gatt"
+    family = ModuleFamily.RECONNAISSANCE
+    name = "GATT Enumeration"
+    description = "Walk the GATT attribute tree and decode service/characteristic UUIDs"
+    protocols = ("BLE", "GATT", "ATT")
+    requires = ("ble_target",)
+    destructive = False
+    requires_pairing = False
+    schema_prefix = "blue_tap.recon.result"
+    has_report_adapter = True
+    references = ()
+    options = (
+        OptAddress("RHOST", required=True, description="Target BLE address"),
+        OptString("HCI", default="", description="Local HCI adapter (empty=auto)"),
+    )
+
+    def run(self, ctx: RunContext) -> dict:
+        target = str(ctx.options.get("RHOST", ""))
+        hci_opt = str(ctx.options.get("HCI", ""))
+        adapter = hci_opt or None
+        started_at = ctx.started_at
+
+        error_msg: str | None = None
+        try:
+            result = enumerate_services_detailed_sync(target, adapter=adapter)
+            if not isinstance(result, dict):
+                result = {"services": [], "status": "error", "error": "non-dict result"}
+        except Exception as exc:
+            logger.exception("GATT enumeration failed for %s", target)
+            error_msg = str(exc)
+            result = {"services": [], "status": "error", "error": error_msg}
+
+        status = str(result.get("status", "error"))
+        services = result.get("services", []) or []
+        service_count = len(services)
+
+        if error_msg or status != "completed":
+            execution_status = "failed"
+        else:
+            execution_status = "completed"
+
+        if execution_status == "completed" and service_count > 0:
+            outcome = "observed"
+        elif execution_status == "completed":
+            outcome = "not_applicable"
+        else:
+            outcome = "partial" if service_count > 0 else "not_applicable"
+
+        summary_text = (
+            f"GATT enumeration error: {error_msg or result.get('error', 'unknown error')}"
+            if execution_status == "failed"
+            else (
+                f"Found {service_count} GATT services"
+                if service_count
+                else "No GATT services found"
+            )
+        )
+
+        return build_run_envelope(
+            schema=self.schema_prefix,
+            module="gatt",
+            target=target,
+            adapter=hci_opt or "",
+            started_at=started_at,
+            executions=[
+                make_execution(
+                    execution_id="gatt_enum",
+                    kind="collector",
+                    id="gatt_enum",
+                    title="GATT Enumeration",
+                    execution_status=execution_status,
+                    module_outcome=outcome,
+                    evidence=make_evidence(
+                        raw={
+                            "service_count": service_count,
+                            "error": error_msg or result.get("error"),
+                        },
+                        summary=summary_text,
+                    ),
+                    destructive=False,
+                    requires_pairing=False,
+                )
+            ],
+            summary={
+                "outcome": outcome,
+                "service_count": service_count,
+                "error": error_msg or result.get("error"),
+            },
+            module_data=result,
+            run_id=ctx.run_id,
+        )

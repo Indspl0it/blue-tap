@@ -1,12 +1,27 @@
-"""Recon protocol correlation helpers."""
+"""Recon protocol correlation helpers.
+
+Owns ``correlate_rfcomm_with_sdp``, ``correlate_l2cap_with_sdp``,
+``build_recon_correlation``, ``analyze_capture_artifact`` and
+``summarize_capture_analyses`` (all consumed by recon campaign
+orchestration) plus the native internal ``CorrelationModule``.
+"""
 
 from __future__ import annotations
 
 import json
+import logging
 import os
 from collections import Counter
 from typing import Any
 
+from blue_tap.framework.contracts.result_schema import (
+    build_run_envelope,
+    make_evidence,
+    make_execution,
+)
+from blue_tap.framework.module import Module, RunContext
+from blue_tap.framework.module.options import OptAddress, OptPath
+from blue_tap.framework.registry import ModuleFamily
 from blue_tap.modules.reconnaissance.spec_interpretation import (
     evaluate_smp_transcript,
     interpret_ble_capture,
@@ -16,6 +31,8 @@ from blue_tap.modules.reconnaissance.spec_interpretation import (
     normalize_smp_message,
 )
 from blue_tap.utils.bt_helpers import check_tool, run_cmd
+
+logger = logging.getLogger(__name__)
 
 LMP_AUTH_OPCODES = {8, 9, 10, 11, 12, 13, 14, 59, 60, 61}
 LMP_ENCRYPTION_OPCODES = {15, 16, 17, 18}
@@ -653,3 +670,164 @@ def _parse_crackle_output(output: str) -> dict[str, Any]:
     if result["tk"] or result["ltk"] or "successfully" in output.lower():
         result["success"] = True
     return result
+
+
+# ── Native Module class ─────────────────────────────────────────────────────
+
+def _load_recon_json(path: str) -> Any:
+    """Load a recon-envelope JSON file and return its inner module_data
+    (or the raw payload if it doesn't look like an envelope).
+
+    Used by :class:`CorrelationModule` to accept either full run-envelope
+    artifacts or bare helper-function output dumps.
+    """
+    with open(path, encoding="utf-8") as fh:
+        payload = json.load(fh)
+    if isinstance(payload, dict) and "module_data" in payload:
+        return payload.get("module_data")
+    return payload
+
+
+class CorrelationModule(Module):
+    """Recon Correlation (internal).
+
+    Fuse previously-collected recon artifacts (capability, fingerprint,
+    SDP, RFCOMM, L2CAP, GATT, pairing mode, capture analyses) into a
+    unified device model. The inputs are JSON paths produced by earlier
+    recon modules (or from a session directory).
+
+    Any input left empty is skipped; at minimum CAPABILITY_JSON is required
+    because ``build_recon_correlation`` uses it to classify the target.
+    """
+
+    module_id = "reconnaissance.correlation"
+    family = ModuleFamily.RECONNAISSANCE
+    name = "Recon Correlation"
+    description = "Correlate multi-source recon findings into a unified device model"
+    protocols = ("Classic", "BLE")
+    requires = ()
+    destructive = False
+    requires_pairing = False
+    schema_prefix = "blue_tap.recon.result"
+    has_report_adapter = False
+    internal = True
+    references = ()
+    options = (
+        OptAddress("RHOST", required=False, description="Target Bluetooth address (annotation only)"),
+        OptPath("CAPABILITY_JSON", required=True, description="Capability-detector JSON path"),
+        OptPath("FINGERPRINT_JSON", required=False, description="Fingerprint JSON path"),
+        OptPath("SDP_JSON", required=False, description="SDP browse JSON path"),
+        OptPath("RFCOMM_JSON", required=False, description="RFCOMM scan JSON path"),
+        OptPath("L2CAP_JSON", required=False, description="L2CAP scan JSON path"),
+        OptPath("GATT_JSON", required=False, description="GATT enumeration JSON path"),
+        OptPath("PAIRING_JSON", required=False, description="Pairing-mode JSON path"),
+    )
+
+    def run(self, ctx: RunContext) -> dict:
+        target = str(ctx.options.get("RHOST", "") or "")
+        capability_path = str(ctx.options.get("CAPABILITY_JSON", ""))
+        fingerprint_path = str(ctx.options.get("FINGERPRINT_JSON", "") or "")
+        sdp_path = str(ctx.options.get("SDP_JSON", "") or "")
+        rfcomm_path = str(ctx.options.get("RFCOMM_JSON", "") or "")
+        l2cap_path = str(ctx.options.get("L2CAP_JSON", "") or "")
+        gatt_path = str(ctx.options.get("GATT_JSON", "") or "")
+        pairing_path = str(ctx.options.get("PAIRING_JSON", "") or "")
+        started_at = ctx.started_at
+
+        def _load_opt(path: str, default: Any = None) -> Any:
+            if not path:
+                return default
+            if not os.path.exists(path):
+                raise FileNotFoundError(f"recon artifact not found: {path}")
+            return _load_recon_json(path)
+
+        error_msg: str | None = None
+        correlation: dict = {}
+        try:
+            capability = _load_opt(capability_path, {})
+            if not isinstance(capability, dict) or not capability:
+                raise ValueError("CAPABILITY_JSON is required and must decode to a non-empty dict")
+
+            fingerprint = _load_opt(fingerprint_path)
+            sdp_result = _load_opt(sdp_path)
+            rfcomm_results = _load_opt(rfcomm_path)
+            l2cap_results = _load_opt(l2cap_path)
+            gatt_result = _load_opt(gatt_path)
+            pairing_mode = _load_opt(pairing_path)
+
+            # Normalize RFCOMM/L2CAP shapes so build_recon_correlation gets lists
+            if isinstance(rfcomm_results, dict):
+                rfcomm_results = rfcomm_results.get("all_probes") or rfcomm_results.get("open_channels") or []
+            if isinstance(l2cap_results, dict):
+                l2cap_results = l2cap_results.get("all_probes") or l2cap_results.get("open_psms") or []
+
+            correlation = build_recon_correlation(
+                capability=capability,
+                fingerprint=fingerprint if isinstance(fingerprint, dict) else None,
+                sdp_result=sdp_result if isinstance(sdp_result, dict) else None,
+                rfcomm_results=rfcomm_results if isinstance(rfcomm_results, list) else None,
+                l2cap_results=l2cap_results if isinstance(l2cap_results, list) else None,
+                gatt_result=gatt_result if isinstance(gatt_result, dict) else None,
+                pairing_mode=pairing_mode if isinstance(pairing_mode, dict) else None,
+            )
+        except Exception as exc:
+            logger.exception("Recon correlation failed")
+            error_msg = str(exc)
+
+        findings = correlation.get("findings", []) or []
+        source_count = sum(
+            1 for p in [sdp_path, rfcomm_path, l2cap_path, gatt_path, pairing_path, fingerprint_path]
+            if p
+        ) + 1  # capability always counted
+
+        if error_msg:
+            execution_status = "failed"
+            outcome = "not_applicable"
+        elif findings:
+            execution_status = "completed"
+            outcome = "correlated"
+        else:
+            execution_status = "completed"
+            outcome = "partial"
+
+        summary_text = (
+            f"Correlation error: {error_msg}"
+            if error_msg
+            else f"Correlated {source_count} source(s), {len(findings)} finding(s)"
+        )
+
+        return build_run_envelope(
+            schema=self.schema_prefix,
+            module="correlation",
+            target=target,
+            adapter="",
+            started_at=started_at,
+            executions=[
+                make_execution(
+                    execution_id="correlate",
+                    kind="collector",
+                    id="correlate",
+                    title="Recon Correlation",
+                    execution_status=execution_status,
+                    module_outcome=outcome,
+                    evidence=make_evidence(
+                        raw={
+                            "source_count": source_count,
+                            "finding_count": len(findings),
+                            "error": error_msg,
+                        },
+                        summary=summary_text,
+                    ),
+                    destructive=False,
+                    requires_pairing=False,
+                )
+            ],
+            summary={
+                "outcome": outcome,
+                "source_count": source_count,
+                "finding_count": len(findings),
+                "error": error_msg,
+            },
+            module_data=correlation,
+            run_id=ctx.run_id,
+        )

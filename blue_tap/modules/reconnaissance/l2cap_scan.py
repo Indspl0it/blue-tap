@@ -1,10 +1,26 @@
-"""L2CAP PSM Scanner — probe standard and dynamic PSM values."""
+"""L2CAP PSM Scanner — probe standard and dynamic PSM values.
+
+Owns both the ``L2CAPScanner`` class (used by exploitation and campaign
+orchestration) and the native ``L2capScanModule`` registered Module
+subclass for ``reconnaissance.l2cap_scan``.
+"""
 
 import errno
+import logging
 import socket
 
+from blue_tap.framework.contracts.result_schema import (
+    build_run_envelope,
+    make_evidence,
+    make_execution,
+)
+from blue_tap.framework.module import Module, RunContext
+from blue_tap.framework.module.options import OptAddress, OptInt, OptString
+from blue_tap.framework.registry import ModuleFamily
 from blue_tap.modules.reconnaissance.spec_interpretation import interpret_l2cap_probe
 from blue_tap.utils.output import info, success, error, warning, verbose
+
+logger = logging.getLogger(__name__)
 
 
 KNOWN_PSMS = {
@@ -35,7 +51,7 @@ class L2CAPScanner:
     PRIORITY_PSMS = [1, 3, 5, 7, 15, 17, 23, 25, 27, 31, 33, 35, 37]
 
     def scan_standard_psms(self, timeout: float = 1.0, full: bool = False,
-                            hci: str = "hci0") -> list[dict]:
+                            hci: str | None = None) -> list[dict]:
         """Scan L2CAP PSMs in the standard range.
 
         By default, scans only well-known PSMs (fast, ~13 probes).
@@ -43,6 +59,11 @@ class L2CAPScanner:
 
         Returns list of dicts with: psm, status, name.
         """
+        if hci is None:
+
+            from blue_tap.hardware.adapter import resolve_active_hci
+
+            hci = resolve_active_hci()
         from blue_tap.utils.bt_helpers import ensure_adapter_ready, get_adapter_address
         if not ensure_adapter_ready(hci):
             return []
@@ -293,3 +314,138 @@ def _classify_l2cap_behavior(psm: int, status: str) -> str:
     if status == "host_unreachable":
         return "link_unreachable"
     return "refused_surface"
+
+
+# ── Native Module class ─────────────────────────────────────────────────────
+
+class L2capScanModule(Module):
+    """L2CAP Channel Scan.
+
+    Probe L2CAP PSM space and classify open channels on a Classic Bluetooth
+    target. Dispatches to ``L2CAPScanner.scan_standard_psms`` for the
+    standard range (PSM < 4097) and ``scan_dynamic_psms`` for the dynamic
+    range (PSM >= 4097). A single scan can cover both by splitting the
+    requested range at the dynamic boundary.
+    """
+
+    module_id = "reconnaissance.l2cap_scan"
+    family = ModuleFamily.RECONNAISSANCE
+    name = "L2CAP Channel Scan"
+    description = "Probe L2CAP PSM space and classify open channels"
+    protocols = ("Classic", "L2CAP")
+    requires = ("classic_target",)
+    destructive = False
+    requires_pairing = False
+    schema_prefix = "blue_tap.recon.result"
+    has_report_adapter = True
+    references = ()
+    options = (
+        OptAddress("RHOST", required=True, description="Target BR/EDR address"),
+        OptString("HCI", default="", description="Local HCI adapter"),
+        OptInt("START_PSM", default=1, description="Start PSM for scan range"),
+        OptInt("END_PSM", default=0x1001, description="End PSM for scan range"),
+        OptInt("TIMEOUT_MS", default=1000, description="Per-probe timeout in milliseconds"),
+    )
+
+    def run(self, ctx: RunContext) -> dict:
+        target = str(ctx.options.get("RHOST", ""))
+        hci = str(ctx.options.get("HCI", ""))
+        start_psm = int(ctx.options.get("START_PSM", 1))
+        end_psm = int(ctx.options.get("END_PSM", 0x1001))
+        timeout_ms = int(ctx.options.get("TIMEOUT_MS", 1000))
+        timeout_s = max(timeout_ms / 1000.0, 0.1)
+        started_at = ctx.started_at
+
+        error_msg: str | None = None
+        results: list[dict] = []
+        try:
+            scanner = L2CAPScanner(target)
+            # Standard portion (1..4095) — only odd PSMs are valid
+            if start_psm < 4097:
+                std_start = max(1, start_psm)
+                std_end = min(4095, end_psm)
+                if std_end >= std_start:
+                    # Directly probe the requested sub-range (fast, targeted).
+                    from blue_tap.utils.bt_helpers import (
+                        ensure_adapter_ready,
+                        get_adapter_address,
+                    )
+                    if not ensure_adapter_ready(hci):
+                        error_msg = f"adapter {hci} not ready"
+                    else:
+                        scanner._local_addr = get_adapter_address(hci)
+                        psm_list = list(range(std_start if std_start % 2 else std_start + 1,
+                                              std_end + 1, 2))
+                        results.extend(scanner._scan_psm_list(psm_list, timeout_s))
+            # Dynamic portion (>= 4097)
+            if error_msg is None and end_psm >= 4097:
+                dyn_start = max(4097, start_psm)
+                dyn_end = end_psm
+                if dyn_end >= dyn_start:
+                    results.extend(scanner.scan_dynamic_psms(
+                        start=dyn_start,
+                        end=dyn_end,
+                        timeout=timeout_s,
+                    ))
+        except Exception as exc:
+            logger.exception("L2CAP scan failed for %s", target)
+            error_msg = str(exc)
+
+        open_channels = [r for r in results if r.get("status") == "open"]
+        auth_required = [r for r in results if r.get("status") == "auth_required"]
+        probe_count = len(results)
+
+        if error_msg:
+            execution_status = "failed"
+            outcome = "not_applicable"
+        else:
+            execution_status = "completed"
+            outcome = "observed" if open_channels or auth_required else "not_applicable"
+
+        summary_text = (
+            f"L2CAP scan error: {error_msg}"
+            if error_msg
+            else f"Probed {probe_count} PSMs, {len(open_channels)} open, {len(auth_required)} auth-required"
+        )
+
+        return build_run_envelope(
+            schema=self.schema_prefix,
+            module="l2cap_scan",
+            target=target,
+            adapter=hci,
+            started_at=started_at,
+            executions=[
+                make_execution(
+                    execution_id="l2cap_scan",
+                    kind="collector",
+                    id="l2cap_scan",
+                    title="L2CAP PSM Scan",
+                    execution_status=execution_status,
+                    module_outcome=outcome,
+                    evidence=make_evidence(
+                        raw={
+                            "probe_count": probe_count,
+                            "open_count": len(open_channels),
+                            "auth_required_count": len(auth_required),
+                            "error": error_msg,
+                        },
+                        summary=summary_text,
+                    ),
+                    destructive=False,
+                    requires_pairing=False,
+                )
+            ],
+            summary={
+                "outcome": outcome,
+                "probe_count": probe_count,
+                "open_count": len(open_channels),
+                "auth_required_count": len(auth_required),
+                "error": error_msg,
+            },
+            module_data={
+                "open_psms": open_channels,
+                "auth_required_psms": auth_required,
+                "all_probes": results,
+            },
+            run_id=ctx.run_id,
+        )

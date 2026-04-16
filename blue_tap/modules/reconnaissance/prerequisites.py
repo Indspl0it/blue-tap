@@ -1,17 +1,32 @@
-"""Prerequisite evaluation for recon collectors."""
+"""Prerequisite evaluation for recon collectors.
+
+Owns ``evaluate_recon_prerequisites`` (consumed by recon campaign
+orchestration) plus the native internal ``PrerequisitesModule``.
+"""
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
+from blue_tap.framework.contracts.result_schema import (
+    build_run_envelope,
+    make_evidence,
+    make_execution,
+)
+from blue_tap.framework.module import Module, RunContext
+from blue_tap.framework.module.options import OptChoice, OptString
+from blue_tap.framework.registry import ModuleFamily
 from blue_tap.modules.reconnaissance.sniffer import DarkFirmwareSniffer, NRFBLESniffer
 from blue_tap.utils.bt_helpers import check_tool, ensure_adapter_ready
+
+logger = logging.getLogger(__name__)
 
 
 def evaluate_recon_prerequisites(
     *,
     target_capability: str,
-    classic_adapter: str = "hci0",
+    classic_adapter: str = "",
     below_hci_adapter: str = "hci1",
 ) -> dict[str, Any]:
     classic_ready = ensure_adapter_ready(classic_adapter)
@@ -84,3 +99,120 @@ def _combined_reason(checks: dict[str, Any]) -> str:
     if not checks["darkfirmware_lmp"]["available"]:
         return checks["darkfirmware_lmp"]["reason"]
     return ""
+
+
+# ── Native Module class ─────────────────────────────────────────────────────
+
+class PrerequisitesModule(Module):
+    """Recon Prerequisites (internal).
+
+    Evaluate whether the operator's environment has the tooling required
+    for a given recon capability target (``classic_only``, ``ble_only``,
+    or ``dual_mode``). Calls ``evaluate_recon_prerequisites`` in this
+    same file.
+    """
+
+    module_id = "reconnaissance.prerequisites"
+    family = ModuleFamily.RECONNAISSANCE
+    name = "Recon Prerequisites"
+    description = "Check tooling and adapter prerequisites for recon"
+    protocols = ()
+    requires = ()
+    destructive = False
+    requires_pairing = False
+    schema_prefix = "blue_tap.recon.result"
+    has_report_adapter = False
+    internal = True
+    references = ()
+    options = (
+        OptChoice(
+            "CAPABILITY",
+            choices=("classic_only", "ble_only", "dual_mode"),
+            default="dual_mode",
+            description="Target capability profile to evaluate against",
+        ),
+        OptString("CLASSIC_HCI", default="", description="Classic BT adapter"),
+        OptString("BELOW_HCI", default="hci1", description="Below-HCI (DarkFirmware) adapter"),
+    )
+
+    def run(self, ctx: RunContext) -> dict:
+        capability = str(ctx.options.get("CAPABILITY", "dual_mode"))
+        classic_hci = str(ctx.options.get("CLASSIC_HCI", ""))
+        below_hci = str(ctx.options.get("BELOW_HCI", "hci1"))
+        started_at = ctx.started_at
+
+        error_msg: str | None = None
+        checks: dict = {}
+        try:
+            checks = evaluate_recon_prerequisites(
+                target_capability=capability,
+                classic_adapter=classic_hci,
+                below_hci_adapter=below_hci,
+            )
+        except Exception as exc:
+            logger.exception("Prerequisite evaluation failed")
+            error_msg = str(exc)
+
+        missing = [
+            name for name, item in checks.items()
+            if isinstance(item, dict) and not item.get("available", False)
+        ]
+        all_present = bool(checks) and not missing
+
+        if error_msg:
+            execution_status = "failed"
+            outcome = "not_applicable"
+        elif all_present:
+            execution_status = "completed"
+            outcome = "observed"
+        else:
+            execution_status = "completed"
+            outcome = "partial"
+
+        summary_text = (
+            f"Prerequisite error: {error_msg}"
+            if error_msg
+            else (
+                "All prerequisites met"
+                if all_present
+                else f"Missing {len(missing)} item(s): {', '.join(missing)}"
+            )
+        )
+
+        return build_run_envelope(
+            schema=self.schema_prefix,
+            module="prerequisites",
+            target="",
+            adapter=classic_hci,
+            started_at=started_at,
+            executions=[
+                make_execution(
+                    execution_id="prereq_check",
+                    kind="check",
+                    id="prereq_check",
+                    title="Prerequisites Check",
+                    execution_status=execution_status,
+                    module_outcome=outcome,
+                    evidence=make_evidence(
+                        raw={
+                            "capability": capability,
+                            "missing_count": len(missing),
+                            "all_present": all_present,
+                            "error": error_msg,
+                        },
+                        summary=summary_text,
+                    ),
+                    destructive=False,
+                    requires_pairing=False,
+                )
+            ],
+            summary={
+                "outcome": outcome,
+                "all_present": all_present,
+                "missing": missing,
+                "capability": capability,
+                "error": error_msg,
+            },
+            module_data={"checks": checks},
+            run_id=ctx.run_id,
+        )

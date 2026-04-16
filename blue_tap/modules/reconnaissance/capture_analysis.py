@@ -1,10 +1,26 @@
-"""Post-processing helpers for recon capture collectors."""
+"""Post-processing helpers for recon capture collectors.
+
+Owns ``analyze_capture_results`` (used by recon campaign orchestration)
+plus the native internal ``CaptureAnalysisModule``.
+"""
 
 from __future__ import annotations
 
+import logging
+import os
 from typing import Any
 
+from blue_tap.framework.contracts.result_schema import (
+    build_run_envelope,
+    make_evidence,
+    make_execution,
+)
+from blue_tap.framework.module import Module, RunContext
+from blue_tap.framework.module.options import OptPath
+from blue_tap.framework.registry import ModuleFamily
 from blue_tap.modules.reconnaissance.correlation import analyze_capture_artifact, summarize_capture_analyses
+
+logger = logging.getLogger(__name__)
 
 
 def analyze_capture_results(module_data: dict[str, Any]) -> dict[str, Any]:
@@ -115,3 +131,107 @@ def _capture_artifact(value: Any) -> str:
     if not isinstance(value, dict):
         return ""
     return str(value.get("output", "") or value.get("path", "") or "")
+
+
+# ── Native Module class ─────────────────────────────────────────────────────
+
+class CaptureAnalysisModule(Module):
+    """Capture Analysis (internal).
+
+    Analyze a single pcap/btsnoop/LMP capture file and surface findings.
+    This is a thin front-door on ``analyze_capture_artifact`` — the operator
+    supplies a file path and gets back the artifact analysis dict that recon
+    campaign orchestration normally builds up internally.
+    """
+
+    module_id = "reconnaissance.capture_analysis"
+    family = ModuleFamily.RECONNAISSANCE
+    name = "Capture Analysis"
+    description = "Analyze a captured pcap/btsnoop/LMP artifact for findings"
+    protocols = ("Classic", "BLE")
+    requires = ()
+    destructive = False
+    requires_pairing = False
+    schema_prefix = "blue_tap.recon.result"
+    has_report_adapter = False
+    internal = True
+    references = ()
+    options = (
+        OptPath("PCAP", required=True, description="Path to the capture artifact to analyze"),
+    )
+
+    def run(self, ctx: RunContext) -> dict:
+        pcap_path = str(ctx.options.get("PCAP", ""))
+        started_at = ctx.started_at
+
+        error_msg: str | None = None
+        analysis: dict = {}
+        try:
+            if not pcap_path:
+                error_msg = "PCAP option is empty"
+            elif not os.path.exists(pcap_path):
+                error_msg = f"file not found: {pcap_path}"
+            else:
+                analysis = analyze_capture_artifact(pcap_path)
+                if not isinstance(analysis, dict):
+                    analysis = {"raw": analysis}
+        except Exception as exc:
+            logger.exception("Capture analysis failed for %s", pcap_path)
+            error_msg = str(exc)
+
+        findings = analysis.get("findings", []) or []
+        packet_count = int(analysis.get("packet_count", 0) or 0)
+
+        if error_msg:
+            execution_status = "failed"
+            outcome = "not_applicable"
+        elif findings or packet_count:
+            execution_status = "completed"
+            outcome = "observed"
+        else:
+            execution_status = "completed"
+            outcome = "not_applicable"
+
+        summary_text = (
+            f"Capture analysis error: {error_msg}"
+            if error_msg
+            else f"Found {len(findings)} finding(s), {packet_count} packet(s)"
+        )
+
+        return build_run_envelope(
+            schema=self.schema_prefix,
+            module="capture_analysis",
+            target="",
+            adapter="",
+            started_at=started_at,
+            executions=[
+                make_execution(
+                    execution_id="capture_analysis",
+                    kind="collector",
+                    id="capture_analysis",
+                    title="PCAP Analysis",
+                    execution_status=execution_status,
+                    module_outcome=outcome,
+                    evidence=make_evidence(
+                        raw={
+                            "pcap": pcap_path,
+                            "finding_count": len(findings),
+                            "packet_count": packet_count,
+                            "error": error_msg,
+                        },
+                        summary=summary_text,
+                    ),
+                    destructive=False,
+                    requires_pairing=False,
+                )
+            ],
+            summary={
+                "outcome": outcome,
+                "finding_count": len(findings),
+                "packet_count": packet_count,
+                "pcap": pcap_path,
+                "error": error_msg,
+            },
+            module_data=analysis,
+            run_id=ctx.run_id,
+        )

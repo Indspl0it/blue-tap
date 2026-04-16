@@ -1,27 +1,64 @@
-"""SDP (Service Discovery Protocol) enumeration."""
+"""SDP (Service Discovery Protocol) enumeration.
 
+This file owns two things:
+
+1. **Module-level helpers** (``browse_services``, ``browse_services_detailed``,
+   ``find_service_channel``, ``check_ssp``, ``get_raw_sdp``,
+   ``get_device_bt_version``) used by exploitation/assessment/fuzzing/
+   post_exploitation code paths throughout the project. These MUST NOT be
+   removed — they have many external callers.
+2. **The native ``SdpScannerModule``** — the registered Module subclass for
+   ``reconnaissance.sdp``. It calls the helpers above directly (no wrapper
+   layer, no cross-file imports).
+"""
+
+import logging
 import re
 from typing import Any
 
+from blue_tap.framework.contracts.result_schema import (
+    build_run_envelope,
+    make_evidence,
+    make_execution,
+)
+from blue_tap.framework.module import Module, RunContext
+from blue_tap.framework.module.options import OptAddress, OptInt, OptString
+from blue_tap.framework.registry import ModuleFamily
 from blue_tap.utils.bt_helpers import run_cmd, PROFILE_UUIDS
 from blue_tap.utils.output import info, success, error, warning
 
+logger = logging.getLogger(__name__)
 
-def browse_services(address: str, hci: str = "hci0",
-                    retries: int = 2) -> list[dict]:
-    detailed = browse_services_detailed(address, hci=hci, retries=retries)
+
+def browse_services(address: str, hci: str | None = None,
+                    retries: int = 2, timeout: float = 30.0) -> list[dict]:
+    if hci is None:
+
+        from blue_tap.hardware.adapter import resolve_active_hci
+
+        hci = resolve_active_hci()
+    detailed = browse_services_detailed(address, hci=hci, retries=retries, timeout=timeout)
     return detailed.get("services", [])
 
 
-def browse_services_detailed(address: str, hci: str = "hci0",
-                             retries: int = 2) -> dict[str, Any]:
+def browse_services_detailed(address: str, hci: str | None = None,
+                             retries: int = 2,
+                             timeout: float = 30.0) -> dict[str, Any]:
     """Browse all SDP services on a remote device.
 
     This reveals which Bluetooth profiles the IVI/phone supports:
     PBAP, MAP, HFP, A2DP, AVRCP, OPP, SPP, etc.
 
-    Retries on transient failures (connection reset, timeout).
+    Retries on transient failures (connection reset, timeout). ``timeout`` is
+    the per-attempt ceiling (seconds) for the underlying ``sdptool browse``
+    call — callers that need to bound a single attempt use this rather than
+    the retry budget.
     """
+    if hci is None:
+
+        from blue_tap.hardware.adapter import resolve_active_hci
+
+        hci = resolve_active_hci()
     from blue_tap.utils.bt_helpers import ensure_adapter_ready
     if not ensure_adapter_ready(hci):
         return {
@@ -42,7 +79,7 @@ def browse_services_detailed(address: str, hci: str = "hci0",
         if hci:
             cmd += ["-i", hci]
         cmd += ["browse", address]
-        result = run_cmd(cmd, timeout=30)
+        result = run_cmd(cmd, timeout=timeout)
 
         if result.returncode == 0:
             services = parse_sdp_output(result.stdout)
@@ -340,12 +377,17 @@ def search_services_batch(address: str, uuids: list[str]) -> dict[str, list[dict
     return results
 
 
-def check_ssp(address: str, hci: str = "hci0") -> bool | None:
+def check_ssp(address: str, hci: str | None = None) -> bool | None:
     """Check if a device supports Secure Simple Pairing via LMP features.
 
     SSP is a link-layer feature advertised in LMP feature pages,
     NOT in SDP records. We use hcitool info to read the LMP features.
     """
+    if hci is None:
+
+        from blue_tap.hardware.adapter import resolve_active_hci
+
+        hci = resolve_active_hci()
     result = run_cmd(["hcitool", "-i", hci, "info", address], timeout=10)
     if result.returncode != 0:
         # hcitool info requires an active connection on some systems.
@@ -374,23 +416,33 @@ def check_ssp(address: str, hci: str = "hci0") -> bool | None:
     return False
 
 
-def get_raw_sdp(address: str, hci: str = "hci0") -> str:
+def get_raw_sdp(address: str, hci: str | None = None, timeout: float = 30.0) -> str:
     """Get raw SDP output for analysis."""
+    if hci is None:
+
+        from blue_tap.hardware.adapter import resolve_active_hci
+
+        hci = resolve_active_hci()
     cmd = ["sdptool"]
     if hci:
         cmd += ["-i", hci]
     cmd += ["browse", address]
-    result = run_cmd(cmd, timeout=30)
+    result = run_cmd(cmd, timeout=timeout)
     return result.stdout if result.returncode == 0 else ""
 
 
-def get_device_bt_version(address: str, hci: str = "hci0") -> dict:
+def get_device_bt_version(address: str, hci: str | None = None) -> dict:
     """Get remote device's Bluetooth/LMP version and features.
 
     Returns:
         {"lmp_version": "5.2", "lmp_subversion": "0x1234",
          "manufacturer": "Broadcom", "features": [...]}
     """
+    if hci is None:
+
+        from blue_tap.hardware.adapter import resolve_active_hci
+
+        hci = resolve_active_hci()
     result = run_cmd(["hcitool", "-i", hci, "info", address], timeout=10)
     version_info = {
         "lmp_version": None,
@@ -417,3 +469,126 @@ def get_device_bt_version(address: str, hci: str = "hci0") -> dict:
             version_info["features_raw"] = line.split(":", 1)[1].strip()
 
     return version_info
+
+
+# ── Native Module class ─────────────────────────────────────────────────────
+
+class SdpScannerModule(Module):
+    """SDP Service Discovery.
+
+    Enumerate SDP service records and decode attributes on a Classic
+    Bluetooth target. Calls ``browse_services_detailed`` from this same
+    file — no cross-file forwarding.
+    """
+
+    module_id = "reconnaissance.sdp"
+    family = ModuleFamily.RECONNAISSANCE
+    name = "SDP Service Discovery"
+    description = "Enumerate SDP service records and decode attributes"
+    protocols = ("Classic", "SDP", "L2CAP")
+    requires = ("classic_target",)
+    destructive = False
+    requires_pairing = False
+    schema_prefix = "blue_tap.recon.result"
+    has_report_adapter = True
+    references = ()
+    options = (
+        OptAddress("RHOST", required=True, description="Target BR/EDR address"),
+        OptString("HCI", default="", description="Local HCI adapter"),
+        OptInt("RETRIES", default=2, description="Retry count on transient failures"),
+    )
+
+    def run(self, ctx: RunContext) -> dict:
+        target = str(ctx.options.get("RHOST", ""))
+        hci = str(ctx.options.get("HCI", ""))
+        retries = int(ctx.options.get("RETRIES", 2))
+        started_at = ctx.started_at
+
+        error_msg: str | None = None
+        result: dict
+        try:
+            result = browse_services_detailed(target, hci=hci, retries=retries)
+        except Exception as exc:
+            logger.exception("SDP browse failed for %s", target)
+            error_msg = str(exc)
+            result = {
+                "services": [],
+                "service_count": 0,
+                "rfcomm_channels": [],
+                "l2cap_psms": [],
+                "raw_output": "",
+                "status": "error",
+                "error": error_msg,
+            }
+
+        status = str(result.get("status", "error"))
+        services = result.get("services", []) or []
+        service_count = len(services)
+
+        if error_msg or status not in ("completed", "adapter_not_ready"):
+            execution_status = "failed"
+        elif status == "adapter_not_ready":
+            execution_status = "skipped"
+        else:
+            execution_status = "completed"
+
+        # Map to recon family outcomes: observed / merged / correlated / partial / not_applicable
+        if execution_status == "skipped":
+            outcome = "not_applicable"
+        elif execution_status == "completed" and service_count > 0:
+            outcome = "observed"
+        elif execution_status == "completed":
+            # Browse completed but returned no services — a clean negative
+            outcome = "not_applicable"
+        else:
+            # Probe was attempted but failed (timeout, connection error, etc.)
+            outcome = "partial"
+
+        summary_text = (
+            f"SDP browse error: {error_msg or result.get('error', 'unknown error')}"
+            if execution_status == "failed"
+            else (
+                f"Found {service_count} SDP services"
+                if service_count
+                else "No SDP services found"
+            )
+        )
+
+        return build_run_envelope(
+            schema=self.schema_prefix,
+            module=self.module_id,
+            target=target,
+            adapter=hci,
+            started_at=started_at,
+            executions=[
+                make_execution(
+                    execution_id="sdp_browse",
+                    kind="collector",
+                    id="sdp_browse",
+                    title="SDP Browse",
+                    module=self.module_id,
+                    module_id=self.module_id,
+                    protocol="SDP",
+                    execution_status=execution_status,
+                    module_outcome=outcome,
+                    evidence=make_evidence(
+                        raw={
+                            "service_count": service_count,
+                            "rfcomm_channels": result.get("rfcomm_channels", []),
+                            "l2cap_psms": result.get("l2cap_psms", []),
+                            "error": error_msg or result.get("error"),
+                        },
+                        summary=summary_text,
+                    ),
+                    destructive=False,
+                    requires_pairing=False,
+                )
+            ],
+            summary={
+                "outcome": outcome,
+                "service_count": service_count,
+                "error": error_msg or result.get("error"),
+            },
+            module_data=result,
+            run_id=ctx.run_id,
+        )

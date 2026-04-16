@@ -1,6 +1,12 @@
-"""HCI traffic capture and pairing mode detection."""
+"""HCI traffic capture and pairing mode detection.
+
+Owns ``HCICapture`` and ``detect_pairing_mode`` (both used by assessment/
+exploitation/fuzzing) plus the native ``HciCaptureModule`` registered for
+``reconnaissance.hci_capture``.
+"""
 
 import json
+import logging
 import os
 import re
 import signal
@@ -8,8 +14,24 @@ import subprocess
 import tempfile
 import time
 
+from blue_tap.framework.contracts.result_schema import (
+    build_run_envelope,
+    make_evidence,
+    make_execution,
+)
+from blue_tap.framework.module import Module, RunContext
+from blue_tap.framework.module.options import (
+    OptAddress,
+    OptBool,
+    OptInt,
+    OptPath,
+    OptString,
+)
+from blue_tap.framework.registry import ModuleFamily
 from blue_tap.utils.bt_helpers import check_tool, run_cmd
 from blue_tap.utils.output import error, info, success, warning
+
+logger = logging.getLogger(__name__)
 
 
 class HCICapture:
@@ -33,7 +55,7 @@ class HCICapture:
 
         Args:
             output_file: Path to write captured HCI traffic.
-            hci: Optional HCI adapter index to capture (e.g., "hci0").
+            hci: Optional HCI adapter index to capture (e.g., "<hciX>").
                  If None, captures from all interfaces.
             pcap: If True, write btsnoop binary format (for Wireshark).
                   If False, write human-readable text log.
@@ -41,6 +63,11 @@ class HCICapture:
         Returns:
             True if btmon launched successfully.
         """
+        if hci is None:
+
+            from blue_tap.hardware.adapter import resolve_active_hci
+
+            hci = resolve_active_hci()
         if not check_tool("btmon"):
             error("btmon not found — install bluez-utils")
             return False
@@ -232,7 +259,7 @@ class HCICapture:
             return None, None, None
 
 
-def detect_pairing_mode(address: str, hci: str = "hci0") -> dict:
+def detect_pairing_mode(address: str, hci: str | None = None) -> dict:
     """Probe a device's pairing capabilities via btmon + bluetoothctl.
 
     Initiates (then cancels) a pairing attempt while monitoring HCI traffic
@@ -245,6 +272,11 @@ def detect_pairing_mode(address: str, hci: str = "hci0") -> dict:
     Returns:
         Dict with keys: ssp_supported, io_capability, pairing_method, raw_excerpt.
     """
+    if hci is None:
+
+        from blue_tap.hardware.adapter import resolve_active_hci
+
+        hci = resolve_active_hci()
     result = {
         "ssp_supported": None,
         "io_capability": "Unknown",
@@ -351,3 +383,142 @@ def detect_pairing_mode(address: str, hci: str = "hci0") -> dict:
             pass
 
     return result
+
+
+# ── Native Module class ─────────────────────────────────────────────────────
+
+class HciCaptureModule(Module):
+    """HCI Capture.
+
+    Record HCI traffic to a pcap (btsnoop) or text log for offline analysis.
+    Uses ``HCICapture.start()``, sleeps for the requested DURATION, then
+    calls ``stop()``. A btmon process must be able to spawn (requires
+    ``btmon`` in PATH and sudo where BlueZ restricts raw access).
+
+    The RHOST + FILTER_TARGET options are exposed for future hci-level
+    filtering via `btmon -d` and are persisted into ``module_data`` so
+    downstream tooling can correlate the capture with a specific target.
+    """
+
+    module_id = "reconnaissance.hci_capture"
+    family = ModuleFamily.RECONNAISSANCE
+    name = "HCI Capture"
+    description = "Record HCI traffic to pcap for offline analysis"
+    protocols = ("Classic", "BLE", "HCI")
+    requires = ("adapter",)
+    destructive = False
+    requires_pairing = False
+    schema_prefix = "blue_tap.recon.result"
+    has_report_adapter = False
+    references = ()
+    options = (
+        OptString("HCI", default="", description="HCI adapter to capture on"),
+        OptInt("DURATION", default=30, description="Capture duration in seconds"),
+        OptPath("OUTPUT", default="hci_capture.pcap", description="Output file path"),
+        OptBool("PCAP", default=True, description="Write btsnoop/pcap binary (Wireshark) instead of text log"),
+        OptBool("FILTER_TARGET", default=False, description="Annotate capture with target metadata"),
+        OptAddress("RHOST", required=False, description="Target address for annotation"),
+    )
+
+    def run(self, ctx: RunContext) -> dict:
+        hci = str(ctx.options.get("HCI", ""))
+        duration = int(ctx.options.get("DURATION", 30))
+        output = str(ctx.options.get("OUTPUT", "hci_capture.pcap"))
+        pcap = bool(ctx.options.get("PCAP", True))
+        filter_target = bool(ctx.options.get("FILTER_TARGET", False))
+        target = str(ctx.options.get("RHOST", "") or "") if filter_target else ""
+        started_at = ctx.started_at
+
+        capture = HCICapture()
+        error_msg: str | None = None
+        started_ok = False
+        duration_actual = 0
+        size_bytes = 0
+
+        try:
+            started_ok = capture.start(output_file=output, hci=hci, pcap=pcap)
+            if not started_ok:
+                error_msg = "btmon failed to start (missing tool, adapter busy, or permissions)"
+            else:
+                t0 = time.monotonic()
+                try:
+                    # Poll so the loop exits early if btmon dies
+                    while time.monotonic() - t0 < duration:
+                        if not capture.is_running():
+                            error_msg = "btmon exited before duration elapsed"
+                            break
+                        time.sleep(min(1.0, duration - (time.monotonic() - t0)))
+                finally:
+                    capture.stop()
+                    duration_actual = int(time.monotonic() - t0)
+        except Exception as exc:
+            logger.exception("HCI capture failed (hci=%s, output=%s)", hci, output)
+            error_msg = str(exc)
+            try:
+                capture.stop()
+            except Exception:
+                pass
+
+        try:
+            if os.path.exists(output):
+                size_bytes = os.path.getsize(output)
+        except OSError:
+            size_bytes = 0
+
+        if error_msg:
+            execution_status = "failed"
+            outcome = "not_applicable"
+        else:
+            execution_status = "completed"
+            outcome = "observed" if size_bytes > 0 else "not_applicable"
+
+        summary_text = (
+            f"HCI capture error: {error_msg}"
+            if error_msg
+            else f"Captured {size_bytes} bytes over {duration_actual}s to {output}"
+        )
+
+        return build_run_envelope(
+            schema=self.schema_prefix,
+            module="hci_capture",
+            target=target,
+            adapter=hci,
+            started_at=started_at,
+            executions=[
+                make_execution(
+                    execution_id="hci_capture",
+                    kind="collector",
+                    id="hci_capture",
+                    title="HCI Traffic Capture",
+                    execution_status=execution_status,
+                    module_outcome=outcome,
+                    evidence=make_evidence(
+                        raw={
+                            "output": output,
+                            "size_bytes": size_bytes,
+                            "duration_s": duration_actual,
+                            "pcap": pcap,
+                            "error": error_msg,
+                        },
+                        summary=summary_text,
+                    ),
+                    destructive=False,
+                    requires_pairing=False,
+                )
+            ],
+            summary={
+                "outcome": outcome,
+                "output": output,
+                "size_bytes": size_bytes,
+                "duration_s": duration_actual,
+                "error": error_msg,
+            },
+            module_data={
+                "output": output,
+                "pcap": pcap,
+                "filter_target": filter_target,
+                "target": target,
+                "size_bytes": size_bytes,
+            },
+            run_id=ctx.run_id,
+        )

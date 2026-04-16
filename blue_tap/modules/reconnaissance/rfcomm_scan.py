@@ -1,11 +1,26 @@
-"""RFCOMM Channel Scanner — probe channels 1-30 for open services."""
+"""RFCOMM Channel Scanner — probe channels 1-30 for open services.
+
+Owns ``RFCOMMScanner`` (used by exploitation/assessment/fuzzing) plus the
+native ``RfcommScanModule`` registered for ``reconnaissance.rfcomm_scan``.
+"""
 
 import errno
+import logging
 import socket
 import string
 
+from blue_tap.framework.contracts.result_schema import (
+    build_run_envelope,
+    make_evidence,
+    make_execution,
+)
+from blue_tap.framework.module import Module, RunContext
+from blue_tap.framework.module.options import OptAddress, OptInt, OptString
+from blue_tap.framework.registry import ModuleFamily
 from blue_tap.modules.reconnaissance.spec_interpretation import interpret_rfcomm_probe
 from blue_tap.utils.output import info, success, error, warning, verbose
+
+logger = logging.getLogger(__name__)
 
 
 class RFCOMMScanner:
@@ -19,7 +34,7 @@ class RFCOMMScanner:
         self._local_addr: str | None = None
 
     def scan_all_channels(self, timeout_per_ch: float = 2.0,
-                            hci: str = "hci0",
+                            hci: str | None = None,
                             max_retries: int = 1,
                             unreachable_threshold: int = 3) -> list[dict]:
         """Try connecting to RFCOMM channels 1-30.
@@ -34,6 +49,11 @@ class RFCOMMScanner:
         Returns a list of dicts with keys: channel, status, response_type.
         Status is one of: open, closed, timeout, host_unreachable.
         """
+        if hci is None:
+
+            from blue_tap.hardware.adapter import resolve_active_hci
+
+            hci = resolve_active_hci()
         from blue_tap.utils.bt_helpers import ensure_adapter_ready, get_adapter_address
         if not ensure_adapter_ready(hci):
             return []
@@ -328,3 +348,110 @@ def _line_count(data: bytes) -> int:
         return 0
     preview = _preview_ascii(data, limit=max(len(data), 128))
     return preview.count("\n") + 1 if preview else 0
+
+
+# ── Native Module class ─────────────────────────────────────────────────────
+
+class RfcommScanModule(Module):
+    """RFCOMM Channel Scan.
+
+    Probe RFCOMM server channels and detect exposed profiles. Uses the
+    full ``RFCOMMScanner.scan_all_channels`` path (which covers 1-30) and
+    then trims the results to the START_CHANNEL..END_CHANNEL window the
+    operator requested.
+    """
+
+    module_id = "reconnaissance.rfcomm_scan"
+    family = ModuleFamily.RECONNAISSANCE
+    name = "RFCOMM Channel Scan"
+    description = "Probe RFCOMM server channels and detect exposed profiles"
+    protocols = ("Classic", "RFCOMM")
+    requires = ("classic_target",)
+    destructive = False
+    requires_pairing = False
+    schema_prefix = "blue_tap.recon.result"
+    has_report_adapter = True
+    references = ()
+    options = (
+        OptAddress("RHOST", required=True, description="Target BR/EDR address"),
+        OptString("HCI", default="", description="Local HCI adapter"),
+        OptInt("START_CHANNEL", default=1, description="First channel to include in results (1..30)"),
+        OptInt("END_CHANNEL", default=30, description="Last channel to include in results (1..30)"),
+        OptInt("TIMEOUT_MS", default=2000, description="Per-channel probe timeout in milliseconds"),
+    )
+
+    def run(self, ctx: RunContext) -> dict:
+        target = str(ctx.options.get("RHOST", ""))
+        hci = str(ctx.options.get("HCI", ""))
+        start_ch = max(1, int(ctx.options.get("START_CHANNEL", 1)))
+        end_ch = min(RFCOMMScanner.MAX_CHANNEL, int(ctx.options.get("END_CHANNEL", 30)))
+        timeout_s = max(int(ctx.options.get("TIMEOUT_MS", 2000)) / 1000.0, 0.2)
+        started_at = ctx.started_at
+
+        error_msg: str | None = None
+        results: list[dict] = []
+        try:
+            scanner = RFCOMMScanner(target)
+            all_results = scanner.scan_all_channels(timeout_per_ch=timeout_s, hci=hci)
+            results = [
+                r for r in all_results
+                if start_ch <= int(r.get("channel", 0)) <= end_ch
+            ]
+        except Exception as exc:
+            logger.exception("RFCOMM scan failed for %s", target)
+            error_msg = str(exc)
+
+        open_channels = [r for r in results if r.get("status") == "open"]
+        probe_count = len(results)
+
+        if error_msg:
+            execution_status = "failed"
+            outcome = "not_applicable"
+        else:
+            execution_status = "completed"
+            outcome = "observed" if open_channels else "not_applicable"
+
+        summary_text = (
+            f"RFCOMM scan error: {error_msg}"
+            if error_msg
+            else f"Probed {probe_count} channels, {len(open_channels)} open"
+        )
+
+        return build_run_envelope(
+            schema=self.schema_prefix,
+            module="rfcomm_scan",
+            target=target,
+            adapter=hci,
+            started_at=started_at,
+            executions=[
+                make_execution(
+                    execution_id="rfcomm_scan",
+                    kind="collector",
+                    id="rfcomm_scan",
+                    title="RFCOMM Channel Scan",
+                    execution_status=execution_status,
+                    module_outcome=outcome,
+                    evidence=make_evidence(
+                        raw={
+                            "probe_count": probe_count,
+                            "open_count": len(open_channels),
+                            "error": error_msg,
+                        },
+                        summary=summary_text,
+                    ),
+                    destructive=False,
+                    requires_pairing=False,
+                )
+            ],
+            summary={
+                "outcome": outcome,
+                "probe_count": probe_count,
+                "open_count": len(open_channels),
+                "error": error_msg,
+            },
+            module_data={
+                "open_channels": open_channels,
+                "all_probes": results,
+            },
+            run_id=ctx.run_id,
+        )

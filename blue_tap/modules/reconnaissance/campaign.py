@@ -1,12 +1,25 @@
-"""Recon campaign orchestration."""
+"""Recon campaign orchestration.
+
+Owns ``run_auto_recon`` — the multi-phase recon orchestrator — plus the
+native ``ReconCampaignModule`` that exposes it as ``reconnaissance.campaign``.
+"""
 
 from __future__ import annotations
 
+import logging
 import os
 import tempfile
 import time
 from typing import Any
 
+from blue_tap.framework.module import Module, RunContext
+from blue_tap.framework.module.options import (
+    OptAddress,
+    OptBool,
+    OptInt,
+    OptString,
+)
+from blue_tap.framework.registry import ModuleFamily
 from blue_tap.framework.runtime.cli_events import emit_cli_event
 from blue_tap.framework.envelopes.recon import build_recon_execution, summarize_recon_entries
 from blue_tap.framework.contracts.result_schema import (
@@ -20,6 +33,8 @@ from blue_tap.framework.contracts.result_schema import (
     make_run_id,
     now_iso,
 )
+
+logger = logging.getLogger(__name__)
 from blue_tap.modules.reconnaissance.capability_detector import detect_target_capabilities
 from blue_tap.modules.reconnaissance.capture_analysis import analyze_capture_results
 from blue_tap.modules.reconnaissance.correlation import build_recon_correlation, correlate_l2cap_with_sdp, correlate_rfcomm_with_sdp
@@ -36,7 +51,7 @@ from blue_tap.modules.reconnaissance.sniffer import CombinedSniffer, DarkFirmwar
 def run_auto_recon(
     *,
     address: str,
-    hci: str = "hci0",
+    hci: str | None = None,
     below_hci_hci: str = "hci1",
     with_captures: bool = False,
     with_below_hci: bool = False,
@@ -71,7 +86,7 @@ def run_auto_recon(
             kind="collector",
             id="recon_capability_detection",
             title="Transport Capability Detection",
-            module="recon",
+            module="reconnaissance",
             protocol="Bluetooth",
             execution_status=EXECUTION_COMPLETED,
             module_outcome=capability.get("classification", "undetermined"),
@@ -355,7 +370,7 @@ def run_auto_recon(
     module_data["cli_events"] = cli_events
     return build_run_envelope(
         schema="blue_tap.recon.result",
-        module="recon",
+        module="reconnaissance",
         run_id=run_id,
         target=address,
         adapter=hci,
@@ -391,7 +406,7 @@ def _skip_execution(
         kind="collector",
         id=execution_id,
         title=title,
-        module="recon",
+        module="reconnaissance",
         protocol=protocol,
         execution_status=EXECUTION_SKIPPED,
         module_outcome=outcome,
@@ -404,7 +419,7 @@ def _skip_execution(
 
 
 def _emit(events: list[dict[str, Any]], **kwargs: Any) -> None:
-    event = emit_cli_event(module="recon", **kwargs)
+    event = emit_cli_event(module="reconnaissance", **kwargs)
     events.append(event)
 
 
@@ -440,7 +455,7 @@ def _run_hci_capture_step(address: str, hci: str, duration: int, prerequisites: 
         kind="collector",
         id="recon_hci_capture",
         title="HCI Capture",
-        module="recon",
+        module="reconnaissance",
         protocol="HCI",
         execution_status=EXECUTION_FAILED,
         module_outcome="collector_unavailable",
@@ -482,7 +497,7 @@ def _run_nrf_capture_step(address: str, duration: int, prerequisites: dict[str, 
         kind="collector",
         id="recon_nrf_capture",
         title="nRF BLE Capture",
-        module="recon",
+        module="reconnaissance",
         protocol="BLE",
         execution_status=EXECUTION_FAILED,
         module_outcome="no_relevant_traffic" if "error" not in result else "collector_unavailable",
@@ -525,7 +540,7 @@ def _run_lmp_capture_step(address: str, below_hci_hci: str, duration: int, prere
         kind="collector",
         id="recon_below_hci",
         title="Below-HCI Recon",
-        module="recon",
+        module="reconnaissance",
         protocol="LMP",
         execution_status=EXECUTION_FAILED,
         module_outcome="collector_unavailable",
@@ -569,7 +584,7 @@ def _run_combined_capture_step(address: str, below_hci_hci: str, duration: int, 
         kind="collector",
         id="recon_combined_capture",
         title="Combined BLE and LMP Capture",
-        module="recon",
+        module="reconnaissance",
         protocol="BLE/LMP",
         execution_status=EXECUTION_FAILED,
         module_outcome="collector_unavailable",
@@ -651,3 +666,111 @@ def _gatt_summary(gatt_result: dict[str, Any]) -> str:
     if gatt_result.get("error"):
         return f"GATT enumeration ended with status={status}: {gatt_result.get('error')}"
     return f"GATT enumeration completed with status={status}"
+
+
+# ── Native Module class ─────────────────────────────────────────────────────
+
+class ReconCampaignModule(Module):
+    """Auto Recon Campaign.
+
+    Run a full capability-driven recon pass against a single target:
+    capability detection → SDP/GATT/RFCOMM/L2CAP enumeration → fingerprint
+    → optional HCI/BLE/LMP captures → correlation. Delegates to
+    ``run_auto_recon`` in this same file.
+
+    Options mirror ``run_auto_recon`` keyword arguments directly — no
+    translation layer, no ``config={}`` dict in between.
+    """
+
+    module_id = "reconnaissance.campaign"
+    family = ModuleFamily.RECONNAISSANCE
+    name = "Auto Recon Campaign"
+    description = "Full recon: SDP, GATT, fingerprint, L2CAP, RFCOMM, and captures"
+    protocols = ("Classic", "BLE", "SDP", "GATT", "L2CAP", "RFCOMM")
+    requires = ("adapter", "target")
+    destructive = False
+    requires_pairing = False
+    schema_prefix = "blue_tap.recon.result"
+    has_report_adapter = True
+    references = ()
+    options = (
+        OptAddress("RHOST", required=True, description="Target Bluetooth address"),
+        OptString("HCI", default="", description="Local HCI adapter"),
+        OptString("BELOW_HCI", default="hci1", description="Below-HCI (DarkFirmware) adapter"),
+        OptBool("WITH_CAPTURES", default=False, description="Run HCI/BLE capture steps"),
+        OptBool("WITH_BELOW_HCI", default=False, description="Run DarkFirmware LMP capture steps"),
+        OptInt("DURATION", default=20, description="Capture step duration in seconds"),
+    )
+
+    def run(self, ctx: RunContext) -> dict:
+        target = str(ctx.options.get("RHOST", ""))
+        hci = str(ctx.options.get("HCI", ""))
+        below_hci = str(ctx.options.get("BELOW_HCI", "hci1"))
+        with_captures = bool(ctx.options.get("WITH_CAPTURES", False))
+        with_below_hci = bool(ctx.options.get("WITH_BELOW_HCI", False))
+        duration = int(ctx.options.get("DURATION", 20))
+
+        try:
+            envelope = run_auto_recon(
+                address=target,
+                hci=hci,
+                below_hci_hci=below_hci,
+                with_captures=with_captures,
+                with_below_hci=with_below_hci,
+                duration=duration,
+            )
+            if not isinstance(envelope, dict):
+                envelope = {"error": "run_auto_recon did not return a dict", "raw": envelope}
+
+            # run_auto_recon already builds a full envelope; override run_id
+            # so the framework's correlation ID flows through and fix the
+            # outcome classification if the orchestrator silently produced an
+            # error-shaped result.
+            envelope["run_id"] = ctx.run_id
+
+            summary = envelope.setdefault("summary", {})
+            executions = envelope.get("executions", []) or []
+            orchestrator_error = bool(envelope.get("error")) or bool(summary.get("error"))
+            has_executions = bool(executions)
+            any_failed = any(
+                str(e.get("execution_status", "")).lower() in ("failed", "error", "timeout")
+                for e in executions
+                if isinstance(e, dict)
+            )
+
+            if orchestrator_error or not has_executions:
+                summary["outcome"] = "partial" if has_executions else "not_applicable"
+            elif any_failed and summary.get("outcome") == "observed":
+                summary["outcome"] = "partial"
+            elif "outcome" not in summary:
+                summary["outcome"] = "observed"
+
+            return envelope
+        except Exception as exc:
+            logger.exception("Recon campaign failed for %s", target)
+            return build_run_envelope(
+                schema=self.schema_prefix,
+                module="campaign",
+                target=target,
+                adapter=hci,
+                started_at=ctx.started_at,
+                executions=[
+                    make_execution(
+                        execution_id="recon_campaign",
+                        kind="phase",
+                        id="recon_campaign",
+                        title="Recon Campaign",
+                        execution_status="failed",
+                        module_outcome="not_applicable",
+                        evidence=make_evidence(
+                            raw={"error": str(exc)},
+                            summary=f"Recon campaign failed: {exc}",
+                        ),
+                        destructive=False,
+                        requires_pairing=False,
+                    )
+                ],
+                summary={"outcome": "not_applicable", "error": str(exc)},
+                module_data={"error": str(exc)},
+                run_id=ctx.run_id,
+            )

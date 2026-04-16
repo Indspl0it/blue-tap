@@ -20,11 +20,22 @@ What is NOT reliable:
 The `ivi_likely` field is a heuristic hint — never use it to gate workflows.
 """
 
+import logging
 import re
 
-from blue_tap.utils.bt_helpers import lookup_oui, run_cmd
+from blue_tap.framework.contracts.result_schema import (
+    build_run_envelope,
+    make_evidence,
+    make_execution,
+)
+from blue_tap.framework.module import Module, RunContext
+from blue_tap.framework.module.options import OptAddress, OptString
+from blue_tap.framework.registry import ModuleFamily
 from blue_tap.modules.reconnaissance.sdp import browse_services
+from blue_tap.utils.bt_helpers import lookup_oui, run_cmd
 from blue_tap.utils.output import info, success
+
+logger = logging.getLogger(__name__)
 
 
 # Bluetooth profiles typically found on automotive IVIs
@@ -50,7 +61,7 @@ IVI_DEVICE_CLASSES = {
 }
 
 
-def fingerprint_device(address: str, hci: str = "hci0") -> dict:
+def fingerprint_device(address: str, hci: str | None = None) -> dict:
     """Fingerprint a Bluetooth device — version, chipset, profiles, attack surface.
 
     Gathers: name, device class, BT version, LMP features, chipset manufacturer,
@@ -59,6 +70,11 @@ def fingerprint_device(address: str, hci: str = "hci0") -> dict:
     Does NOT attempt to identify the vehicle make/model — IVIs rarely expose
     that information over Bluetooth.
     """
+    if hci is None:
+
+        from blue_tap.hardware.adapter import resolve_active_hci
+
+        hci = resolve_active_hci()
     from blue_tap.utils.bt_helpers import ensure_adapter_ready
     if not ensure_adapter_ready(hci):
         return {"address": address, "name": "", "manufacturer": "Unknown",
@@ -119,8 +135,10 @@ def fingerprint_device(address: str, hci: str = "hci0") -> dict:
             fp["manufacturer_name"] = oui_vendor
         fp["evidence_classes"]["inferred"].append("oui_vendor")
 
-    # Enumerate services
-    services = browse_services(address)
+    # Enumerate services. Pass the explicit hci so we don't fall back to hci0
+    # — that bug masked the real adapter and produced "Adapter hci0 not found"
+    # errors when the dongle came up under a different index.
+    services = browse_services(address, hci=hci)
     for svc in services:
         profile = svc.get("profile", "")
         fp["profiles"].append({
@@ -424,4 +442,112 @@ def _check_vuln_hints(fp: dict):
         fp["vuln_hints"].append(
             "PBAP on legacy BT: Phonebook access may be exploitable "
             "without proper pairing (BlueBorne + PBAP combo)."
+        )
+
+
+# ── Native Module class ─────────────────────────────────────────────────────
+
+class FingerprintModule(Module):
+    """Device Fingerprinting.
+
+    Infer chipset, firmware, profiles, device class, and attack surface
+    from ``fingerprint_device`` in this same file. Does NOT attempt to
+    identify vehicle make/model — IVIs rarely expose that information.
+    """
+
+    module_id = "reconnaissance.fingerprint"
+    family = ModuleFamily.RECONNAISSANCE
+    name = "Device Fingerprinting"
+    description = "Infer chipset, BT version, profiles, and attack surface"
+    protocols = ("Classic", "BLE", "LMP", "GATT")
+    requires = ("target",)
+    destructive = False
+    requires_pairing = False
+    schema_prefix = "blue_tap.recon.result"
+    has_report_adapter = True
+    references = ()
+    options = (
+        OptAddress("RHOST", required=True, description="Target Bluetooth address"),
+        OptString("HCI", default="", description="Local HCI adapter"),
+    )
+
+    def run(self, ctx: RunContext) -> dict:
+        target = str(ctx.options.get("RHOST", ""))
+        hci = str(ctx.options.get("HCI", ""))
+        started_at = ctx.started_at
+
+        error_msg: str | None = None
+        result: dict = {}
+        try:
+            result = fingerprint_device(target, hci=hci)
+            if not isinstance(result, dict):
+                result = {"raw": result}
+        except Exception as exc:
+            logger.exception("Fingerprinting failed for %s", target)
+            error_msg = str(exc)
+            result = {"error": error_msg}
+
+        vendor = (result.get("chipset") or {}).get("vendor", "") if isinstance(result.get("chipset"), dict) else result.get("chipset_vendor", "")
+        bt_version = result.get("bt_version", "")
+        profiles = result.get("profiles", []) or []
+        has_signal = bool(vendor) or bool(bt_version) or bool(profiles)
+
+        if error_msg:
+            execution_status = "failed"
+            outcome = "not_applicable"
+        elif has_signal:
+            execution_status = "completed"
+            outcome = "observed"
+        else:
+            execution_status = "completed"
+            outcome = "partial"
+
+        summary_text = (
+            f"Fingerprint error: {error_msg}"
+            if error_msg
+            else (
+                f"Identified {vendor or 'unknown vendor'} "
+                f"({bt_version or 'unknown BT version'}), {len(profiles)} profiles"
+            )
+        )
+
+        return build_run_envelope(
+            schema=self.schema_prefix,
+            module=self.module_id,
+            target=target,
+            adapter=hci,
+            started_at=started_at,
+            executions=[
+                make_execution(
+                    execution_id="fingerprint",
+                    kind="collector",
+                    id="fingerprint",
+                    title="Device Fingerprinting",
+                    module=self.module_id,
+                    module_id=self.module_id,
+                    protocol="Discovery",
+                    execution_status=execution_status,
+                    module_outcome=outcome,
+                    evidence=make_evidence(
+                        raw={
+                            "vendor": vendor,
+                            "bt_version": bt_version,
+                            "profile_count": len(profiles),
+                            "error": error_msg,
+                        },
+                        summary=summary_text,
+                    ),
+                    destructive=False,
+                    requires_pairing=False,
+                )
+            ],
+            summary={
+                "outcome": outcome,
+                "vendor": vendor,
+                "bt_version": bt_version,
+                "profile_count": len(profiles),
+                "error": error_msg,
+            },
+            module_data=result,
+            run_id=ctx.run_id,
         )

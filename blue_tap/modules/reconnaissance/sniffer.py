@@ -37,6 +37,7 @@ References:
 """
 
 import json
+import logging
 import os
 import re
 import struct
@@ -45,11 +46,26 @@ import time
 import signal
 import subprocess
 
+from blue_tap.framework.contracts.result_schema import (
+    build_run_envelope,
+    make_evidence,
+    make_execution,
+)
+from blue_tap.framework.module import Module, RunContext
+from blue_tap.framework.module.options import (
+    OptAddress,
+    OptInt,
+    OptPath,
+    OptString,
+)
+from blue_tap.framework.registry import ModuleFamily
 from blue_tap.utils.bt_helpers import run_cmd, check_tool
 from blue_tap.utils.output import (
     info, success, error, warning, verbose,
     phase, step, substep,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # ── nRF52840 BLE Sniffer ──────────────────────────────────────────────────
@@ -1226,11 +1242,202 @@ class LinkKeyExtractor:
             "bluez_restart_succeeded": restart_succeeded,
         }
 
-    def get_adapter_mac(self, hci: str = "hci0") -> str | None:
+    def get_adapter_mac(self, hci: str | None = None) -> str | None:
         """Get the current MAC address of the local adapter."""
+        if hci is None:
+
+            from blue_tap.hardware.adapter import resolve_active_hci
+
+            hci = resolve_active_hci()
         result = run_cmd(["hciconfig", hci], timeout=5)
         if result.returncode == 0:
             m = re.search(r"BD Address:\s*([0-9A-Fa-f:]{17})", result.stdout)
             if m:
                 return m.group(1).upper()
         return None
+
+
+# ── Native Module class ─────────────────────────────────────────────────────
+
+class SnifferModule(Module):
+    """Bluetooth Sniffer.
+
+    Dispatches to the right sniffer class based on MODE:
+
+    * ``ble`` / ``ble_advertise`` — nRF52840 advertisement scan via
+      :class:`NRFBLESniffer`. Fast, no target required.
+    * ``ble_connection`` — nRF52840 connection sniff; requires RHOST.
+    * ``ble_pairing`` — nRF52840 pairing capture; RHOST optional.
+    * ``lmp`` — DarkFirmware LMP capture via :class:`DarkFirmwareSniffer`.
+      Requires RTL8761B running DarkFirmware on HCI_DEV.
+    * ``combined`` — :class:`CombinedSniffer` runs BLE + LMP concurrently.
+    """
+
+    module_id = "reconnaissance.sniffer"
+    family = ModuleFamily.RECONNAISSANCE
+    name = "Bluetooth Sniffer"
+    description = "Capture BR/EDR or BLE air traffic via nRF52840 or DarkFirmware"
+    protocols = ("Classic", "BLE", "LMP", "SMP")
+    requires = ("sniffer_adapter",)
+    destructive = False
+    requires_pairing = False
+    schema_prefix = "blue_tap.recon.result"
+    has_report_adapter = False
+    references = ()
+    options = (
+        OptString(
+            "MODE",
+            default="ble",
+            description="ble | ble_connection | ble_pairing | lmp | combined",
+        ),
+        OptInt("DURATION", default=60, description="Capture duration in seconds"),
+        OptPath("OUTPUT", default="sniffer_capture.pcap", description="Output file path"),
+        OptAddress("RHOST", required=False, description="Target address"),
+        OptInt("HCI_DEV", default=1, description="HCI device index for DarkFirmware (lmp/combined)"),
+    )
+
+    def run(self, ctx: RunContext) -> dict:
+        mode = str(ctx.options.get("MODE", "ble")).lower()
+        duration = int(ctx.options.get("DURATION", 60))
+        output = str(ctx.options.get("OUTPUT", "sniffer_capture.pcap"))
+        target = str(ctx.options.get("RHOST", "") or "")
+        hci_dev = int(ctx.options.get("HCI_DEV", 1))
+        started_at = ctx.started_at
+
+        error_msg: str | None = None
+        sniff_result: dict = {}
+        packet_count = 0
+
+        try:
+            if mode in ("ble", "ble_advertise"):
+                nrf = NRFBLESniffer()
+                if not nrf.is_available():
+                    error_msg = "nRF52840 sniffer not available (tshark + nrf_sniffer_ble extcap or nrfutil)"
+                else:
+                    advertisers = nrf.scan_advertisers(duration=duration)
+                    sniff_result = {
+                        "mode": mode,
+                        "advertisers": advertisers,
+                        "count": len(advertisers),
+                    }
+                    packet_count = len(advertisers)
+
+            elif mode == "ble_connection":
+                if not target:
+                    error_msg = "RHOST is required for ble_connection mode"
+                else:
+                    nrf = NRFBLESniffer()
+                    if not nrf.is_available():
+                        error_msg = "nRF52840 sniffer not available"
+                    else:
+                        sniff_result = nrf.sniff_connection(
+                            target_address=target,
+                            output_pcap=output,
+                            duration=duration,
+                        )
+                        if not sniff_result.get("success", False):
+                            error_msg = sniff_result.get("error", "nRF connection sniff failed")
+                        packet_count = int(sniff_result.get("packets", 0) or 0)
+
+            elif mode == "ble_pairing":
+                nrf = NRFBLESniffer()
+                if not nrf.is_available():
+                    error_msg = "nRF52840 sniffer not available"
+                else:
+                    sniff_result = nrf.sniff_pairing(
+                        output_pcap=output,
+                        duration=duration,
+                        target=target or None,
+                    )
+                    if not sniff_result.get("success", False):
+                        error_msg = sniff_result.get("error", "nRF pairing sniff failed")
+                    packet_count = int(sniff_result.get("packets", 0) or 0)
+
+            elif mode == "lmp":
+                df = DarkFirmwareSniffer(hci_dev=hci_dev)
+                if not df.is_available():
+                    error_msg = f"DarkFirmware not loaded on hci{hci_dev}"
+                else:
+                    sniff_result = df.start_capture(
+                        target=target or None,
+                        output=output,
+                        duration=duration,
+                    )
+                    if not sniff_result.get("success", False):
+                        error_msg = sniff_result.get("error", "DarkFirmware LMP capture failed")
+                    packet_count = int(sniff_result.get("packets", 0) or 0)
+
+            elif mode == "combined":
+                nrf_ok = NRFBLESniffer.is_available()
+                df_ok = False
+                try:
+                    df_ok = DarkFirmwareSniffer(hci_dev=hci_dev).is_available()
+                except Exception:
+                    df_ok = False
+                if not nrf_ok and not df_ok:
+                    error_msg = "Neither nRF52840 nor DarkFirmware available"
+                else:
+                    combined = CombinedSniffer(
+                        nrf_available=nrf_ok,
+                        darkfirmware_available=df_ok,
+                        hci_dev=hci_dev,
+                    )
+                    sniff_result = combined.monitor(target=target or None, duration=duration)
+                    packet_count = int(sniff_result.get("lmp_count", 0) or 0) + \
+                                   int(sniff_result.get("ble_count", 0) or 0)
+            else:
+                error_msg = f"unknown MODE: {mode}"
+        except Exception as exc:
+            logger.exception("Sniffer failed (mode=%s)", mode)
+            error_msg = str(exc)
+
+        if error_msg:
+            execution_status = "failed"
+            outcome = "not_applicable"
+        else:
+            execution_status = "completed"
+            outcome = "observed" if packet_count > 0 else "not_applicable"
+
+        summary_text = (
+            f"Sniffer error: {error_msg}"
+            if error_msg
+            else f"{mode}: captured {packet_count} events"
+        )
+
+        return build_run_envelope(
+            schema=self.schema_prefix,
+            module="sniffer",
+            target=target,
+            adapter=f"hci{hci_dev}",
+            started_at=started_at,
+            executions=[
+                make_execution(
+                    execution_id="sniffer_capture",
+                    kind="collector",
+                    id="sniffer_capture",
+                    title=f"Bluetooth Sniffer ({mode})",
+                    execution_status=execution_status,
+                    module_outcome=outcome,
+                    evidence=make_evidence(
+                        raw={
+                            "mode": mode,
+                            "packet_count": packet_count,
+                            "output": output,
+                            "error": error_msg,
+                        },
+                        summary=summary_text,
+                    ),
+                    destructive=False,
+                    requires_pairing=False,
+                )
+            ],
+            summary={
+                "outcome": outcome,
+                "mode": mode,
+                "packet_count": packet_count,
+                "output": output,
+                "error": error_msg,
+            },
+            module_data=sniff_result,
+            run_id=ctx.run_id,
+        )

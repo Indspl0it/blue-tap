@@ -1,9 +1,26 @@
-"""Spec-driven interpretation helpers for recon protocol evidence."""
+"""Spec-driven interpretation helpers for recon protocol evidence.
+
+Owns ``interpret_rfcomm_probe``, ``interpret_l2cap_probe``,
+``interpret_lmp_capture``, ``interpret_ble_capture``,
+``evaluate_smp_transcript``, and ``normalize_smp_message`` — all consumed
+by correlation — plus the native internal ``SpecInterpretationModule``.
+"""
 
 from __future__ import annotations
 
+import json
+import logging
+import os
 from typing import Any
 
+from blue_tap.framework.contracts.result_schema import (
+    build_run_envelope,
+    make_evidence,
+    make_execution,
+)
+from blue_tap.framework.module import Module, RunContext
+from blue_tap.framework.module.options import OptChoice, OptPath
+from blue_tap.framework.registry import ModuleFamily
 from blue_tap.modules.fuzzing.protocols.smp import (
     AUTH_MITM,
     AUTH_SC,
@@ -18,6 +35,8 @@ from blue_tap.modules.fuzzing.protocols.smp import (
     SMP_PAIRING_REQUEST,
     SMP_PAIRING_RESPONSE,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def interpret_rfcomm_probe(result: dict[str, Any], *, advertised: bool = False) -> dict[str, Any]:
@@ -279,3 +298,141 @@ def normalize_smp_message(message: dict[str, Any]) -> dict[str, Any]:
         io_cap = int(normalized.get("io_capability", 0) or 0)
         normalized["io_capability_name"] = IO_CAPABILITY_NAMES.get(io_cap, f"0x{io_cap:02X}")
     return normalized
+
+
+# ── Native Module class ─────────────────────────────────────────────────────
+
+class SpecInterpretationModule(Module):
+    """Spec Interpretation (internal).
+
+    Apply spec-driven interpretation to a pre-analyzed capture artifact.
+    The operator supplies the path to a capture-analysis JSON and the
+    TARGET_TYPE discriminator; the Module dispatches to the right
+    ``interpret_*`` helper from this file and returns the interpretation
+    dict.
+    """
+
+    module_id = "reconnaissance.spec_interpretation"
+    family = ModuleFamily.RECONNAISSANCE
+    name = "Spec Interpretation"
+    description = "Interpret LMP/BLE/RFCOMM/L2CAP probe/capture analyses"
+    protocols = ("Classic", "BLE", "LMP", "SMP")
+    requires = ()
+    destructive = False
+    requires_pairing = False
+    schema_prefix = "blue_tap.recon.result"
+    has_report_adapter = False
+    internal = True
+    references = ()
+    options = (
+        OptChoice(
+            "TARGET_TYPE",
+            choices=("lmp", "ble", "rfcomm", "l2cap", "smp"),
+            default="lmp",
+            description="Which interpreter to apply",
+        ),
+        OptPath("ANALYSIS_JSON", required=True, description="Path to capture-analysis JSON artifact"),
+        OptPath("PAIRING_JSON", required=False, description="Optional pairing-mode JSON for cross-reference"),
+    )
+
+    def run(self, ctx: RunContext) -> dict:
+        target_type = str(ctx.options.get("TARGET_TYPE", "lmp")).lower()
+        analysis_path = str(ctx.options.get("ANALYSIS_JSON", ""))
+        pairing_path = str(ctx.options.get("PAIRING_JSON", "") or "")
+        started_at = ctx.started_at
+
+        error_msg: str | None = None
+        interpretation: dict = {}
+        try:
+            if not analysis_path or not os.path.exists(analysis_path):
+                raise FileNotFoundError(f"analysis artifact not found: {analysis_path}")
+            with open(analysis_path, encoding="utf-8") as fh:
+                payload = json.load(fh)
+            if isinstance(payload, dict) and "module_data" in payload:
+                payload = payload.get("module_data") or {}
+            if not isinstance(payload, dict):
+                raise ValueError(f"analysis JSON at {analysis_path} is not a dict")
+
+            pairing_mode: dict | None = None
+            if pairing_path:
+                if not os.path.exists(pairing_path):
+                    raise FileNotFoundError(f"pairing JSON not found: {pairing_path}")
+                with open(pairing_path, encoding="utf-8") as fh:
+                    pm_payload = json.load(fh)
+                if isinstance(pm_payload, dict) and "module_data" in pm_payload:
+                    pm_payload = pm_payload.get("module_data") or {}
+                if isinstance(pm_payload, dict):
+                    pairing_mode = pm_payload
+
+            if target_type == "lmp":
+                interpretation = interpret_lmp_capture(payload, pairing_mode=pairing_mode)
+            elif target_type == "ble":
+                interpretation = interpret_ble_capture(payload, pairing_mode=pairing_mode)
+            elif target_type == "rfcomm":
+                interpretation = interpret_rfcomm_probe(payload)
+            elif target_type == "l2cap":
+                interpretation = interpret_l2cap_probe(payload)
+            elif target_type == "smp":
+                messages = payload.get("smp_messages") or payload.get("messages") or []
+                if not isinstance(messages, list):
+                    raise ValueError("SMP interpretation requires a 'smp_messages' list in the payload")
+                interpretation = evaluate_smp_transcript(messages)
+            else:
+                raise ValueError(f"unknown TARGET_TYPE: {target_type}")
+        except Exception as exc:
+            logger.exception("Spec interpretation failed (type=%s)", target_type)
+            error_msg = str(exc)
+
+        findings = interpretation.get("findings", []) if isinstance(interpretation, dict) else []
+
+        if error_msg:
+            execution_status = "failed"
+            outcome = "not_applicable"
+        elif findings:
+            execution_status = "completed"
+            outcome = "observed"
+        else:
+            execution_status = "completed"
+            outcome = "partial"
+
+        summary_text = (
+            f"Interpretation error: {error_msg}"
+            if error_msg
+            else f"{target_type}: {len(findings)} finding(s)"
+        )
+
+        return build_run_envelope(
+            schema=self.schema_prefix,
+            module="spec_interpretation",
+            target="",
+            adapter="",
+            started_at=started_at,
+            executions=[
+                make_execution(
+                    execution_id="spec_interpret",
+                    kind="collector",
+                    id="spec_interpret",
+                    title=f"Spec Interpretation ({target_type})",
+                    execution_status=execution_status,
+                    module_outcome=outcome,
+                    evidence=make_evidence(
+                        raw={
+                            "target_type": target_type,
+                            "finding_count": len(findings),
+                            "error": error_msg,
+                        },
+                        summary=summary_text,
+                    ),
+                    destructive=False,
+                    requires_pairing=False,
+                )
+            ],
+            summary={
+                "outcome": outcome,
+                "target_type": target_type,
+                "finding_count": len(findings),
+                "error": error_msg,
+            },
+            module_data=interpretation if isinstance(interpretation, dict) else {"raw": interpretation},
+            run_id=ctx.run_id,
+        )
