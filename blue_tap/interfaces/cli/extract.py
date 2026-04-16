@@ -98,6 +98,28 @@ def extract_media(ctx, action, volume):
     invoke("post_exploitation.avrcp", opts)
 
 
+@extract.command("stream", cls=LoggedCommand)
+@click.option("--action", default=None, type=click.Choice(["record", "inject", "route"]),
+              help="A2DP action (default: record)")
+@click.option("--duration", "-d", default=None, type=float, help="Recording duration in seconds (default: 10)")
+@click.option("--file", "audio_file", default=None, type=click.Path(exists=True),
+              help="Audio file for inject action")
+@click.option("--output", "-o", default=None, help="Output file for record action (default: a2dp_capture.wav)")
+@click.pass_context
+def extract_stream(ctx, action, duration, audio_file, output):
+    """A2DP audio streaming — capture, record, eavesdrop, loopback."""
+    opts = _base_opts(ctx)
+    if action:
+        opts["ACTION"] = action
+    if duration is not None:
+        opts["DURATION"] = str(duration)
+    if audio_file:
+        opts["FILE"] = audio_file
+    if output:
+        opts["OUTPUT"] = output
+    invoke("post_exploitation.a2dp", opts)
+
+
 @extract.command("push", cls=LoggedCommand)
 @click.argument("file", type=click.Path(exists=True))
 @click.option("--channel", default=None, type=int, help="RFCOMM channel (0=auto-discover)")

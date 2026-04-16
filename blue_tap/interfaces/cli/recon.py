@@ -116,3 +116,43 @@ def recon_sniff(ctx, mode, duration, output):
     if output:
         opts["OUTPUT"] = output
     invoke("reconnaissance.sniffer", opts)
+
+
+@recon.command("auto", cls=LoggedCommand)
+@click.pass_context
+def recon_auto(ctx):
+    """Run all reconnaissance collectors against the target."""
+    invoke("reconnaissance.campaign", _base_opts(ctx))
+
+
+@recon.command("capabilities", cls=LoggedCommand)
+@click.pass_context
+def recon_capabilities(ctx):
+    """Detect target capabilities — supported profiles, transports, features."""
+    invoke("reconnaissance.capability_detector", _base_opts(ctx))
+
+
+@recon.command("analyze", cls=LoggedCommand)
+@click.option("--pcap", "-f", default=None, type=click.Path(exists=True),
+              help="Path to pcap file (default: latest capture)")
+@click.pass_context
+def recon_analyze(ctx, pcap):
+    """Analyze a captured pcap — protocol breakdown, anomalies, key events."""
+    opts = _base_opts(ctx)
+    if pcap:
+        opts["PCAP"] = pcap
+    invoke("reconnaissance.capture_analysis", opts)
+
+
+@recon.command("correlate", cls=LoggedCommand)
+@click.pass_context
+def recon_correlate(ctx):
+    """Correlate findings from multiple collectors into a unified profile."""
+    invoke("reconnaissance.correlation", _base_opts(ctx))
+
+
+@recon.command("interpret", cls=LoggedCommand)
+@click.pass_context
+def recon_interpret(ctx):
+    """Interpret Bluetooth spec data — feature flags, version strings, class codes."""
+    invoke("reconnaissance.spec_interpretation", _base_opts(ctx))

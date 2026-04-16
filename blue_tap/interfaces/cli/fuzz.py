@@ -17,9 +17,9 @@ def fuzz():
     """Protocol-level fuzzing and crash analysis."""
 
 
-# Register all fuzz sub-commands from the fuzzing module
+# Register all fuzz sub-commands from the fuzzing module.
+# NOTE: register_fuzz_commands() internally calls register_extra_commands(),
+# so we must NOT call register_extra_commands() again here.
 from blue_tap.modules.fuzzing.cli_commands import register_fuzz_commands  # noqa: E402
-from blue_tap.modules.fuzzing.cli_extra import register_extra_commands  # noqa: E402
 
 register_fuzz_commands(fuzz)
-register_extra_commands(fuzz)
