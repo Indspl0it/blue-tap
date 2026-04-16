@@ -18,7 +18,7 @@ If you use Blue-Tap in academic research, security assessments, or publications,
   year         = {2026},
   url          = {https://github.com/Indspl0it/blue-tap},
   license      = {GPL-3.0-or-later},
-  note         = {96 modules, 25 CVE detections, 16-protocol fuzzer with DarkFirmware support}
+  note         = {101 modules, 25 CVE detections, 16-protocol fuzzer with DarkFirmware support}
 }
 ```
 

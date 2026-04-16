@@ -39,7 +39,7 @@ blue_tap/
       adapters/                # 11 report adapters (one per module type)
       renderers/               # html.py, blocks.py, registry.py, sections.py
     sessions/                  # store.py (atomic persistence)
-  modules/                     # Domain behavior (96 modules across 6 families)
+  modules/                     # Domain behavior (101 modules across 6 families)
     discovery/                 # 1 module -- target scanning
     reconnaissance/            # 13 modules -- deep enumeration
     assessment/                # 43 modules -- vulnerability checks (25 CVE + 11 posture + meta)
