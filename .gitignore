@@ -34,3 +34,6 @@ PROJECT_INDEX.json
 demo_output/
 AGENTS.md
 docs/cve-expansion-plan.md
+
+# repowise API keys (local)
+.repowise/.env
