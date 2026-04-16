@@ -16,7 +16,7 @@ from blue_tap.modules.fuzzing.engine import FuzzCampaign, PROTOCOL_TRANSPORT_MAP
 from blue_tap.modules.fuzzing.protocols.l2cap_raw import generate_all_l2cap_sig_fuzz_cases
 
 
-def _assert_envelope_v2(envelope: dict, module: str = "fuzz"):
+def _assert_envelope_v2(envelope: dict, module: str = "fuzzing"):
     assert envelope["schema_version"] == 2
     assert envelope["module"] == module
     assert envelope["schema"] == "blue_tap.fuzz.result"
@@ -149,7 +149,7 @@ def test_protocol_execution_has_required_fields():
     _assert_execution_record(rec)
     assert rec["kind"] == "probe"
     assert rec["id"] == "fuzz_sdp"
-    assert rec["module"] == "fuzz"
+    assert rec["module"] == "fuzzing"
     assert rec["protocol"] == "sdp"
 
 

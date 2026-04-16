@@ -395,5 +395,5 @@ def test_operation_envelope_schema_is_fuzz():
         title="Minimized corpus: 580 → 420 seeds",
     )
     assert envelope["schema"] == "blue_tap.fuzz.result"
-    assert envelope["module"] == "fuzz"
+    assert envelope["module"] == "fuzzing"
     assert envelope["schema_version"] == 2

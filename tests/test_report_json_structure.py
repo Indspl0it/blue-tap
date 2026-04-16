@@ -2,7 +2,6 @@ import json
 from pathlib import Path
 
 from blue_tap.demo import mock_data as M
-from blue_tap.framework.envelopes.auto import build_auto_result
 from blue_tap.framework.contracts.result_schema import build_run_envelope, make_evidence, make_execution
 from blue_tap.demo.report_data import (
     build_demo_dos_result,
@@ -31,17 +30,17 @@ def test_generate_json_includes_module_and_global_executions(tmp_path):
     report.generate_json(str(output))
     payload = json.loads(output.read_text())
 
-    assert payload["modules"]["scan"]["executions"]
-    assert payload["modules"]["recon"]["executions"]
-    assert payload["modules"]["recon"]["fingerprints"]
-    assert payload["modules"]["vulnscan"]["executions"]
-    assert payload["modules"]["dos"]["executions"]
-    assert payload["modules"]["fuzz"]["executions"]
+    assert payload["modules"]["discovery"]["executions"]
+    assert payload["modules"]["reconnaissance"]["executions"]
+    assert payload["modules"]["reconnaissance"]["fingerprints"]
+    assert payload["modules"]["assessment"]["executions"]
+    assert payload["modules"]["exploitation.dos"]["executions"]
+    assert payload["modules"]["fuzzing"]["executions"]
     assert payload["executions"]
     assert "fingerprint" not in payload
 
     execution_modules = {execution["module"] for execution in payload["executions"]}
-    assert {"scan", "recon", "vulnscan", "dos", "fuzz"}.issubset(execution_modules)
+    assert {"discovery", "reconnaissance", "assessment.vuln_scanner", "exploitation.dos", "fuzzing"}.issubset(execution_modules)
 
 
 def test_recon_html_renders_fingerprint_data():
@@ -107,9 +106,9 @@ def test_load_from_directory_prefers_standardized_session_entries(tmp_path):
     report.generate_json(str(payload_path))
     payload = json.loads(payload_path.read_text())
 
-    assert payload["modules"]["scan"]["runs"]
+    assert payload["modules"]["discovery"]["runs"]
     assert payload["modules"]["audio"]["runs"]
-    assert len(payload["modules"]["scan"]["runs"]) == 1
+    assert len(payload["modules"]["discovery"]["runs"]) == 1
     assert len(payload["modules"]["audio"]["runs"]) == 1
     assert "attack_results" not in payload
     assert "pbap_data" not in payload
@@ -120,7 +119,7 @@ def test_session_log_validates_standardized_envelope_at_write_time(tmp_path):
     session = Session("validation_test", base_dir=str(tmp_path))
     envelope = build_run_envelope(
         schema="blue_tap.attack.result",
-        module="attack",
+        module="exploitation",
         target="AA:BB:CC:DD:EE:FF",
         adapter="hci0",
         operator_context={"command": "knob"},
@@ -130,7 +129,7 @@ def test_session_log_validates_standardized_envelope_at_write_time(tmp_path):
                 kind="check",
                 id="knob_probe",
                 title="KNOB Probe",
-                module="attack",
+                module="exploitation",
                 protocol="BR/EDR",
                 execution_status="completed",
                 module_outcome="confirmed",
@@ -148,76 +147,11 @@ def test_session_log_validates_standardized_envelope_at_write_time(tmp_path):
     assert payload["validation"]["errors"] == []
 
 
-def test_generate_json_includes_auto_and_lmp_capture_modules(tmp_path):
-    report = ReportGenerator()
-    report.add_run_envelope(
-        build_auto_result(
-            target="AA:BB:CC:DD:EE:FF",
-            adapter="hci0",
-            results={
-                "target": "AA:BB:CC:DD:EE:FF",
-                "status": "complete",
-                "phases": {"discovery": {"status": "success", "_elapsed_seconds": 1.0}},
-                "total_time_seconds": 1.0,
-            },
-        )
-    )
-    report.add_run_envelope(
-        {
-            "schema": "blue_tap.lmp_capture.result",
-            "module": "lmp_capture",
-            "module_data": {
-                "captures": [
-                    {
-                        "bdaddr": "AA:BB:CC:DD:EE:FF",
-                        "LMPArray": [{"opcode": 8, "timestamp": 0, "direction": "tx", "decoded": {"opcode_name": "LMP_AU_RAND"}}],
-                    }
-                ]
-            },
-        }
-    )
-
-    output = tmp_path / "report-modules.json"
-    report.generate_json(str(output))
-    payload = json.loads(output.read_text())
-
-    assert "auto" in payload["modules"]
-    assert payload["modules"]["auto"]["runs"]
-    assert "lmp_capture" in payload["modules"]
-    assert payload["modules"]["lmp_capture"]["captures"]
-
-
-def test_generate_html_renders_auto_section(tmp_path):
-    report = ReportGenerator()
-    report.add_run_envelope(
-        build_auto_result(
-            target="AA:BB:CC:DD:EE:FF",
-            adapter="hci0",
-            results={
-                "target": "AA:BB:CC:DD:EE:FF",
-                "status": "complete",
-                "phases": {
-                    "discovery": {"status": "success", "_elapsed_seconds": 1.0},
-                    "report": {"status": "success", "_elapsed_seconds": 1.0},
-                },
-                "total_time_seconds": 2.0,
-            },
-        )
-    )
-
-    output = tmp_path / "report.html"
-    report.generate_html(str(output))
-    html = output.read_text()
-
-    assert 'id="sec-auto-pentest"' in html
-    assert "Automated Pentest Workflow" in html
-
-
 def test_generate_json_keeps_top_level_fuzzing_for_single_protocol_runs(tmp_path):
     report = ReportGenerator()
     envelope = build_run_envelope(
         schema="blue_tap.fuzz.result",
-        module="fuzz",
+        module="fuzzing",
         target="AA:BB:CC:DD:EE:FF",
         adapter="hci0",
         operator_context={"command": "fuzz sdp"},

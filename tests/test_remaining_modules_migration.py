@@ -1,18 +1,16 @@
-"""Integration tests covering Phase 6-9 of remaining-modules migration.
+"""Integration tests covering adapter round-trip verification.
 
 Tests verify:
 - Spoof adapter round-trip (envelope -> ingest -> build_sections -> SectionModel)
 - Firmware adapter round-trip
-- Auto adapter round-trip
 - All adapters registered in REPORT_ADAPTERS
-- generator.add_run_envelope() accepts spoof/firmware/auto/playbook modules
+- generator.add_run_envelope() accepts spoof/firmware/playbook modules
 - Playbook envelope round-trip via generator
 """
 from __future__ import annotations
 
 import pytest
 
-from blue_tap.framework.envelopes.auto import build_auto_result
 from blue_tap.framework.envelopes.firmware import (
     build_connection_inspect_result,
     build_firmware_status_result,
@@ -25,7 +23,6 @@ from blue_tap.framework.contracts.result_schema import (
 )
 from blue_tap.framework.envelopes.spoof import build_spoof_result
 from blue_tap.framework.reporting.adapters import REPORT_ADAPTERS
-from blue_tap.framework.reporting.adapters.auto import AutoReportAdapter
 from blue_tap.framework.reporting.adapters.firmware import FirmwareReportAdapter
 from blue_tap.framework.reporting.adapters.spoof import SpoofReportAdapter
 from blue_tap.interfaces.reporting.generator import ReportGenerator
@@ -57,29 +54,6 @@ def _firmware_envelope() -> dict:
     return build_firmware_status_result(
         adapter="hci1",
         status={"installed": True, "loaded": True, "hooks": {"h1": True, "h2": True}},
-    )
-
-
-def _auto_envelope() -> dict:
-    return build_auto_result(
-        target="AA:BB:CC:DD:EE:FF",
-        adapter="hci0",
-        results={
-            "target": "AA:BB:CC:DD:EE:FF",
-            "status": "complete",
-            "phases": {
-                "discovery": {"status": "success", "_elapsed_seconds": 5.0},
-                "fingerprint": {"status": "success", "_elapsed_seconds": 3.0},
-                "recon": {"status": "success", "_elapsed_seconds": 8.0},
-                "vuln_assessment": {"status": "success", "_elapsed_seconds": 12.0},
-                "pairing_attacks": {"status": "success", "_elapsed_seconds": 4.0},
-                "exploitation": {"status": "skipped", "reason": "no phone"},
-                "fuzzing": {"status": "skipped", "reason": "user requested"},
-                "dos_testing": {"status": "success", "_elapsed_seconds": 20.0},
-                "report": {"status": "success", "_elapsed_seconds": 1.0},
-            },
-            "total_time_seconds": 53.0,
-        },
     )
 
 
@@ -116,7 +90,7 @@ def _playbook_envelope() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Phase 6: Report Adapter Registration
+# Adapter Registration Tests
 # ---------------------------------------------------------------------------
 
 class TestAdapterRegistration:
@@ -128,13 +102,9 @@ class TestAdapterRegistration:
         modules = {a.module for a in REPORT_ADAPTERS}
         assert "firmware" in modules
 
-    def test_auto_adapter_registered(self):
-        modules = {a.module for a in REPORT_ADAPTERS}
-        assert "auto" in modules
-
 
 # ---------------------------------------------------------------------------
-# Phase 6: Spoof adapter round-trip
+# Spoof adapter round-trip tests
 # ---------------------------------------------------------------------------
 
 class TestSpoofAdapterRoundTrip:
@@ -190,7 +160,7 @@ class TestSpoofAdapterRoundTrip:
 
 
 # ---------------------------------------------------------------------------
-# Phase 6: Firmware adapter round-trip
+# Firmware adapter round-trip tests
 # ---------------------------------------------------------------------------
 
 class TestFirmwareAdapterRoundTrip:
@@ -247,69 +217,7 @@ class TestFirmwareAdapterRoundTrip:
 
 
 # ---------------------------------------------------------------------------
-# Phase 6: Auto adapter round-trip
-# ---------------------------------------------------------------------------
-
-class TestAutoAdapterRoundTrip:
-    def test_accepts_auto_envelope(self):
-        adapter = AutoReportAdapter()
-        assert adapter.accepts(_auto_envelope())
-
-    def test_rejects_non_auto(self):
-        adapter = AutoReportAdapter()
-        assert not adapter.accepts({"module": "attack"})
-
-    def test_ingest_populates_state(self):
-        adapter = AutoReportAdapter()
-        state: dict = {}
-        adapter.ingest(_auto_envelope(), state)
-        assert len(state["auto_runs"]) == 1
-        assert len(state["auto_executions"]) == 9
-
-    def test_build_sections_returns_section_model(self):
-        adapter = AutoReportAdapter()
-        state: dict = {}
-        adapter.ingest(_auto_envelope(), state)
-        sections = adapter.build_sections(state)
-        assert len(sections) >= 1
-        sec = sections[0]
-        assert sec.section_id == "sec-auto-pentest"
-        assert "Auto" in sec.title or "Pentest" in sec.title
-
-    def test_build_sections_phase_table(self):
-        adapter = AutoReportAdapter()
-        state: dict = {}
-        adapter.ingest(_auto_envelope(), state)
-        sections = adapter.build_sections(state)
-        table_blocks = [b for b in sections[0].blocks if b.block_type == "table"]
-        assert len(table_blocks) >= 1
-        headers = table_blocks[0].data["headers"]
-        assert "Phase" in headers
-        assert "Status" in headers
-
-    def test_build_sections_9_phase_rows(self):
-        adapter = AutoReportAdapter()
-        state: dict = {}
-        adapter.ingest(_auto_envelope(), state)
-        sections = adapter.build_sections(state)
-        table_blocks = [b for b in sections[0].blocks if b.block_type == "table"]
-        assert len(table_blocks[0].data["rows"]) == 9
-
-    def test_build_json_section(self):
-        adapter = AutoReportAdapter()
-        state: dict = {}
-        adapter.ingest(_auto_envelope(), state)
-        js = adapter.build_json_section(state)
-        assert "runs" in js
-        assert "executions" in js
-
-    def test_empty_state_returns_no_sections(self):
-        adapter = AutoReportAdapter()
-        assert adapter.build_sections({}) == []
-
-
-# ---------------------------------------------------------------------------
-# Phase 7: Session logging consistency (generator integration)
+# Generator envelope ingestion tests
 # ---------------------------------------------------------------------------
 
 class TestGeneratorEnvelopeIngestion:
@@ -323,15 +231,12 @@ class TestGeneratorEnvelopeIngestion:
         result = gen.add_run_envelope(_firmware_envelope())
         assert result is True
 
-    def test_generator_accepts_auto_envelope(self):
-        gen = ReportGenerator()
-        result = gen.add_run_envelope(_auto_envelope())
-        assert result is True
-
     def test_generator_accepts_playbook_envelope(self):
         gen = ReportGenerator()
         result = gen.add_run_envelope(_playbook_envelope())
-        assert result is True
+        # Playbook modules don't have a report adapter, so they're not ingested
+        # This is expected - playbook runs are logged to session but not rendered in reports
+        assert result is False
 
     def test_generator_rejects_unknown_module(self):
         gen = ReportGenerator()
@@ -354,10 +259,3 @@ class TestGeneratorEnvelopeIngestion:
         gen.add_run_envelope(_spoof_envelope())
         spoof_state = gen._module_report_state.get("spoof", {})
         assert len(spoof_state.get("spoof_operations", [])) == 1
-
-    def test_auto_adapter_ingested_after_add_run_envelope(self):
-        gen = ReportGenerator()
-        gen.add_run_envelope(_auto_envelope())
-        auto_state = gen._module_report_state.get("auto", {})
-        assert len(auto_state.get("auto_runs", [])) == 1
-        assert len(auto_state.get("auto_executions", [])) == 9

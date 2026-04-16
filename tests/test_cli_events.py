@@ -16,6 +16,7 @@ _EXPECTED_CANONICAL = {
     "execution_started",
     "execution_result",
     "execution_skipped",
+    "execution_observation",
     "pairing_required",
     "recovery_wait_started",
     "recovery_wait_progress",
@@ -78,7 +79,7 @@ def test_emit_cli_event_non_canonical_mentions_module_in_warning(caplog):
 def test_emit_cli_event_returns_correct_fields():
     event = emit_cli_event(
         event_type="run_completed",
-        module="vulnscan",
+        module="assessment.vuln_scanner",
         run_id="abc-123",
         message="Done",
         target="AA:BB:CC:DD:EE:FF",
@@ -88,7 +89,7 @@ def test_emit_cli_event_returns_correct_fields():
         echo=False,
     )
     assert event["event_type"] == "run_completed"
-    assert event["module"] == "vulnscan"
+    assert event["module"] == "assessment.vuln_scanner"
     assert event["run_id"] == "abc-123"
     assert event["target"] == "AA:BB:CC:DD:EE:FF"
     assert event["adapter"] == "hci0"

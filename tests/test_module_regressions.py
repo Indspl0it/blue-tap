@@ -55,9 +55,9 @@ def test_scan_result_helpers_emit_run_completed(monkeypatch):
     ble_result = scanner.scan_ble_result_sync()
     all_result = scanner.scan_all_result()
 
-    assert classic_result["module"] == "scan"
-    assert ble_result["module"] == "scan"
-    assert all_result["module"] == "scan"
+    assert classic_result["module"] == "discovery"
+    assert ble_result["module"] == "discovery"
+    assert all_result["module"] == "discovery"
     assert sum(1 for event in events if event["event_type"] == "run_completed") == 3
 
 

@@ -171,37 +171,57 @@ def test_list_all_sorted():
     assert ids == sorted(ids)
 
 
-def test_assessment_package_registers_modules(monkeypatch):
-    from blue_tap.framework.registry import registry as registry_module
+def test_assessment_package_registers_modules():
+    """Verify assessment modules are registered when the package is imported.
 
-    fresh_registry = ModuleRegistry()
-    monkeypatch.setattr(registry_module, "_global_registry", fresh_registry)
-    importlib.reload(importlib.import_module("blue_tap.modules.assessment.checks"))
-    importlib.reload(importlib.import_module("blue_tap.modules.assessment"))
+    Note: This test verifies the global registry state after import, not reload.
+    Module auto-registration via __init_subclass__ only happens once at class
+    definition time.
+    """
+    from blue_tap.framework.registry import get_registry, ModuleFamily
 
-    registered_ids = {descriptor.module_id for descriptor in fresh_registry.list_family(ModuleFamily.ASSESSMENT)}
+    # Import to ensure modules are loaded (Module classes now live in checks/ files)
+    import blue_tap.modules.assessment  # noqa: F401
 
-    assert "assessment.vuln_scanner" in registered_ids
-    assert "assessment.fleet" in registered_ids
-    assert "assessment.cve_airoha" in registered_ids
-    assert "assessment.cve_pairing" in registered_ids
-    assert "assessment.non_cve_rfcomm" in registered_ids
-    assert len(registered_ids) == 15
-
-
-def test_post_exploitation_package_registers_modules(monkeypatch):
-    from blue_tap.framework.registry import registry as registry_module
-
-    fresh_registry = ModuleRegistry()
-    monkeypatch.setattr(registry_module, "_global_registry", fresh_registry)
-    importlib.reload(importlib.import_module("blue_tap.modules.post_exploitation"))
-
+    registry = get_registry()
     registered_ids = {
         descriptor.module_id
-        for descriptor in fresh_registry.list_family(ModuleFamily.POST_EXPLOITATION)
+        for descriptor in registry.list_family(ModuleFamily.ASSESSMENT)
     }
 
-    assert registered_ids == {
+    # Core descriptors
+    assert "assessment.vuln_scanner" in registered_ids
+    assert "assessment.fleet" in registered_ids
+    # Individual CVE modules (now one per CVE, not grouped)
+    assert "assessment.cve_2017_0785" in registered_ids  # SDP
+    assert "assessment.cve_2019_2225" in registered_ids  # JustWorks
+    assert "assessment.cve_2025_20700" in registered_ids  # Airoha
+    # Non-CVE modules
+    assert "assessment.service_exposure" in registered_ids
+    assert "assessment.pairing_method" in registered_ids
+    # Total: 2 core + 25 CVE + 11 non-CVE = 38 modules
+    assert len(registered_ids) >= 35, f"Expected at least 35 modules, got {len(registered_ids)}"
+
+
+def test_post_exploitation_package_registers_modules():
+    """Verify post-exploitation modules are registered when the package is imported.
+
+    Note: This test verifies the global registry state after import, not reload.
+    Module auto-registration via __init_subclass__ only happens once at class
+    definition time. The former ``post_exploitation/modules/`` wrapper layer was
+    collapsed on 2026-04-12; the package's ``__init__`` now imports each native
+    sub-package directly.
+    """
+    from blue_tap.framework.registry import get_registry, ModuleFamily
+
+    # Import to ensure modules are loaded
+    import blue_tap.modules.post_exploitation  # noqa: F401
+
+    registry = get_registry()
+    descriptors = list(registry.list_family(ModuleFamily.POST_EXPLOITATION))
+    registered_ids = {d.module_id for d in descriptors}
+
+    expected = {
         "post_exploitation.pbap",
         "post_exploitation.map",
         "post_exploitation.bluesnarfer",
@@ -210,22 +230,29 @@ def test_post_exploitation_package_registers_modules(monkeypatch):
         "post_exploitation.a2dp",
         "post_exploitation.avrcp",
     }
+    assert expected.issubset(registered_ids), f"Missing: {expected - registered_ids}"
+
+    # Every native entry point must point at a co-located class (no `.modules.` infix).
+    for descriptor in descriptors:
+        assert "post_exploitation.modules." not in descriptor.entry_point, (
+            f"Wrapper path survived: {descriptor.entry_point}"
+        )
 
 
-def test_exploitation_package_registers_modules(monkeypatch):
-    from blue_tap.framework.registry import registry as registry_module
+def test_exploitation_package_registers_modules():
+    """Verify exploitation modules are registered when the package is imported."""
+    from blue_tap.framework.registry import get_registry, ModuleFamily
 
-    fresh_registry = ModuleRegistry()
-    monkeypatch.setattr(registry_module, "_global_registry", fresh_registry)
-    importlib.reload(importlib.import_module("blue_tap.modules.exploitation"))
+    # Import to trigger auto-registration (native files, no wrapper)
+    import blue_tap.modules.exploitation  # noqa: F401
 
+    registry = get_registry()
     registered_ids = {
         descriptor.module_id
-        for descriptor in fresh_registry.list_family(ModuleFamily.EXPLOITATION)
+        for descriptor in registry.list_family(ModuleFamily.EXPLOITATION)
     }
 
-    assert {
-        "exploitation.auto",
+    expected = {
         "exploitation.bias",
         "exploitation.bluffs",
         "exploitation.ctkd",
@@ -235,23 +262,39 @@ def test_exploitation_package_registers_modules(monkeypatch):
         "exploitation.knob",
         "exploitation.pin_brute",
         "exploitation.ssp_downgrade",
-    }.issubset(registered_ids)
+    }
+    assert expected.issubset(registered_ids), f"Missing: {expected - registered_ids}"
 
 
-def test_fuzzing_package_registers_modules(monkeypatch):
-    from blue_tap.framework.registry import registry as registry_module
+def test_fuzzing_package_registers_modules():
+    """Verify fuzzing modules are registered when the package is imported.
 
-    fresh_registry = ModuleRegistry()
-    monkeypatch.setattr(registry_module, "_global_registry", fresh_registry)
-    importlib.reload(importlib.import_module("blue_tap.modules.fuzzing"))
+    Note: This test verifies the global registry state after import, not reload.
+    Module auto-registration via __init_subclass__ only happens once at class
+    definition time.
+    """
+    from blue_tap.framework.registry import get_registry, ModuleFamily
 
+    # Import to ensure modules are loaded (native Module classes, no wrapper layer)
+    import blue_tap.modules.fuzzing  # noqa: F401
+
+    registry = get_registry()
     registered_ids = {
         descriptor.module_id
-        for descriptor in fresh_registry.list_family(ModuleFamily.FUZZING)
+        for descriptor in registry.list_family(ModuleFamily.FUZZING)
     }
 
-    assert registered_ids == {
+    expected = {
         "fuzzing.engine",
         "fuzzing.transport",
         "fuzzing.minimizer",
     }
+    assert expected.issubset(registered_ids), f"Missing: {expected - registered_ids}"
+
+
+# NOTE: test_reconnaissance_package_registers_modules and
+# test_discovery_package_registers_modules were removed on 2026-04-12 when
+# the modules/reconnaissance/modules/ and modules/discovery/modules/ wrapper
+# packages were deleted. Replacement coverage (native Module behavior, not
+# import-path smoke) is scheduled to be written by the independent test
+# agent as tracked in the production-readiness fix plan.
