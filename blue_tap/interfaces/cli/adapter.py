@@ -1,25 +1,36 @@
 """Adapter management CLI commands."""
 
-import rich_click as click
-from rich.table import Table
+from __future__ import annotations
 
+import rich_click as click
+
+from blue_tap.framework.runtime.cli_events import emit_cli_event
+from blue_tap.hardware.adapter import resolve_active_hci
 from blue_tap.interfaces.cli.shared import LoggedCommand, LoggedGroup
 from blue_tap.utils.output import (
-    info, success, error, warning, verbose, console, summary_panel,
+    info, success, error, warning, verbose, console, summary_panel, bare_table, print_table,
 )
-import sys as _sys
 
 
-def _emit_cli_event(**kwargs):
-    """Route emit_cli_event through blue_tap.cli for test patchability."""
-    _cli = _sys.modules.get("blue_tap.cli")
-    if _cli is not None and hasattr(_cli, "emit_cli_event"):
-        return _cli.emit_cli_event(**kwargs)
-    from blue_tap.framework.runtime.cli_events import emit_cli_event as _real
-    return _real(**kwargs)
+def _resolve_df_hci(hci: str | None) -> str | None:
+    """Resolve the DarkFirmware HCI device.
 
-
-emit_cli_event = _emit_cli_event
+    Resolution order:
+      1. Explicit ``--hci`` value from the user
+      2. ``BT_TAP_DARKFIRMWARE_HCI`` env var (set at startup by main.py)
+      3. USB VID:PID discovery via DarkFirmwareManager.find_rtl8761b_hci()
+    """
+    import os as _os
+    if hci:
+        return hci
+    env_hci = _os.environ.get("BT_TAP_DARKFIRMWARE_HCI")
+    if env_hci:
+        return env_hci
+    try:
+        from blue_tap.hardware.firmware import DarkFirmwareManager
+        return DarkFirmwareManager().find_rtl8761b_hci()
+    except Exception:
+        return None
 
 
 @click.group(cls=LoggedGroup)
@@ -36,27 +47,27 @@ def adapter_list():
     if not adapters:
         return
 
-    from rich.style import Style as _S
-    table = Table(title="[bold #00d4ff]HCI Adapters[/bold #00d4ff]", show_lines=True, border_style="#666666", header_style=_S(bold=True, color="#00d4ff"))
-    table.add_column("Name", style="#00d4ff")
-    table.add_column("Address", style="#bf5af2")
-    table.add_column("Chipset", style="#ffaa00")
-    table.add_column("BT Ver", style="#4488ff")
-    table.add_column("Features", style="dim")
-    table.add_column("Spoof?", style="bold")
-    table.add_column("Status", style="bold")
+    table = bare_table()
+    table.title = "[bold]HCI Adapters[/bold]"
+    table.add_column("Name", style="bold")
+    table.add_column("Address", style="bt.purple")
+    table.add_column("Chipset")
+    table.add_column("BT Ver")
+    table.add_column("Features")
+    table.add_column("Spoof?")
+    table.add_column("Status")
 
     for a in adapters:
-        status_style = "green" if a["status"] == "UP" else "red"
+        status_style = "bt.green" if a["status"] == "UP" else "bt.red"
         chipset = a.get("chipset", a.get("type", ""))
         bt_ver = a.get("bt_version", "")
         features = ", ".join(a.get("features", [])[:5])
         can_spoof = a.get("capabilities", {}).get("address_change")
-        spoof_str = {True: "[green]Yes[/green]", False: "[red]No[/red]", None: "[yellow]?[/yellow]"}[can_spoof]
+        spoof_str = {True: "[bt.green]Yes[/bt.green]", False: "[bt.red]No[/bt.red]", None: "[bt.dim]?[/bt.dim]"}[can_spoof]
         table.add_row(a["name"], a["address"], chipset, bt_ver, features, spoof_str,
                        f"[{status_style}]{a['status']}[/{status_style}]")
 
-    console.print(table)
+    print_table(table)
 
     if len(adapters) >= 1:
         rec = recommend_adapter_roles(adapters)
@@ -65,10 +76,11 @@ def adapter_list():
 
 
 @adapter.command("info")
-@click.argument("hci", default="hci0")
+@click.option("--hci", default=None, help="HCI device (auto-detected when omitted)")
 def adapter_info(hci):
     """Show detailed adapter info: chipset, features, capabilities."""
     from blue_tap.hardware.adapter import get_adapter_info, _adapter_exists
+    hci = _resolve_df_hci(hci) or resolve_active_hci()
     if not _adapter_exists(hci):
         return
     ext = get_adapter_info(hci)
@@ -89,9 +101,10 @@ def adapter_info(hci):
 
 
 @adapter.command()
-@click.argument("hci", default="hci0")
+@click.option("--hci", default=None, help="HCI device (auto-detected when omitted)")
 def up(hci):
     """Bring adapter up."""
+    hci = _resolve_df_hci(hci) or resolve_active_hci()
     from blue_tap.hardware.adapter import adapter_up
     from blue_tap.framework.contracts.result_schema import build_run_envelope, make_run_id, now_iso
     from blue_tap.framework.sessions.store import log_command
@@ -133,9 +146,10 @@ def up(hci):
 
 
 @adapter.command()
-@click.argument("hci", default="hci0")
+@click.option("--hci", default=None, help="HCI device (auto-detected when omitted)")
 def down(hci):
     """Bring adapter down."""
+    hci = _resolve_df_hci(hci) or resolve_active_hci()
     from blue_tap.hardware.adapter import adapter_down
     from blue_tap.framework.contracts.result_schema import build_run_envelope, make_run_id, now_iso
     from blue_tap.framework.sessions.store import log_command
@@ -177,9 +191,10 @@ def down(hci):
 
 
 @adapter.command()
-@click.argument("hci", default="hci0")
+@click.option("--hci", default=None, help="HCI device (auto-detected when omitted)")
 def reset(hci):
     """Reset adapter."""
+    hci = _resolve_df_hci(hci) or resolve_active_hci()
     from blue_tap.hardware.adapter import adapter_reset
     from blue_tap.framework.contracts.result_schema import build_run_envelope, make_run_id, now_iso
     from blue_tap.framework.sessions.store import log_command
@@ -221,10 +236,11 @@ def reset(hci):
 
 
 @adapter.command("set-name")
-@click.argument("hci")
 @click.argument("name")
-def set_name(hci, name):
+@click.option("--hci", default=None, help="HCI device (auto-detected when omitted)")
+def set_name(name, hci):
     """Set adapter Bluetooth name (for impersonation)."""
+    hci = _resolve_df_hci(hci) or resolve_active_hci()
     from blue_tap.hardware.adapter import set_device_name
     from blue_tap.framework.contracts.result_schema import build_run_envelope, make_run_id, now_iso
     from blue_tap.framework.sessions.store import log_command
@@ -281,11 +297,58 @@ def set_name(hci, name):
     log_command("adapter_set_name", envelope, category="general")
 
 
+_DEVICE_CLASS_PRESETS = {
+    "phone":      "0x5a020c",  # Smartphone
+    "laptop":     "0x5a0100",  # Laptop/notebook
+    "headset":    "0x200404",  # Headset (audio)
+    "headphones": "0x240404",  # Headphones
+    "speaker":    "0x240414",  # Portable audio speaker
+    "keyboard":   "0x002540",  # HID keyboard
+    "mouse":      "0x002580",  # HID mouse
+    "gamepad":    "0x002508",  # HID gamepad
+    "car":        "0x200420",  # Hands-free car kit
+    "watch":      "0x70020c",  # Wearable/smartwatch
+    "tablet":     "0x5a0100",  # Tablet (same CoD as laptop)
+    "printer":    "0x040680",  # Printer
+    "camera":     "0x040100",  # Imaging/camera
+}
+
+_PRESET_HELP = "\b\nPresets (use name or raw hex):\n" + "\n".join(
+    f"  {name:<12} {code}  {desc}"
+    for (name, code), desc in zip(
+        _DEVICE_CLASS_PRESETS.items(),
+        ["Smartphone", "Laptop", "Headset", "Headphones", "Speaker",
+         "Keyboard", "Mouse", "Gamepad", "Hands-free car kit",
+         "Smartwatch", "Tablet", "Printer", "Camera"],
+    )
+)
+
+
 @adapter.command("set-class")
-@click.argument("hci")
-@click.argument("device_class", default="0x5a020c")
-def set_class(hci, device_class):
-    """Set device class. Default 0x5a020c = smartphone."""
+@click.argument("device_class", default="phone")
+@click.option("--hci", default=None, help="HCI device (auto-detected when omitted)")
+def set_class(device_class, hci):
+    """Set device class for impersonation. Accepts a preset name or raw hex (e.g. 0x5a020c).
+
+    \b
+    Presets:
+      phone        0x5a020c  Smartphone
+      laptop       0x5a0100  Laptop
+      headset      0x200404  Headset (audio)
+      headphones   0x240404  Headphones
+      speaker      0x240414  Portable speaker
+      keyboard     0x002540  HID keyboard
+      mouse        0x002580  HID mouse
+      gamepad      0x002508  HID gamepad
+      car          0x200420  Hands-free car kit
+      watch        0x70020c  Smartwatch
+      tablet       0x5a0100  Tablet
+      printer      0x040680  Printer
+      camera       0x040100  Camera
+    """
+    hci = _resolve_df_hci(hci) or resolve_active_hci()
+    # Resolve preset name to hex
+    device_class = _DEVICE_CLASS_PRESETS.get(device_class.lower(), device_class)
     from blue_tap.hardware.adapter import set_device_class
     from blue_tap.framework.contracts.result_schema import build_run_envelope, make_run_id, now_iso
     from blue_tap.framework.sessions.store import log_command
@@ -342,13 +405,18 @@ def set_class(hci, device_class):
 
 
 @adapter.command("firmware-status")
-@click.option("--hci", default="hci1", help="HCI device to check")
+@click.option("--hci", default=None, help="HCI device (auto-detected when omitted)")
 def adapter_firmware_status(hci):
     """Check DarkFirmware status on RTL8761B adapter."""
     from blue_tap.hardware.firmware import DarkFirmwareManager
     from blue_tap.framework.envelopes.firmware import build_firmware_status_result, make_firmware_run_id
     from blue_tap.framework.contracts.result_schema import now_iso
     from blue_tap.framework.sessions.store import log_command
+
+    hci = _resolve_df_hci(hci)
+    if hci is None:
+        error("No RTL8761B dongle detected. Connect a TP-Link UB500.")
+        return
 
     run_id = make_firmware_run_id()
     started_at = now_iso()
@@ -381,7 +449,7 @@ def adapter_firmware_status(hci):
 @click.option("--source", default=None, type=click.Path(exists=True),
               help="Path to custom firmware binary (default: bundled DarkFirmware)")
 @click.option("--restore", is_flag=True, help="Restore original Realtek firmware")
-@click.option("--hci", default="hci1", help="HCI device")
+@click.option("--hci", default=None, help="HCI device (auto-detected when omitted)")
 def adapter_firmware_install(source, restore, hci):
     """Install DarkFirmware on RTL8761B adapter.
 
@@ -406,6 +474,15 @@ def adapter_firmware_install(source, restore, hci):
     from blue_tap.hardware.firmware import DarkFirmwareManager
     from blue_tap.framework.envelopes.firmware import build_firmware_operation_result, make_firmware_run_id
     from blue_tap.framework.contracts.result_schema import now_iso
+
+    hci = _resolve_df_hci(hci)
+    if hci is None and not restore:
+        error("No RTL8761B dongle detected. Connect a TP-Link UB500.")
+        return
+    if hci is None:
+        # Restore doesn't need live detection; the driver reloads firmware on
+        # the next USB reset regardless of which hci slot it ends up on.
+        hci = resolve_active_hci()
     from blue_tap.framework.sessions.store import log_command
 
     run_id = make_firmware_run_id()
@@ -511,7 +588,7 @@ def adapter_firmware_install(source, restore, hci):
 
 
 @adapter.command("firmware-init")
-@click.option("--hci", default="hci1", help="HCI device")
+@click.option("--hci", default=None, hidden=True, help="HCI device (auto-detected)")
 def adapter_firmware_init(hci):
     """Initialize DarkFirmware hooks (activate Hooks 3+4).
 
@@ -528,6 +605,11 @@ def adapter_firmware_init(hci):
     from blue_tap.framework.envelopes.firmware import build_firmware_operation_result, make_firmware_run_id
     from blue_tap.framework.contracts.result_schema import now_iso
     from blue_tap.framework.sessions.store import log_command
+
+    hci = _resolve_df_hci(hci)
+    if hci is None:
+        error("No RTL8761B dongle detected. Connect a TP-Link UB500.")
+        return
 
     run_id = make_firmware_run_id()
     started_at = now_iso()
@@ -590,7 +672,7 @@ def adapter_firmware_init(hci):
 @click.option("--conn", type=int, default=-1, help="Slot 0-11, or -1 for all")
 @click.option("--watch", is_flag=True, help="Continuous monitoring")
 @click.option("--interval", type=float, default=3.0, help="Watch interval (seconds)")
-@click.option("--hci", default="hci0", help="HCI device with DarkFirmware")
+@click.option("--hci", default=None, hidden=True, help="HCI device (auto-detected)")
 def adapter_connection_inspect(conn, watch, interval, hci):
     """Inspect live connection security state from controller RAM.
 
@@ -614,6 +696,11 @@ def adapter_connection_inspect(conn, watch, interval, hci):
     from blue_tap.framework.contracts.result_schema import now_iso
     from blue_tap.framework.sessions.store import log_command
 
+    hci = _resolve_df_hci(hci)
+    if hci is None:
+        error("No RTL8761B dongle detected. Connect a TP-Link UB500.")
+        return
+
     run_id = make_firmware_run_id()
     started_at = now_iso()
     emit_cli_event(
@@ -622,16 +709,10 @@ def adapter_connection_inspect(conn, watch, interval, hci):
         echo=False,
     )
 
+    # DarkFirmware was confirmed by startup (_check_rtl_dongle). Skip redundant
+    # re-probe here to avoid duplicate "DarkFirmware confirmed" log lines.
+    # _resolve_df_hci() already verified the adapter is reachable.
     fw = DarkFirmwareManager()
-    if not fw.is_darkfirmware_loaded(hci):
-        error(f"DarkFirmware not detected on {hci}")
-        emit_cli_event(
-            event_type="run_error", module="firmware", run_id=run_id, adapter=hci,
-            message=f"DarkFirmware not detected on {hci}",
-            echo=False,
-        )
-        return
-
     hci_idx = int(hci.replace("hci", ""))
     inspector = ConnectionInspector()
 
@@ -662,6 +743,7 @@ def adapter_connection_inspect(conn, watch, interval, hci):
                 if conn >= 0:
                     r = inspector.inspect_connection(sock, conn)
                     connections = [r]
+                    console.print()
                     if r.get("active"):
                         _display_connection(None, r)
                     else:
@@ -669,11 +751,14 @@ def adapter_connection_inspect(conn, watch, interval, hci):
                 else:
                     active = inspector.scan_all_connections(sock)
                     connections = active or []
+                    console.print()
                     if active:
+                        info(f"[bold]Connection table[/bold]  ({len(active)} active slot(s))")
+                        console.print()
                         for r in active:
                             _display_connection(None, r)
                     else:
-                        info("No active connections found")
+                        info("Connection table: 12 slots scanned, [bold]0 active[/bold]")
         except Exception as exc:
             error(f"Connection inspect failed: {exc}")
 
@@ -721,18 +806,63 @@ def _display_connection(ts, r):
 
 
 @adapter.command("firmware-spoof")
-@click.argument("address")
-@click.option("--hci", default="hci1", help="HCI device")
-def adapter_firmware_spoof(address, hci):
-    """Spoof BDADDR via DarkFirmware firmware patching.
+@click.argument("address", required=False, default=None)
+@click.option("--restore", is_flag=True, help="Restore original BDADDR from backup")
+@click.option("--hci", default=None, hidden=True, help="HCI device (auto-detected)")
+def adapter_firmware_spoof(address, restore, hci):
+    """Spoof the Bluetooth address (BDADDR) via DarkFirmware.
 
+    \b
     Patches the firmware binary and USB-resets the adapter.
-    This is the only reliable spoofing method for Realtek chipsets.
+    The original BDADDR is saved automatically on first spoof and can be
+    restored with --restore (no need to remember the original address).
+
+    \b
+    Examples:
+      sudo blue-tap adapter firmware-spoof                    # scan and pick target
+      sudo blue-tap adapter firmware-spoof AA:BB:CC:DD:EE:FF  # direct
+      sudo blue-tap adapter firmware-spoof --restore          # revert to original
     """
+    import pathlib
     from blue_tap.hardware.firmware import DarkFirmwareManager
     from blue_tap.framework.envelopes.firmware import build_firmware_operation_result, make_firmware_run_id
     from blue_tap.framework.contracts.result_schema import now_iso
     from blue_tap.framework.sessions.store import log_command
+
+    hci = _resolve_df_hci(hci)
+    if hci is None:
+        error("No RTL8761B dongle detected. Connect a TP-Link UB500.")
+        return
+
+    _backup_path = pathlib.Path.home() / ".blue-tap" / f"{hci}_original_bdaddr"
+
+    if restore:
+        if not _backup_path.exists():
+            error(
+                f"No original BDADDR backup found for {hci}.\n"
+                "  Run [bold]blue-tap adapter firmware-spoof[/bold] at least once to save it."
+            )
+            return
+        address = _backup_path.read_text().strip()
+        info(f"Restoring original BDADDR: [bold]{address}[/bold]")
+    else:
+        if not address:
+            from blue_tap.utils.interactive import resolve_address
+            address = resolve_address(None, prompt="Select device to impersonate", hci=hci)
+            if not address:
+                return
+
+        # Back up the current (original) BDADDR before the first spoof
+        if not _backup_path.exists():
+            try:
+                fw_tmp = DarkFirmwareManager()
+                orig = fw_tmp.get_current_bdaddr(hci)
+                if orig:
+                    _backup_path.parent.mkdir(parents=True, exist_ok=True)
+                    _backup_path.write_text(orig)
+                    info(f"Original BDADDR saved: [dim]{orig}[/dim]  (--restore to revert)")
+            except Exception:
+                pass
 
     run_id = make_firmware_run_id()
     started_at = now_iso()
@@ -744,19 +874,8 @@ def adapter_firmware_spoof(address, hci):
     )
 
     fw = DarkFirmwareManager()
-    if not fw.detect_rtl8761b(hci):
-        error(f"No RTL8761B detected on {hci}")
-        emit_cli_event(
-            event_type="run_error", module="firmware", run_id=run_id,
-            adapter=hci, target=address,
-            message=f"No RTL8761B detected on {hci}",
-            details={"error": "rtl8761b_not_found"},
-            echo=False,
-        )
-        return
-
-    info(f"Patching BDADDR to {address}...")
-    ok = fw.patch_bdaddr(address, hci)
+    info(f"Patching BDADDR to [bold]{address}[/bold] on {hci} (RAM, no USB reset)...")
+    ok = fw.patch_bdaddr_ram(address, hci)
     if ok:
         success(f"BDADDR set to {address}")
     else:
@@ -792,7 +911,7 @@ def adapter_firmware_spoof(address, hci):
 @adapter.command("firmware-set")
 @click.argument("setting", type=click.Choice(["lmp-size", "lmp-slot"]))
 @click.argument("value", type=int)
-@click.option("--hci", default="hci1", help="HCI device")
+@click.option("--hci", default=None, hidden=True, help="HCI device (auto-detected)")
 def adapter_firmware_set(setting, value, hci):
     """Configure DarkFirmware parameters (persistent).
 
@@ -815,6 +934,11 @@ def adapter_firmware_set(setting, value, hci):
     from blue_tap.framework.envelopes.firmware import build_firmware_operation_result, make_firmware_run_id
     from blue_tap.framework.contracts.result_schema import now_iso
     from blue_tap.framework.sessions.store import log_command
+
+    hci = _resolve_df_hci(hci)
+    if hci is None:
+        error("No RTL8761B dongle detected. Connect a TP-Link UB500.")
+        return
 
     run_id = make_firmware_run_id()
     started_at = now_iso()
@@ -881,7 +1005,7 @@ def adapter_firmware_set(setting, value, hci):
 @click.option("--region", type=click.Choice(["rom", "ram", "patch", "hooks"]), default=None,
               help="Preset memory region")
 @click.option("-o", "--output", required=True, help="Output file path")
-@click.option("--hci", default="hci1", help="HCI device")
+@click.option("--hci", default=None, hidden=True, help="HCI device (auto-detected)")
 def adapter_firmware_dump(start, end, region, output, hci):
     """Dump RTL8761B controller memory to file.
 
@@ -908,6 +1032,11 @@ def adapter_firmware_dump(start, end, region, output, hci):
     from blue_tap.framework.envelopes.firmware import build_firmware_dump_result, make_firmware_run_id
     from blue_tap.framework.contracts.result_schema import now_iso
     from blue_tap.framework.sessions.store import log_command
+
+    hci = _resolve_df_hci(hci)
+    if hci is None:
+        error("No RTL8761B dongle detected. Connect a TP-Link UB500.")
+        return
 
     run_id = make_firmware_run_id()
     started_at = now_iso()
@@ -991,7 +1120,7 @@ def adapter_firmware_dump(start, end, region, output, hci):
 @click.option("--dump", is_flag=True, help="Full hex dump of all 12 slots")
 @click.option("--slot", type=int, default=None, help="Dump specific slot (0-11)")
 @click.option("-o", "--output", default=None, help="Save raw dump to file")
-@click.option("--hci", default="hci1", help="HCI device")
+@click.option("--hci", default=None, hidden=True, help="HCI device (auto-detected)")
 def adapter_connections(dump, slot, output, hci):
     """Inspect firmware connection table (12 slots).
 
@@ -1010,6 +1139,11 @@ def adapter_connections(dump, slot, output, hci):
       blue-tap adapter connections --slot 0 -o slot0.bin  # save slot 0 to file
     """
     from blue_tap.hardware.firmware import DarkFirmwareManager
+
+    hci = _resolve_df_hci(hci)
+    if hci is None:
+        error("No RTL8761B dongle detected. Connect a TP-Link UB500.")
+        return
 
     fw = DarkFirmwareManager()
     if not fw.is_darkfirmware_loaded(hci):
@@ -1041,16 +1175,17 @@ def adapter_connections(dump, slot, output, hci):
         warning("No connection data retrieved")
         return
 
-    table = Table(title="[bold #00d4ff]Connection Slots[/bold #00d4ff]", show_lines=True)
-    table.add_column("Slot", style="#00d4ff", justify="center")
+    table = bare_table()
+    table.title = "[bold]Connection Slots[/bold]"
+    table.add_column("Slot", style="bt.cyan", justify="center")
     table.add_column("Status", justify="center")
-    table.add_column("BD_ADDR", style="#bf5af2")
-    table.add_column("Address", style="dim")
+    table.add_column("BD_ADDR", style="bt.purple")
+    table.add_column("Address", style="bt.purple")
     if dump:
         table.add_column("First 32 bytes (hex)", style="dim")
 
     for conn in connections:
-        status = "[green]ACTIVE[/green]" if conn["active"] else "[dim]inactive[/dim]"
+        status = "[bt.green]ACTIVE[/bt.green]" if conn["active"] else "[bt.dim]inactive[/bt.dim]"
         row = [str(conn["slot"]), status, conn["bd_addr"] or "-", conn["address"]]
         if dump:
             raw_hex = conn["raw_hex"][:64]
@@ -1058,7 +1193,7 @@ def adapter_connections(dump, slot, output, hci):
             row.append(formatted)
         table.add_row(*row)
 
-    console.print(table)
+    print_table(table)
 
     active = sum(1 for c in connections if c["active"])
     info(f"Summary: {active} active / {len(connections)} total connection slots")

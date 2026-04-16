@@ -55,35 +55,34 @@ def _infer_category(command_path: str) -> str:
     if len(parts) < 2:
         return "general"
     root = parts[1]
-    if root == "scan":
-        return "scan"
-    if root == "recon":
-        return "recon"
-    if root in {"pbap", "map", "at", "opp"}:
-        return "data"
-    if root in {"hfp", "audio"}:
-        return "audio"
-    if root == "vulnscan":
-        return "vuln"
-    if root == "fuzz":
-        return "fuzz"
-    if root == "dos":
-        return "dos"
-    if root in {
-        "hijack",
-        "auto",
-        "bias",
-        "avrcp",
-        "spoof",
-        "bluffs",
-        "knob",
-        "encryption-downgrade",
-        "ssp-downgrade",
-    }:
-        return "attack"
-    if root == "fleet":
-        return "vuln"
-    return "general"
+    _CATEGORY_MAP = {
+        "discover": "scan",
+        "recon": "recon",
+        "vulnscan": "vuln",
+        "exploit": "attack",
+        "dos": "dos",
+        "extract": "data",
+        "fuzz": "fuzz",
+        "fleet": "vuln",
+        "auto": "attack",
+        "spoof": "attack",
+        # Legacy command names (backward compat for session logs)
+        "scan": "scan",
+        "pbap": "data",
+        "map": "data",
+        "at": "data",
+        "opp": "data",
+        "hfp": "audio",
+        "audio": "audio",
+        "hijack": "attack",
+        "bias": "attack",
+        "bluffs": "attack",
+        "knob": "attack",
+        "encryption-downgrade": "attack",
+        "ssp-downgrade": "attack",
+        "avrcp": "attack",
+    }
+    return _CATEGORY_MAP.get(root, "general")
 
 
 def _recon_cli_context(
@@ -188,6 +187,8 @@ class LoggedCommand(click.RichCommand):
             from blue_tap.framework.sessions.store import set_adapter
             set_adapter(hci)
         return super().invoke(ctx)
+
+
 
 
 class LoggedGroup(click.RichGroup):

@@ -1,4 +1,7 @@
-"""Blue-Tap CLI entry point — wires all family modules into the main group."""
+"""Blue-Tap CLI entry point — modular Bluetooth security toolkit.
+
+Phase-verb architecture: top-level commands map to assessment phases.
+"""
 
 from __future__ import annotations
 
@@ -17,20 +20,40 @@ click.rich_click.MAX_WIDTH = 120
 click.rich_click.USE_CLICK_SHORT_HELP = False
 click.rich_click.SHOW_ARGUMENTS = True
 click.rich_click.GROUP_ARGUMENTS_OPTIONS = True
-click.rich_click.STYLE_OPTION = "bold cyan"
-click.rich_click.STYLE_ARGUMENT = "bold cyan"
+click.rich_click.STYLE_OPTION = "bold"
+click.rich_click.STYLE_ARGUMENT = "bold"
 click.rich_click.STYLE_COMMAND = "bold"
 
-# Command grouping — pentest flow order
+# Command grouping
 click.rich_click.COMMAND_GROUPS = {
     "blue-tap": [
-        {"name": "Assessment", "commands": ["vulnscan", "fleet"]},
-        {"name": "Discovery & Reconnaissance", "commands": ["scan", "recon", "adapter"]},
-        {"name": "Exploitation", "commands": ["hijack", "bias", "knob", "bluffs", "encryption-downgrade", "ssp-downgrade", "spoof"]},
-        {"name": "Data Extraction & Audio", "commands": ["pbap", "map", "at", "opp", "hfp", "audio", "avrcp"]},
-        {"name": "Fuzzing & Stress Testing", "commands": ["fuzz", "dos"]},
-        {"name": "Reporting & Automation", "commands": ["session", "report", "auto", "run"]},
-        {"name": "Module Registry", "commands": ["list-modules", "module-info", "list-families"]},
+        {"name": "Assessment Workflow", "commands": [
+            "discover", "recon", "vulnscan", "exploit", "dos", "extract", "fuzz", "report",
+        ]},
+        {"name": "Automation", "commands": ["auto", "fleet"]},
+        {"name": "Utilities", "commands": ["adapter", "session", "doctor", "spoof"]},
+    ],
+    "blue-tap discover": [
+        {"name": "Discovery", "commands": ["classic", "ble", "all"]},
+    ],
+    "blue-tap exploit *": [
+        {"name": "Crypto & Key Attacks", "commands": [
+            "bias", "bluffs", "knob", "ctkd", "enc-downgrade", "ssp-downgrade",
+        ]},
+        {"name": "Full Chain", "commands": ["hijack", "pin-brute"]},
+    ],
+    "blue-tap extract *": [
+        {"name": "Contacts", "commands": ["contacts", "messages"]},
+        {"name": "Media", "commands": ["audio", "media"]},
+        {"name": "Files", "commands": ["push", "snarf", "at"]},
+    ],
+    "blue-tap fuzz": [
+        {"name": "Protocols", "commands": [
+            "campaign", "sdp-deep", "l2cap-sig", "rfcomm-raw", "ble-att", "ble-smp",
+            "bnep", "obex", "at-deep",
+        ]},
+        {"name": "Analysis", "commands": ["crashes", "minimize", "cve", "replay"]},
+        {"name": "Corpus", "commands": ["corpus"]},
     ],
 }
 
@@ -39,39 +62,43 @@ click.rich_click.COMMAND_GROUPS = {
 @click.version_option(version=__version__)
 @click.option("-v", "--verbose", count=True, help="Verbosity: -v verbose, -vv debug")
 @click.option("-s", "--session", "session_name", default=None,
-              help="Session name (default: auto-generated from date/time). "
-                   "Use to resume a previous session.")
+              help="Session name (default: auto-generated). Use to resume a session.")
 def cli(verbose, session_name):
-    """Blue-Tap: Bluetooth/BLE Penetration Testing Toolkit for Automotive IVI.
+    """Blue-Tap: Bluetooth Security Toolkit for Automotive & IoT.
 
     \b
     Quick start:
-      blue-tap adapter list                        # check adapters
-      blue-tap scan classic                        # discover devices
-      blue-tap vulnscan AA:BB:CC:DD:EE:FF          # vulnerability scan
-      blue-tap hijack IVI_MAC PHONE_MAC            # full attack chain
+      blue-tap discover classic                       # 1. Find targets
+      blue-tap recon AA:BB:CC:DD:EE:FF sdp            # 2. Enumerate services
+      blue-tap vulnscan AA:BB:CC:DD:EE:FF             # 3. Vulnerability scan
+      blue-tap exploit AA:BB:CC:DD:EE:FF knob         # 4. Run exploit
+      blue-tap extract AA:BB:CC:DD:EE:FF contacts     # 5. Extract data
+      blue-tap report                                 # 6. Generate report
 
     \b
     Sessions (automatic — all output is always saved):
-      blue-tap scan classic                        # auto-session created
-      blue-tap -s mytest scan classic              # named session
-      blue-tap -s mytest vulnscan TARGET           # resume named session
-      blue-tap session list                        # see all sessions
-      blue-tap report                              # report from latest session
+      blue-tap -s mytest vulnscan TARGET              # named session
+      blue-tap session list                           # see all sessions
+      blue-tap report                                 # report from latest session
     """
     from blue_tap.utils.output import set_verbosity
     set_verbosity(verbose)
 
-    # Determine the subcommand from Click context (works for both CLI and
-    # in-process invocation via CliRunner or cli.make_context).
+    # Skip session for read-only commands
     ctx = click.get_current_context()
     invoked = ctx.invoked_subcommand or ""
 
-    # Skip session creation for help and read-only commands
     if not invoked:
         return
-    _NO_SESSION_COMMANDS = {"session", "report", "adapter"}
+
+    _NO_SESSION_COMMANDS = {
+        "session", "report", "adapter", "plugins", "doctor",
+        "run", "search", "info", "show-options",
+    }
     if not session_name and invoked in _NO_SESSION_COMMANDS:
+        return
+    # run-playbook --list doesn't run anything, no session needed
+    if invoked == "run-playbook" and "--list" in sys.argv:
         return
 
     # Create session for active commands
@@ -81,287 +108,81 @@ def cli(verbose, session_name):
         session_name = datetime.now().strftime("blue-tap_%Y%m%d_%H%M%S")
     session = Session(session_name)
     set_session(session)
-    info(f"Session: [bold]{session_name}[/bold] -> {session.dir}")
-
-    # ---- Hardware detection, DarkFirmware auto-flash, hook init, watchdog ----
-    try:
-        _startup_hardware_check(invoked, sys.argv[1:])
-    except Exception:
-        pass  # Don't let hardware detection break CLI startup
+    info(f"Session: [bold]{session_name}[/bold]")
 
 
-def _command_needs_darkfirmware_bootstrap(invoked: str, argv: list[str]) -> bool:
-    """Return whether this invocation should auto-init DarkFirmware hooks."""
-    root = (invoked or "").strip().lower()
-    args = [str(item).strip().lower() for item in argv if str(item).strip()]
+def _init_darkfirmware_hooks(dongle_hci: str) -> None:
+    """Initialize DarkFirmware hooks and start watchdog on the detected dongle."""
+    os.environ["BT_TAP_DARKFIRMWARE_HCI"] = dongle_hci
 
-    if root in {"adapter", "doctor", "report", "session", "scan"}:
-        return False
-    if root in {"auto", "bias", "bluffs", "ctkd", "encryption-downgrade", "knob", "ssp-downgrade", "vulnscan"}:
-        return True
-    if root == "fuzz":
-        return any(token in {"l2cap-sig", "lmp"} for token in args)
-    if root == "recon":
-        return any(token in {"combined-sniff", "lmp-monitor", "lmp-sniff"} for token in args)
-    return False
-
-
-def _startup_hardware_check(invoked: str, argv: list[str] | None = None) -> None:
-    """Non-blocking hardware detection and DarkFirmware initialization.
-
-    Sequence:
-      1. Detect RTL8761B dongle via lsusb / sysfs
-      2. If not found → warn about unavailable features, skip DarkFirmware
-      3. If found → auto-flash DarkFirmware if not loaded
-      4. Init all 4 hooks (RAM writes for Hooks 3+4)
-      5. Start watchdog for USB reset/replug recovery
-    """
     from blue_tap.hardware.firmware import DarkFirmwareManager, DarkFirmwareWatchdog
-    from blue_tap.utils.bt_helpers import run_cmd
 
-    argv = list(argv or [])
     fw = DarkFirmwareManager()
-
-    # Step 1: Detect RTL8761B hardware — prefer sysfs/hciconfig detection
-    # which is per-HCI, over lsusb which is global.
-    # Try hci0 first since it's the most common index for USB dongles.
-    dongle_hci = None
-    for hci_dev in ("hci0", "hci1", "hci2"):
-        if fw.detect_rtl8761b(hci_dev):
-            dongle_hci = hci_dev
-            break
-
-    if dongle_hci is None:
-        # Check if any BT adapter is present at all
-        bt_result = run_cmd(["hciconfig"])
-        has_any_adapter = bt_result.returncode == 0 and "hci" in bt_result.stdout.lower()
-
-        if has_any_adapter:
-            info(
-                "RTL8761B dongle not detected — using system Bluetooth adapter.\n"
-                "  [dim]Features unavailable without RTL8761B (TP-Link UB500):[/dim]\n"
-                "  [dim]  - LMP injection/monitoring (BLUFFS, KNOB via LMP, BIAS via LMP)[/dim]\n"
-                "  [dim]  - Encryption downgrade attacks[/dim]\n"
-                "  [dim]  - LMP fuzzing and state confusion tests[/dim]\n"
-                "  [dim]  - Below-stack L2CAP injection[/dim]\n"
-                "  [dim]  - Connection table inspection[/dim]\n"
-                "  [dim]All HCI-level features (scan, recon, vulnscan, hijack, fuzz L2CAP/RFCOMM/BLE, DoS) work normally.[/dim]"
-            )
-        else:
-            warning(
-                "No Bluetooth adapter detected.\n"
-                "  [dim]Plug in a USB Bluetooth adapter and retry.[/dim]\n"
-                "  [dim]Recommended: TP-Link UB500 (RTL8761B) for full feature access.[/dim]"
-            )
-        return
-
-    if not _command_needs_darkfirmware_bootstrap(invoked, argv):
-        return
-
-    # Step 2: Check if DarkFirmware is loaded — prompt to install if not
-    # (Don't auto-flash: user may have custom firmware or not want changes)
-    if not fw.is_darkfirmware_loaded(dongle_hci):
-        warning(
-            f"RTL8761B detected on {dongle_hci} but DarkFirmware not loaded.\n"
-            f"  Install with: [bold]sudo blue-tap adapter firmware-install --hci {dongle_hci}[/bold]\n"
-            f"  [dim]Without DarkFirmware: LMP injection, BLUFFS, encryption downgrade, "
-            f"and LMP fuzzing are unavailable.[/dim]"
-        )
-        return
-
-    # Step 3: Initialize all 4 hooks (Hooks 3+4 need RAM writes)
     hook_status = fw.init_hooks(dongle_hci)
     if hook_status.get("all_ok"):
-        info(
-            f"[green]DarkFirmware active on {dongle_hci}[/green] — "
-            f"all 4 hooks initialized (LMP inject/monitor, LC TX/RX logging)"
-        )
+        info(f"[bt.green]DarkFirmware ready[/bt.green] on {dongle_hci}")
     else:
         active = [k for k in ("hook1", "hook2", "hook3", "hook4") if hook_status.get(k)]
-        failed = [k for k in ("hook1", "hook2", "hook3", "hook4") if not hook_status.get(k)]
-        warning(
-            f"DarkFirmware partially initialized on {dongle_hci} — "
-            f"hooks: active=[{', '.join(active)}] failed=[{', '.join(failed)}]"
-        )
+        warning(f"DarkFirmware partial: {', '.join(active)} active")
 
-    # Step 4: Start watchdog for USB reset/replug recovery
     watchdog = DarkFirmwareWatchdog(dongle_hci, poll_interval=30.0)
     watchdog.start()
 
 
-# ── Wire sub-groups into the main CLI ────────────────────────────────────────
+# ── Import and register commands ─────────────────────────────────────────────
 
-from blue_tap.interfaces.cli.adapter import adapter  # noqa: E402
-from blue_tap.interfaces.cli.discovery import scan  # noqa: E402
-from blue_tap.interfaces.cli.reconnaissance import recon  # noqa: E402
-from blue_tap.interfaces.cli.post_exploitation import (  # noqa: E402
-    pbap, map_cmd, doctor, hfp, audio, opp, at_cmd, avrcp,
-)
-from blue_tap.interfaces.cli.exploitation import (  # noqa: E402
-    spoof, hijack, bias, dos, ssp_downgrade, knob, bluffs_attack, ctkd_cmd, encryption_downgrade,
-)
-from blue_tap.interfaces.cli.assessment import vulnscan, fleet  # noqa: E402
-from blue_tap.interfaces.cli.fuzzing import fuzz  # noqa: E402
-from blue_tap.interfaces.cli.reporting import report_cmd, auto_cmd, run_cmd_seq, session  # noqa: E402
+# Assessment workflow
+from blue_tap.interfaces.cli.discover import discover  # noqa: E402
+from blue_tap.interfaces.cli.recon import recon  # noqa: E402
+from blue_tap.interfaces.cli.vulnscan import vulnscan  # noqa: E402
+from blue_tap.interfaces.cli.exploit import exploit  # noqa: E402
+from blue_tap.interfaces.cli.dos import dos  # noqa: E402
+from blue_tap.interfaces.cli.extract import extract  # noqa: E402
+from blue_tap.interfaces.cli.fuzz import fuzz  # noqa: E402
+from blue_tap.interfaces.cli.reporting import report_cmd, run_playbook_cmd, session  # noqa: E402
 
-cli.add_command(adapter)
-cli.add_command(scan)
+cli.add_command(discover)
 cli.add_command(recon)
-
-# Post-exploitation
-cli.add_command(pbap)
-cli.add_command(map_cmd)
-cli.add_command(doctor)
-cli.add_command(hfp)
-cli.add_command(audio)
-cli.add_command(opp)
-cli.add_command(at_cmd)
-cli.add_command(avrcp)
-
-# Exploitation
-cli.add_command(spoof)
-cli.add_command(hijack)
-cli.add_command(bias)
-cli.add_command(dos)
-cli.add_command(ssp_downgrade)
-cli.add_command(knob)
-cli.add_command(bluffs_attack)
-cli.add_command(ctkd_cmd)
-cli.add_command(encryption_downgrade)
-
-# Assessment
 cli.add_command(vulnscan)
+cli.add_command(exploit)
+cli.add_command(dos)
+cli.add_command(extract)
+cli.add_command(fuzz)
+cli.add_command(report_cmd)
+
+# Automation
+from blue_tap.interfaces.cli.auto import auto  # noqa: E402
+from blue_tap.interfaces.cli.fleet import fleet  # noqa: E402
+
+cli.add_command(auto)
 cli.add_command(fleet)
 
-# Fuzzing
-cli.add_command(fuzz)
+# Utilities
+from blue_tap.interfaces.cli.adapter import adapter  # noqa: E402
+from blue_tap.interfaces.cli.doctor import doctor  # noqa: E402
+from blue_tap.interfaces.cli.spoof import spoof  # noqa: E402
 
-# Reporting
-cli.add_command(report_cmd)
-cli.add_command(auto_cmd)
-cli.add_command(run_cmd_seq)
+cli.add_command(adapter)
 cli.add_command(session)
+cli.add_command(doctor)
+cli.add_command(spoof)
 
+# Hidden power-user commands (not shown in --help, still functional)
+from blue_tap.interfaces.cli.runner import run_cmd, search_cmd, info_cmd, show_options_cmd  # noqa: E402
+from blue_tap.interfaces.cli.plugins import plugins  # noqa: E402
 
-# ── Module registry commands ──────────────────────────────────────────────────
+cli.add_command(run_cmd, "run")
+cli.add_command(search_cmd, "search")
+cli.add_command(info_cmd, "info")
+cli.add_command(show_options_cmd, "show-options")
+cli.add_command(plugins)
+cli.add_command(run_playbook_cmd)
 
-@click.command("list-modules")
-@click.option("--family", default=None, help="Filter by family (discovery, reconnaissance, assessment, exploitation, post_exploitation, fuzzing)")
-@click.option("--all", "show_all", is_flag=True, help="Include internal modules")
-def list_modules_cmd(family, show_all):
-    """List all registered Blue-Tap modules grouped by family."""
-    import blue_tap.modules.assessment  # trigger registration
-    import blue_tap.modules.exploitation
-    import blue_tap.modules.fuzzing
-    import blue_tap.modules.post_exploitation
-    import blue_tap.modules.reconnaissance
-    import blue_tap.modules.discovery
-    from blue_tap.framework.registry import get_registry
-    from blue_tap.utils.output import info, console
-    from rich.table import Table
-
-    registry = get_registry()
-    modules = registry.list_all()
-
-    if not show_all:
-        modules = [m for m in modules if not getattr(m, "internal", False)]
-    if family:
-        modules = [m for m in modules if m.family.value == family]
-
-    if not modules:
-        info("No modules registered" + (f" for family '{family}'" if family else ""))
-        return
-
-    # Group by family
-    from collections import defaultdict
-    by_family = defaultdict(list)
-    for m in modules:
-        by_family[m.family.value].append(m)
-
-    for fam, mods in sorted(by_family.items()):
-        table = Table(title=f"[bold]{fam}[/bold]", show_header=True)
-        table.add_column("Module ID", style="cyan")
-        table.add_column("Name")
-        table.add_column("Description")
-        table.add_column("Destructive", justify="center")
-        for m in sorted(mods, key=lambda x: x.module_id):
-            table.add_row(
-                m.module_id,
-                m.name,
-                m.description,
-                "[red]yes[/red]" if m.destructive else "[green]no[/green]",
-            )
-        console.print(table)
-
-
-@click.command("module-info")
-@click.argument("module_id")
-def module_info_cmd(module_id):
-    """Show metadata for a registered module."""
-    import blue_tap.modules.assessment
-    import blue_tap.modules.exploitation
-    import blue_tap.modules.fuzzing
-    import blue_tap.modules.post_exploitation
-    import blue_tap.modules.reconnaissance
-    import blue_tap.modules.discovery
-    from blue_tap.framework.registry import get_registry
-    from blue_tap.utils.output import info, error, console
-    from rich.table import Table
-
-    registry = get_registry()
-    try:
-        desc = registry.get(module_id)
-    except KeyError:
-        error(f"Module not found: {module_id}")
-        return
-
-    table = Table(title=f"Module: [bold]{module_id}[/bold]", show_header=False)
-    table.add_column("Field", style="cyan")
-    table.add_column("Value")
-    table.add_row("ID", desc.module_id)
-    table.add_row("Family", desc.family.value)
-    table.add_row("Name", desc.name)
-    table.add_row("Description", desc.description)
-    table.add_row("Protocols", ", ".join(desc.protocols))
-    table.add_row("Requires", ", ".join(desc.requires))
-    table.add_row("Destructive", "[red]yes[/red]" if desc.destructive else "[green]no[/green]")
-    table.add_row("Requires Pairing", "yes" if desc.requires_pairing else "no")
-    table.add_row("Has Report Adapter", "yes" if desc.has_report_adapter else "no")
-    table.add_row("Entry Point", desc.entry_point)
-    table.add_row("Internal", "yes" if getattr(desc, "internal", False) else "no")
-    console.print(table)
-
-
-@click.command("list-families")
-def list_families_cmd():
-    """Show all module families with registration counts."""
-    import blue_tap.modules.assessment
-    import blue_tap.modules.exploitation
-    import blue_tap.modules.fuzzing
-    import blue_tap.modules.post_exploitation
-    import blue_tap.modules.reconnaissance
-    import blue_tap.modules.discovery
-    from blue_tap.framework.registry import get_registry
-    from blue_tap.utils.output import console
-    from rich.table import Table
-    from collections import defaultdict
-
-    registry = get_registry()
-    by_family = defaultdict(int)
-    for m in registry.list_all():
-        by_family[m.family.value] += 1
-
-    table = Table(title="Module Families", show_header=True)
-    table.add_column("Family", style="cyan")
-    table.add_column("Modules", justify="right")
-    for fam, count in sorted(by_family.items()):
-        table.add_row(fam, str(count))
-    console.print(table)
-
-
-cli.add_command(list_modules_cmd)
-cli.add_command(module_info_cmd)
-cli.add_command(list_families_cmd)
+# Mark hidden
+for _name in ("run", "search", "info", "show-options", "plugins", "run-playbook"):
+    _cmd = cli.commands.get(_name)
+    if _cmd:
+        _cmd.hidden = True
 
 
 # ── Demo command (hidden) ─────────────────────────────────────────────────────
@@ -369,7 +190,7 @@ cli.add_command(list_families_cmd)
 @cli.command("demo", hidden=True)
 @click.option("-o", "--output", default="demo_output", help="Output directory")
 def demo_cmd(output):
-    """Run a full demo pentest with simulated IVI data (no hardware needed)."""
+    """Run a demo with simulated data (no hardware needed)."""
     from blue_tap.demo.runner import run_demo
     run_demo(output_dir=output)
 
@@ -377,47 +198,194 @@ def demo_cmd(output):
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def _check_privileges() -> bool:
-    """Check if running with root/sudo.  Returns True if privileged."""
+    """Check if running with root/sudo."""
     return os.geteuid() == 0
 
 
-# Commands that can run without root
-_NO_ROOT_COMMANDS = {"--help", "-h", "--version", "demo"}
+_NO_ROOT_COMMANDS = {
+    "--help", "-h", "--version", "demo", "doctor",
+    "search", "info", "show-options", "plugins",
+}
+
+
+def _check_rtl_dongle() -> None:
+    """Detect RTL8761B dongle at startup and offer to flash DarkFirmware."""
+    try:
+        from blue_tap.hardware.firmware import DarkFirmwareManager
+        from blue_tap.utils.output import console
+        from rich.prompt import Confirm
+    except ImportError:
+        return
+
+    fw = DarkFirmwareManager()
+
+    try:
+        dongle_hci = fw.find_rtl8761b_hci()
+    except Exception:
+        dongle_hci = None
+
+    if dongle_hci is None:
+        console.print(
+            "[bold red]No RTL8761B / TP-Link UB500 dongle detected.[/bold red] "
+            "Blue-tap requires a Realtek RTL8761B chipset."
+        )
+        sys.exit(1)
+
+    try:
+        from blue_tap.utils.bt_helpers import get_hci_adapters
+        adapters = {a["name"]: a for a in get_hci_adapters()}
+        if adapters.get(dongle_hci, {}).get("status") != "UP":
+            return
+    except Exception:
+        pass
+
+    try:
+        df_loaded = fw.is_darkfirmware_loaded(dongle_hci)
+    except Exception:
+        info(f"[dim]RTL8761B detected on {dongle_hci} — firmware status unavailable[/dim]")
+        return
+
+    if df_loaded:
+        _init_darkfirmware_hooks(dongle_hci)
+        return
+
+    console.print()
+    console.print(
+        f"[bold bt.yellow]RTL8761B dongle detected[/bold bt.yellow] on [bold]{dongle_hci}[/bold] "
+        f"— [bt.yellow]stock firmware[/bt.yellow] is loaded."
+    )
+    console.print(
+        "  DarkFirmware enables LMP injection, BDADDR spoofing, and below-HCI attacks\n"
+        "  (BIAS, BLUFFS, KNOB, CTKD, LMP fuzzing).\n"
+        "  The bundled firmware binary is a patched Realtek image with four hook points;\n"
+        "  original firmware is backed up and restorable via [bold]blue-tap adapter firmware-install --restore[/bold]."
+    )
+    console.print()
+
+    try:
+        flash = Confirm.ask(
+            "  [bold]Flash DarkFirmware now?[/bold] (original will be backed up)",
+            default=False,
+        )
+    except (EOFError, KeyboardInterrupt):
+        info(f"[dim]Skipping firmware flash (non-interactive). "
+             f"Run: blue-tap adapter firmware-install[/dim]")
+        console.print()
+        return
+
+    console.print()
+    if not flash:
+        info(
+            "[dim]Continuing with stock firmware. "
+            "Run [bold]blue-tap adapter firmware-install[/bold] to enable LMP-level features.[/dim]"
+        )
+        console.print()
+        return
+
+    info(f"Installing DarkFirmware on {dongle_hci}…")
+    try:
+        ok = fw.install_firmware()
+    except Exception as exc:
+        error(f"Firmware install failed: {exc}")
+        console.print()
+        return
+
+    if not ok:
+        error(
+            "Firmware install returned failure. "
+            "Retry manually: [bold]sudo blue-tap adapter firmware-install[/bold]"
+        )
+        console.print()
+        return
+
+    info("Resetting USB dongle to load new firmware…")
+    try:
+        fw.usb_reset()
+    except Exception as exc:
+        warning(f"USB reset failed ({exc}). Unplug and re-plug the dongle to activate DarkFirmware.")
+        console.print()
+        return
+
+    info(f"[bold green]DarkFirmware installed and active on {dongle_hci}.[/bold green]")
+    console.print()
 
 
 def main():
-    """Entry point that shows the banner before any Click processing."""
-    banner()
+    """Entry point — shows banner and loads modules."""
+    _first_arg = sys.argv[1] if len(sys.argv) > 1 else ""
+    _SILENT_COMMANDS = {
+        "search", "info", "show-options", "plugins",
+        "adapter", "session", "report", "doctor",
+    }
+    _is_silent = (
+        _first_arg in _SILENT_COMMANDS or
+        _first_arg in {"--version", "--help", "-h"} or
+        (_first_arg == "run-playbook" and "--list" in sys.argv)
+    )
 
-    # Allow --help, --version, and demo without root
+    if not _is_silent:
+        banner()
+
+    # Load modules
+    try:
+        from blue_tap.framework.module import autoload_builtin_modules
+        from blue_tap.framework.module.loader import get_plugin_registry
+        from blue_tap.framework.registry import get_registry
+
+        autoload_builtin_modules()
+
+        registry = get_registry()
+        total = len([m for m in registry.list_all() if not getattr(m, "internal", False)])
+
+        if not _is_silent:
+            plugin_registry = get_plugin_registry()
+            if plugin_registry:
+                loaded = [n for n, d in plugin_registry.items() if d.get("loaded")]
+                failed = [n for n, d in plugin_registry.items() if not d.get("loaded")]
+                if loaded:
+                    info(f"[dim]{total} modules loaded (+{len(loaded)} plugin(s))[/dim]")
+                for name in failed:
+                    warning(f"[dim]Plugin '{name}' failed to load[/dim]")
+            else:
+                info(f"[dim]{total} modules loaded[/dim]")
+
+    except Exception as e:
+        warning(f"Module loading failed: {e}")
+
+    # Root check
     args_lower = {a.lower().lstrip("-") for a in sys.argv[1:]}
     raw_args = set(sys.argv[1:])
 
-    needs_root_check = True
-    if not sys.argv[1:]:
-        needs_root_check = False  # No args = show help
-    elif raw_args & {"--help", "-h", "--version"}:
-        needs_root_check = False
-    elif args_lower & {"help", "version"}:
-        needs_root_check = False
-    elif "demo" in args_lower:
-        needs_root_check = False
+    skip_root = (
+        not sys.argv[1:] or
+        raw_args & {"--help", "-h", "--version"} or
+        args_lower & {"help", "version", "demo", "doctor",
+                      "search", "info", "show-options", "plugins"}
+    )
 
-    if needs_root_check and not _check_privileges():
+    if not skip_root and not _check_privileges():
         error(
-            "Blue-Tap requires root privileges for most operations.\n"
+            "Blue-Tap requires root for Bluetooth operations.\n"
             "\n"
-            "  Why: Raw HCI sockets, L2CAP/RFCOMM sockets, adapter control,\n"
-            "       DarkFirmware VSC commands, and firmware writes all require\n"
-            "       root or CAP_NET_RAW.\n"
+            "  Run with: [bold]sudo blue-tap[/bold] <command>\n"
             "\n"
-            "  Run with:  [bold]sudo blue-tap[/bold] <command>\n"
+            "  Or: sudo setcap cap_net_raw+eip $(which python3)\n"
             "\n"
-            "  Or grant capabilities:  sudo setcap cap_net_raw+eip $(which python3)\n"
-            "\n"
-            "  Commands that work without root: --help, --version, demo"
+            "  [dim]No root needed: --help, doctor, search, plugins[/dim]"
         )
         sys.exit(1)
+
+    # RTL8761B dongle detection
+    _hw_skip_commands = {
+        "session", "report", "plugins", "doctor",
+        "search", "info", "show-options",
+    }
+    _skip_hw = (
+        _first_arg in _hw_skip_commands or
+        (_first_arg == "run-playbook" and "--list" in sys.argv)
+    )
+    if not skip_root and not _skip_hw:
+        _check_rtl_dongle()
 
     cli()
 

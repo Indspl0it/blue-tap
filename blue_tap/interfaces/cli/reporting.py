@@ -7,10 +7,8 @@ import os
 import re
 
 import rich_click as click
-from rich.table import Table
-
 from blue_tap.interfaces.cli.shared import LoggedCommand, LoggedGroup, _save_json
-from blue_tap.utils.output import info, success, error, warning, console, summary_panel
+from blue_tap.utils.output import info, success, error, warning, console, summary_panel, bare_table, print_table
 from blue_tap.utils.interactive import resolve_address
 
 
@@ -164,57 +162,23 @@ def report_cmd(dump_dir, fmt, output):
         session_data = session.get_all_data()
         info(f"Collecting data from session '{session.name}'...")
 
-        # Feed session data into report
-        for entry in session_data.get("scan", []):
-            data = entry.get("data", {})
-            report.add_run_envelope(data)
-
-        for entry in session_data.get("recon", []):
-            data = entry.get("data", {})
-            report.add_run_envelope(data)
-
-        for entry in session_data.get("vuln", []):
-            data = entry.get("data", {})
-            report.add_run_envelope(data)
-
-        for entry in session_data.get("attack", []):
-            data = entry.get("data", {})
-            if report.add_run_envelope(data):
-                continue
-            # Raw/operator-only attack commands are intentionally excluded from
-            # formal reports. Only standardized attack envelopes are ingested.
-
-        for entry in session_data.get("data", []):
-            data = entry.get("data", {})
-            if report.add_run_envelope(data):
-                continue
-            # Raw data extraction blobs are intentionally excluded from formal
-            # reports. Only standardized data envelopes are ingested.
-
-        for entry in session_data.get("fuzz", []):
-            data = entry.get("data", {})
-            if report.add_run_envelope(data):
-                continue
-
-        for entry in session_data.get("dos", []):
-            data = entry.get("data", {})
-            if report.add_run_envelope(data):
-                continue
-
-        for entry in session_data.get("audio", []):
-            data = entry.get("data", {})
-            if report.add_run_envelope(data):
-                continue
-            # Raw audio/operator session entries are intentionally excluded from
-            # formal reports. Only standardized audio envelopes are ingested.
-
-        # Add generic command execution evidence from all categories.
+        # Dispatch every run envelope through the adapter pipeline.
+        # ``add_run_envelope`` picks the right adapter based on schema, so
+        # categories are just a routing hint — we no longer hardcode the
+        # list here (the earlier version missed ``assessment``/``vulnscan``
+        # because it only iterated ``vuln``). Non-envelope entries that have
+        # a ``command_path`` become operator notes instead.
         for category_name, entries in session_data.items():
             if not isinstance(entries, list):
                 continue
             for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
                 data = entry.get("data", {})
-                if isinstance(data, dict) and data.get("command_path"):
+                ingested = False
+                if isinstance(data, dict):
+                    ingested = report.add_run_envelope(data)
+                if not ingested and isinstance(data, dict) and data.get("command_path"):
                     status = data.get("status", "unknown")
                     report.add_note(
                         f"Command: {data['command_path']} | "
@@ -255,117 +219,30 @@ def report_cmd(dump_dir, fmt, output):
 
 
 # ============================================================================
-# AUTO - Automated Discovery and Attack
-# ============================================================================
-
-@click.command("auto", cls=LoggedCommand)
-@click.argument("ivi_mac", required=False, default=None)
-@click.option("-d", "--duration", default=30, help="Phone discovery scan duration (seconds)")
-@click.option("-o", "--output", default="pentest_output", help="Output directory")
-@click.option("-i", "--hci", default="hci0")
-@click.option("--fuzz-duration", default=3600, help="Fuzzing duration in seconds (default: 1 hour)")
-@click.option("--skip-fuzz", is_flag=True, help="Skip protocol fuzzing phase")
-@click.option("--skip-dos", is_flag=True, help="Skip DoS testing phase")
-@click.option("--skip-exploit", is_flag=True, help="Skip hijack/exploitation phase")
-def auto_cmd(ivi_mac, duration, output, hci, fuzz_duration, skip_fuzz, skip_dos, skip_exploit):
-    """Full automated pentest: discovery, fingerprint, recon, vulnscan, exploit, fuzz, DoS, report.
-
-    \b
-    Executes a complete 9-phase Bluetooth pentest methodology:
-      1. Discovery      — scan for nearby devices, identify paired phone
-      2. Fingerprinting  — BT version, chipset, profiles, attack surface
-      3. Reconnaissance  — SDP services, RFCOMM channels, L2CAP PSMs
-      4. Vuln Assessment — 20+ CVE and configuration checks
-      5. Pairing Attacks — SSP downgrade probe, KNOB probe
-      6. Exploitation    — hijack (MAC spoof + data extraction)
-      7. Protocol Fuzzing— coverage-guided fuzzing (default: 1 hour)
-      8. DoS Testing     — L2CAP, SDP, RFCOMM, HFP resilience tests
-      9. Report          — HTML + JSON with all findings
-
-    \b
-    The coverage-guided fuzzing strategy is used by default — it learns
-    from target responses, adapts mutation focus to productive protocol
-    fields, and tracks protocol state transitions for maximum coverage.
-
-    \b
-    Examples:
-      blue-tap auto AA:BB:CC:DD:EE:FF
-      blue-tap auto AA:BB:CC:DD:EE:FF --fuzz-duration 7200
-      blue-tap auto AA:BB:CC:DD:EE:FF --skip-fuzz --skip-dos
-    """
-    ivi_mac = resolve_address(ivi_mac, prompt="Select TARGET IVI")
-    if not ivi_mac:
-        return
-    if fuzz_duration <= 0:
-        error("--fuzz-duration must be a positive number")
-        return
-    if duration <= 0:
-        error("--duration must be a positive number")
-        return
-    from blue_tap.modules.exploitation.auto import AutoPentest
-    from blue_tap.framework.sessions.store import get_session, log_command
-
-    session = get_session()
-    output = session.get_output_dir("auto") if session else output
-
-    auto = AutoPentest(ivi_mac, hci=hci)
-    try:
-        results = auto.run(
-            output_dir=output,
-            scan_duration=duration,
-            fuzz_duration=fuzz_duration,
-            skip_fuzz=skip_fuzz,
-            skip_dos=skip_dos,
-            skip_exploit=skip_exploit,
-        )
-        os.makedirs(output, exist_ok=True)
-        _save_json(results, os.path.join(output, "auto_results.json"))
-        envelope = results.get("_envelope")
-        if envelope:
-            log_command("auto", envelope, category="attack", target=ivi_mac)
-        else:
-            _log_standardized_operation(
-                module="attack",
-                command="auto",
-                title="Automated Attack Workflow",
-                protocol="multi",
-                target=ivi_mac,
-                result=results,
-                category="attack",
-                observations=[f"skip_fuzz={skip_fuzz}", f"skip_dos={skip_dos}", f"skip_exploit={skip_exploit}"],
-            )
-    except KeyboardInterrupt:
-        warning("\nInterrupted by user")
-
-
-# Module-step translation is owned by interfaces/playbooks/__init__.py (PlaybookLoader).
-
-
-# ============================================================================
 # RUN - Execute Multiple Commands
 # ============================================================================
 
-@click.command("run", cls=LoggedCommand)
+@click.command("run-playbook", cls=LoggedCommand)
 @click.argument("commands", nargs=-1)
 @click.option("--playbook", default=None, help="Playbook file (YAML or text, one command per line)")
 @click.option("--list", "list_playbooks_flag", is_flag=True, help="List available bundled playbooks")
-def run_cmd_seq(commands, playbook, list_playbooks_flag):
+def run_playbook_cmd(commands, playbook, list_playbooks_flag):
     """Execute multiple blue-tap commands in sequence.
 
     \b
     Each argument is a command string (quote if it has spaces):
-      blue-tap -s mytest run "scan classic" "recon fingerprint TARGET" "vulnscan TARGET" "report"
+      blue-tap -s mytest run-playbook "scan classic" "recon fingerprint TARGET" "vulnscan TARGET" "report"
 
     Use TARGET as a placeholder — you'll be prompted to select a device.
 
     \b
     Use a playbook file (YAML or plain text):
-      blue-tap -s mytest run --playbook quick-recon.yaml
-      blue-tap -s mytest run --playbook quick-recon       # searches bundled playbooks
+      blue-tap -s mytest run-playbook --playbook quick-recon.yaml
+      blue-tap -s mytest run-playbook --playbook quick-recon   # searches bundled playbooks
 
     \b
     List available bundled playbooks:
-      blue-tap run --list
+      blue-tap run-playbook --list
     """
     import shlex
     from blue_tap.framework.sessions.store import get_session
@@ -380,12 +257,12 @@ def run_cmd_seq(commands, playbook, list_playbooks_flag):
             info("No bundled playbooks found")
             return
 
-        pb_table = Table(title="[bold cyan]Bundled Playbooks[/bold cyan]",
-                         show_lines=True, border_style="dim")
-        pb_table.add_column("Playbook", style="bold white")
-        pb_table.add_column("Description", style="dim")
-        pb_table.add_column("Duration", style="cyan")
-        pb_table.add_column("Risk", style="yellow")
+        pb_table = bare_table()
+        pb_table.title = "[bold]Bundled Playbooks[/bold]"
+        pb_table.add_column("Playbook", style="bold")
+        pb_table.add_column("Description", style="bt.dim")
+        pb_table.add_column("Duration")
+        pb_table.add_column("Risk")
 
         for pb_name in pb_names:
             path = PlaybookLoader.get_bundled_path(pb_name)
@@ -401,7 +278,7 @@ def run_cmd_seq(commands, playbook, list_playbooks_flag):
             except Exception:
                 pb_table.add_row(pb_name, "(error loading)", "", "")
 
-        console.print(pb_table)
+        print_table(pb_table)
         return
 
     # ── Load playbook via PlaybookLoader ─────────────────────────────────
@@ -438,22 +315,18 @@ def run_cmd_seq(commands, playbook, list_playbooks_flag):
         return
 
     # Resolve TARGET / {target} / {hci} placeholders
+    from blue_tap.hardware.adapter import resolve_active_hci
     target_addr = None
-    hci_adapter = "hci0"
+    hci_adapter = resolve_active_hci()
     has_target_placeholder = any(
         "TARGET" in cmd.upper() or "{target}" in cmd for cmd in commands
     )
-    has_hci_placeholder = any("{hci}" in cmd for cmd in commands)
 
     if has_target_placeholder:
         target_addr = resolve_address(None, prompt="Select target for workflow")
         if not target_addr:
             error("Target selection cancelled")
             return
-
-    if has_hci_placeholder and not has_target_placeholder:
-        # Only prompt for HCI if target wasn't already prompted
-        pass  # Default hci0 is fine
 
     from blue_tap.framework.runtime.cli_events import emit_cli_event
     from blue_tap.framework.contracts.result_schema import (
@@ -468,7 +341,7 @@ def run_cmd_seq(commands, playbook, list_playbooks_flag):
     run_id = make_run_id("playbook")
     started_at = now_iso()
 
-    console.rule("[bold cyan]Blue-Tap Workflow", style="cyan")
+    console.rule("[bold]Blue-Tap Workflow[/bold]", style="bt.dim")
     info(f"Executing {len(commands)} command(s)")
     for i, cmd in enumerate(commands, 1):
         info(f"  {i}. {cmd}")
@@ -630,7 +503,7 @@ def run_cmd_seq(commands, playbook, list_playbooks_flag):
                 "completed_at": step_completed_at,
             })
 
-    console.rule("[bold]Workflow Complete", style="cyan")
+    console.rule("[bold]Workflow Complete[/bold]", style="bt.dim")
     succeeded = sum(1 for r in results if r["status"] == "success")
     failed = sum(1 for r in results if r["status"] in ("error", "interrupted"))
     info(f"Results: {succeeded} succeeded, {failed} failed out of {len(results)}")
@@ -649,7 +522,7 @@ def run_cmd_seq(commands, playbook, list_playbooks_flag):
     for step_result in results:
         step_status = step_result["status"]
         execution_status = "completed" if step_status == "success" else ("skipped" if step_status == "interrupted" else "failed")
-        module_outcome = "complete" if step_status == "success" else "partial"
+        module_outcome = "completed" if step_status == "success" else "partial"
         obs = [f"status={step_status}"]
         if step_result.get("error"):
             obs.append(f"error={step_result['error']}")
@@ -702,38 +575,39 @@ def session():
 @session.command("list")
 def session_list():
     """List all sessions."""
-    sessions_dir = os.path.join(".", "sessions")
+    from blue_tap.framework.sessions.store import Session, resolve_sessions_base_dir
+    sessions_dir = os.path.join(resolve_sessions_base_dir(), Session.SESSIONS_DIR)
     if not os.path.isdir(sessions_dir):
-        info("No sessions found")
+        info(f"No sessions found in {sessions_dir}")
         return
 
-    from rich.style import Style as _S
-    table = Table(title="[bold cyan]Assessment Sessions[/bold cyan]",
-                  show_lines=True, border_style="#666666",
-                  header_style=_S(bold=True, color="#00d4ff"))
-    table.add_column("Name", style="#00d4ff")
-    table.add_column("Created", style="#666666")
-    table.add_column("Commands", justify="right")
-    table.add_column("Targets")
-    table.add_column("Last Updated", style="#666666")
-
+    sessions = []
     for name in sorted(os.listdir(sessions_dir)):
         meta_file = os.path.join(sessions_dir, name, "session.json")
         if os.path.exists(meta_file):
             try:
                 with open(meta_file) as f:
                     meta = json.load(f)
-                table.add_row(
-                    name,
-                    meta.get("created", "")[:19],
-                    str(len(meta.get("commands", []))),
-                    ", ".join(meta.get("targets", []))[:40],
-                    meta.get("last_updated", "")[:19],
-                )
+                sessions.append((name, meta))
             except (json.JSONDecodeError, OSError):
-                table.add_row(name, "?", "?", "", "?")
+                sessions.append((name, {}))
 
-    console.print(table)
+    if not sessions:
+        info("No sessions found.")
+        return
+
+    console.print()
+    console.print(f"[bold]Sessions[/bold]  [bt.dim]{len(sessions)} total[/bt.dim]")
+    console.print(f"[bt.dim]{'─' * 70}[/bt.dim]")
+    for name, meta in sessions:
+        created = meta.get("created", "")[:16].replace("T", " ")
+        cmd_count = len(meta.get("commands", []))
+        targets = ", ".join(meta.get("targets", []))[:35]
+        cmd_str = f"[bt.dim]{cmd_count} cmd{'s' if cmd_count != 1 else ''}[/bt.dim]"
+        target_str = f"  [bt.dim]{targets}[/bt.dim]" if targets else ""
+        created_str = f"  [bt.dim]{created}[/bt.dim]" if created else ""
+        console.print(f"  [bt.cyan]{name:<30}[/bt.cyan]{cmd_str}{created_str}{target_str}")
+    console.print()
 
 
 @session.command("show")
@@ -741,8 +615,10 @@ def session_list():
 def session_show(name):
     """Show details of a session."""
     import os as _os
-    from blue_tap.framework.sessions.store import Session
-    meta_path = _os.path.join(".", "sessions", name, "session.json")
+    from blue_tap.framework.sessions.store import Session, resolve_sessions_base_dir
+    meta_path = _os.path.join(
+        resolve_sessions_base_dir(), Session.SESSIONS_DIR, name, "session.json"
+    )
     if not _os.path.exists(meta_path):
         error(f"Session '{name}' not found")
         return
@@ -766,7 +642,7 @@ def session_show(name):
             for cmd in s.metadata["commands"]:
                 console.print(
                     f"  [dim]{cmd.get('timestamp', '')[:19]}[/dim]  "
-                    f"[cyan]{cmd.get('command', '')}[/cyan]  "
+                    f"[bt.cyan]{cmd.get('command', '')}[/bt.cyan]  "
                     f"[dim]({cmd.get('category', '')})[/dim]  "
                     f"{cmd.get('target', '')}"
                 )
@@ -774,4 +650,4 @@ def session_show(name):
         error(f"Cannot load session: {e}")
 
 
-__all__ = ["report_cmd", "auto_cmd", "run_cmd_seq", "session"]
+__all__ = ["report_cmd", "run_playbook_cmd", "session"]

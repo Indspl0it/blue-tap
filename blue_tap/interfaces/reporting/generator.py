@@ -6,6 +6,7 @@ analysis notes.  All charts use inline SVG (no JS dependencies).
 """
 
 import html as _html_mod
+import logging
 import json
 import math
 import os
@@ -20,6 +21,7 @@ try:
 except ImportError:
     __version__ = "unknown"
 
+logger = logging.getLogger(__name__)
 
 # Resolved once at module load time: built-in adapters + any registered by plugins.
 REPORT_ADAPTERS = get_report_adapters()
@@ -336,26 +338,52 @@ class ReportGenerator:
     """Generates pentest reports from Blue-Tap session data."""
 
     def __init__(self):
-        self.scan_results: list[dict] = []
-        self.scan_runs: list[dict] = []
-        self.vuln_findings: list[dict] = []
-        self.vuln_scan_runs: list[dict] = []
-        self.recon_results: list[dict] = []
-        self.fuzz_runs: list[dict] = []
         self.notes: list[str] = []
         # Session metadata for timeline/scope
         self._session_metadata: dict = {}
         self._module_report_state: dict[str, dict] = {
-            "scan": {"scan_runs": [], "scan_results": [], "scan_executions": []},
-            "vulnscan": {"vuln_scan_runs": [], "vuln_findings": [], "vuln_executions": []},
-            "attack": {"attack_runs": [], "attack_executions": [], "attack_operations": []},
+            "discovery": {"scan_runs": [], "scan_results": [], "scan_executions": []},
+            "assessment": {"vuln_scan_runs": [], "vuln_findings": [], "vuln_executions": []},
+            "exploitation": {"attack_runs": [], "attack_executions": [], "attack_operations": []},
             "data": {"data_runs": [], "data_executions": [], "data_operations": []},
             "audio": {"audio_runs": [], "audio_executions": [], "audio_operations": []},
-            "dos": {"dos_runs": [], "dos_results": [], "dos_executions": []},
-            "fuzz": {"fuzz_runs": [], "campaigns": [], "protocol_runs": [], "operations": [], "crashes": []},
+            "exploitation.dos": {"dos_runs": [], "dos_results": [], "dos_executions": []},
+            "fuzzing": {"fuzz_runs": [], "campaigns": [], "protocol_runs": [], "operations": [], "crashes": []},
             "lmp_capture": {"lmp_captures": []},
-            "recon": {"recon_runs": [], "recon_results": [], "fingerprints": [], "capture_results": [], "recon_executions": []},
+            "reconnaissance": {"recon_runs": [], "recon_results": [], "fingerprints": [], "capture_results": [], "recon_executions": []},
         }
+
+    # --- Adapter state accessors (read from canonical adapter state) ---
+
+    @property
+    def scan_runs(self) -> list[dict]:
+        """Scan run envelopes from adapter state."""
+        return self._module_report_state.get("discovery", {}).get("scan_runs", [])
+
+    @property
+    def scan_results(self) -> list[dict]:
+        """Discovered devices from adapter state."""
+        return self._module_report_state.get("discovery", {}).get("scan_results", [])
+
+    @property
+    def vuln_findings(self) -> list[dict]:
+        """Vulnerability findings from adapter state."""
+        return self._module_report_state.get("assessment", {}).get("vuln_findings", [])
+
+    @property
+    def vuln_scan_runs(self) -> list[dict]:
+        """Vulnscan run envelopes from adapter state."""
+        return self._module_report_state.get("assessment", {}).get("vuln_scan_runs", [])
+
+    @property
+    def recon_results(self) -> list[dict]:
+        """Recon entries from adapter state."""
+        return self._module_report_state.get("reconnaissance", {}).get("recon_results", [])
+
+    @property
+    def fuzz_runs(self) -> list[dict]:
+        """Fuzz run envelopes from adapter state."""
+        return self._module_report_state.get("fuzzing", {}).get("fuzz_runs", [])
 
     def _all_module_executions(self) -> list[dict]:
         executions: list[dict] = []
@@ -372,13 +400,21 @@ class ReportGenerator:
         return executions
 
     def _module_json_section(self, module: str) -> dict:
-        return _REPORT_ADAPTER_MAP[module].build_json_section(self._module_report_state.get(module, {}))
+        adapter = _REPORT_ADAPTER_MAP.get(module)
+        if adapter is None:
+            logger.warning("No report adapter registered for module %r; skipping", module)
+            return {}
+        return adapter.build_json_section(self._module_report_state.get(module, {}))
 
     def _render_module_html(self, module: str, *, state_keys: tuple[str, ...]) -> str:
         adapter_state = self._module_report_state.get(module, {})
         if not any(adapter_state.get(key) for key in state_keys):
             return ""
-        return render_sections(_REPORT_ADAPTER_MAP[module].build_sections(adapter_state))
+        adapter = _REPORT_ADAPTER_MAP.get(module)
+        if adapter is None:
+            logger.warning("No report adapter registered for module %r; skipping", module)
+            return ""
+        return render_sections(adapter.build_sections(adapter_state))
 
     def _data_operations(self, family: str | None = None) -> list[dict]:
         operations = list(self._module_report_state.get("data", {}).get("data_operations", []))
@@ -388,7 +424,7 @@ class ReportGenerator:
 
     def _fuzz_adapter_state(self) -> dict:
         """Return the fuzz adapter report state (single source of truth for fuzz data)."""
-        return self._module_report_state.get("fuzz", {})
+        return self._module_report_state.get("fuzzing", {})
 
     @property
     def _fuzz_crashes(self) -> list[dict]:
@@ -425,10 +461,6 @@ class ReportGenerator:
     def _fuzz_corpus_stats(self) -> dict:
         return self._fuzz_adapter_state().get("corpus_stats", {})
 
-    @property
-    def _fuzz_evidence_files(self) -> list:
-        return self._fuzz_adapter_state().get("evidence_files", [])
-
     def _ingest_standardized_envelope(self, envelope: dict) -> bool:
         for adapter in REPORT_ADAPTERS:
             if adapter.accepts(envelope):
@@ -437,36 +469,24 @@ class ReportGenerator:
         return False
 
     def add_run_envelope(self, envelope: dict) -> bool:
-        """Ingest a standardized module run envelope."""
+        """Ingest a standardized module run envelope.
+
+        Dispatches by adapter acceptance, not by hardcoded module names.
+        This allows plugin modules to have their envelopes processed correctly.
+        """
         if not isinstance(envelope, dict):
             return False
         schema = str(envelope.get("schema", ""))
         if not schema.startswith("blue_tap.") or not schema.endswith(".result"):
             return False
 
-        module = envelope.get("module")
-        if module == "scan":
-            self.scan_runs.append(envelope)
-            self.scan_results.extend(envelope.get("module_data", {}).get("devices", []))
-        elif module == "vulnscan":
-            self.vuln_scan_runs.append(envelope)
-            self.vuln_findings.extend(envelope.get("module_data", {}).get("findings", []))
-        elif module in {"attack", "data", "audio", "dos", "spoof", "firmware", "auto", "playbook", "lmp_capture"}:
-            # Fully adapter-managed modules do not need legacy instance vars.
-            ...
-        elif module == "fuzz":
-            self.fuzz_runs.append(envelope)
-            # All fuzz data is handled by FuzzReportAdapter via _ingest_standardized_envelope below.
-        elif module == "recon":
-            module_data = envelope.get("module_data", {})
-            entries = module_data.get("entries", [])
-            if isinstance(entries, list):
-                self.recon_results.extend(entries)
-        else:
-            return False
+        # Dispatch to the first adapter that accepts this envelope
+        ingested = self._ingest_standardized_envelope(envelope)
 
-        self._ingest_standardized_envelope(envelope)
-        return True
+        if not ingested:
+            logger.debug("No report adapter accepted envelope for module %r", envelope.get("module"))
+
+        return ingested
 
     # ------------------------------------------------------------------
     # Data intake
@@ -653,7 +673,7 @@ class ReportGenerator:
             (f"{crash_count}", "Fuzz Crashes"),
             (f"{packets:,}", "Fuzz Test Cases"),
             (f"{data_exfil}", "Data Sets Exfiltrated"),
-            (f"{len(self._module_report_state.get('dos', {}).get('dos_executions', []))}", "DoS Tests"),
+            (f"{len(self._module_report_state.get('exploitation.dos', {}).get('dos_executions', []))}", "DoS Tests"),
         ]:
             s.append(f'<div class="metric-card">'
                      f'<div class="value">{val}</div>'
@@ -777,43 +797,43 @@ class ReportGenerator:
         return "\n".join(s)
 
     def _build_scan_html(self) -> str:
-        adapter_state = self._module_report_state.get("scan", {})
-        if adapter_state.get("scan_runs"):
-            sections = _REPORT_ADAPTER_MAP["scan"].build_sections(adapter_state)
-            return render_sections(sections)
-        return ""
+        return self._render_module_html("discovery", state_keys=("scan_runs",))
 
     def _build_vuln_html(self) -> str:
-        adapter_state = self._module_report_state.get("vulnscan", {})
-        if adapter_state.get("vuln_scan_runs"):
-            sections = _REPORT_ADAPTER_MAP["vulnscan"].build_sections(adapter_state)
-            return render_sections(sections)
-        return ""
+        return self._render_module_html("assessment", state_keys=("vuln_scan_runs",))
 
     def _build_attack_html(self) -> str:
-        return self._render_module_html("attack", state_keys=("runs", "attack_runs"))
+        return self._render_module_html("exploitation", state_keys=("runs", "attack_runs"))
 
     def _build_recon_html(self) -> str:
-        adapter_state = self._module_report_state.get("recon", {})
-        if adapter_state.get("recon_runs"):
-            sections = _REPORT_ADAPTER_MAP["recon"].build_sections(adapter_state)
-            return render_sections(sections)
-        return ""
+        return self._render_module_html("reconnaissance", state_keys=("recon_runs",))
 
     def _build_dos_html(self) -> str:
-        return self._render_module_html("dos", state_keys=("dos_runs",))
-
-    def _build_pbap_html(self) -> str:
-        return ""
-
-    def _build_map_html(self) -> str:
-        return ""
+        return self._render_module_html("exploitation.dos", state_keys=("dos_runs",))
 
     def _build_data_ops_html(self) -> str:
         return self._render_module_html("data", state_keys=("runs", "data_runs"))
 
     def _build_audio_html(self) -> str:
         return self._render_module_html("audio", state_keys=("runs", "audio_runs"))
+
+    def _render_all_adapter_sections(self, *, skip_modules: tuple[str, ...] = ()) -> str:
+        """Render module sections from all adapters that have data.
+
+        Skips modules in skip_modules tuple (for backward compatibility where
+        we want to render specific modules in a specific order).
+        """
+        parts = []
+        for adapter in REPORT_ADAPTERS:
+            if adapter.module in skip_modules:
+                continue
+            state = self._module_report_state.get(adapter.module, {})
+            if not state:
+                continue
+            sections = adapter.build_sections(state)
+            if sections:
+                parts.append(render_sections(sections))
+        return "\n".join(parts)
 
     def _build_appendix_html(self) -> str:
         if not self.notes:
@@ -843,11 +863,11 @@ class ReportGenerator:
             toc_entries.append(("sec-devices", "Discovered Devices"))
         if self.vuln_findings:
             toc_entries.append(("sec-vulnerabilities", "Vulnerability Findings"))
-        if self._module_report_state.get("attack", {}).get("runs") or self._module_report_state.get("attack", {}).get("attack_runs"):
+        if self._module_report_state.get("exploitation", {}).get("runs") or self._module_report_state.get("exploitation", {}).get("attack_runs"):
             toc_entries.append(("sec-attack-ops", "Attack Operation Runs"))
         if self._module_report_state.get("auto", {}).get("auto_runs"):
             toc_entries.append(("sec-auto-pentest", "Automated Pentest Workflow"))
-        fuzz_state = self._module_report_state.get("fuzz", {})
+        fuzz_state = self._module_report_state.get("fuzzing", {})
         if fuzz_state.get("fuzz_runs"):
             toc_entries.append(("sec-fuzzing", "Fuzzing Campaign Results"))
         has_fuzz_intel = any([
@@ -860,9 +880,9 @@ class ReportGenerator:
             toc_entries.append(("sec-fuzz-intel", "Fuzzing Intelligence Analysis"))
         if self._module_report_state.get("lmp_capture", {}).get("lmp_captures"):
             toc_entries.append(("sec-lmp", "LMP Capture Analysis"))
-        if self.recon_results or self._module_report_state.get("recon", {}).get("recon_runs"):
+        if self.recon_results or self._module_report_state.get("reconnaissance", {}).get("recon_runs"):
             toc_entries.append(("sec-recon", "Reconnaissance Results"))
-        if self._module_report_state.get("dos", {}).get("dos_runs"):
+        if self._module_report_state.get("exploitation.dos", {}).get("dos_runs"):
             toc_entries.append(("sec-dos", "Denial of Service Tests"))
         if self._module_report_state.get("data", {}).get("runs") or self._module_report_state.get("data", {}).get("data_runs"):
             toc_entries.append(("sec-data-ops", "Data Extraction Operations"))
@@ -881,23 +901,15 @@ class ReportGenerator:
             self._build_scan_html(),
             self._build_vuln_html(),
             self._build_attack_html(),
-            self._render_module_html("auto", state_keys=("auto_runs",)),
-        ]
-        body_parts.append(self._render_module_html("fuzz", state_keys=("fuzz_runs",)))
-        body_parts.append(self._render_module_html("lmp_capture", state_keys=("lmp_captures",)))
-        body_parts.extend([
-            self._build_recon_html(),
-            self._build_dos_html(),
-            self._build_data_ops_html(),
-            self._build_pbap_html(),
-            self._build_map_html(),
-            self._build_audio_html(),
+            # Render all other adapter-managed sections (including plugins)
+            # Skip modules that have dedicated build methods above
+            self._render_all_adapter_sections(skip_modules=("discovery", "assessment", "exploitation")),
             self._build_appendix_html(),
             '</div>',  # close .report-body
             f'<div class="footer">Blue-Tap v{_esc(__version__)} | '
             f'Report generated {datetime.now().strftime("%Y-%m-%d %H:%M:%S")} | '
             f'CONFIDENTIAL</div>',
-        ])
+        ]
 
         content = "\n".join(p for p in body_parts if p)
         html = _HTML_TEMPLATE.replace("{css}", _CSS).replace("{content}", content)
@@ -988,16 +1000,8 @@ class ReportGenerator:
             },
             "timeline": timeline,
             "modules": {
-                "scan": self._module_json_section("scan"),
-                "vulnscan": self._module_json_section("vulnscan"),
-                "attack": self._module_json_section("attack"),
-                "auto": self._module_json_section("auto"),
-                "data": self._module_json_section("data"),
-                "audio": self._module_json_section("audio"),
-                "dos": self._module_json_section("dos"),
-                "fuzz": self._module_json_section("fuzz"),
-                "lmp_capture": self._module_json_section("lmp_capture"),
-                "recon": self._module_json_section("recon"),
+                adapter.module: self._module_json_section(adapter.module)
+                for adapter in REPORT_ADAPTERS
             },
             "executions": self._all_module_executions(),
             "scan_results": self.scan_results,
@@ -1008,7 +1012,7 @@ class ReportGenerator:
             "fuzzing": (
                 fuzz_data
                 if fuzz_data
-                else self._module_json_section("fuzz").get("results", [])
+                else self._module_json_section("fuzzing").get("results", [])
             ),
             "fuzz_runs": self.fuzz_runs,
             "fuzzing_intelligence": {
