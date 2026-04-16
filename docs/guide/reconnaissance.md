@@ -1,6 +1,6 @@
 # Reconnaissance
 
-**Modules:** 13 total (7 CLI-exposed, 6 internal)
+**Modules:** 13 total (12 CLI-exposed, 1 internal)
 
 All reconnaissance probes are **non-intrusive** and require **no pairing**.
 
@@ -21,6 +21,11 @@ The findings from reconnaissance directly inform which vulnerability checks and 
 | `recon TARGET fingerprint` | `reconnaissance.fingerprint` | Device identification | --- |
 | `recon TARGET capture` | `reconnaissance.hci_capture` | HCI packet capture | `-d` duration, `-o` output |
 | `recon TARGET sniff` | `reconnaissance.sniffer` | Passive BT sniffing | `-m` mode, `-d` duration, `-o` output |
+| `recon TARGET auto` | `reconnaissance.campaign` | Full recon campaign — all applicable probes | --- |
+| `recon TARGET capabilities` | `reconnaissance.capability_detector` | Supported profiles, transports, features | --- |
+| `recon TARGET analyze` | `reconnaissance.capture_analysis` | Pcap protocol breakdown, anomalies | `--pcap` (file path) |
+| `recon TARGET correlate` | `reconnaissance.correlation` | Cross-probe correlation, unified profile | --- |
+| `recon TARGET interpret` | `reconnaissance.spec_interpretation` | BT spec data — flags, versions, class codes | --- |
 
 ---
 
@@ -227,7 +232,7 @@ blue-tap recon 4C:4F:EE:17:3A:89 fingerprint
     ```
 
 !!! info "Why Fingerprinting Matters"
-    The fingerprint output directly informs your vulnerability assessment strategy. In the example above, the target lacks Secure Connections support, which means KNOB (CVE-2019-9506) and BIAS (CVE-2020-10135) are likely viable. The "Linux/BlueZ stack" inference tells you to prioritize BlueZ-specific CVEs. Without fingerprinting, you would run all 21 CVE checks blindly; with it, you can focus on the most likely hits.
+    The fingerprint output directly informs your vulnerability assessment strategy. In the example above, the target lacks Secure Connections support, which means KNOB (CVE-2019-9506) and BIAS (CVE-2020-10135) are likely viable. The "Linux/BlueZ stack" inference tells you to prioritize BlueZ-specific CVEs. Without fingerprinting, you would run all 25 CVE checks blindly; with it, you can focus on the most likely hits.
 
 ### HCI Capture
 
@@ -263,23 +268,160 @@ blue-tap recon 4C:4F:EE:17:3A:89 sniff -m ble -d 60 -o sniff.pcap
 !!! warning "LMP Sniffing"
     The `lmp` and `combined` modes require a DarkFirmware-patched RTL8761B dongle. Standard HCI adapters cannot capture LMP frames because they are handled below the HCI layer by the controller firmware. See the DarkFirmware documentation for setup instructions.
 
+### Auto Campaign
+
+Orchestrates a full reconnaissance campaign across all applicable probes for the target. The campaign module determines which probes to run based on the target type (Classic, BLE, or dual-mode) and skips probes that do not apply. This is the fastest way to get comprehensive recon without specifying individual probes.
+
+```bash
+blue-tap recon 4C:4F:EE:17:3A:89 auto
+```
+
+!!! example "Auto campaign output"
+    ```
+    $ sudo blue-tap recon 4C:4F:EE:17:3A:89 auto
+    Session: blue-tap_20260416_145000
+
+    ── Recon Campaign (4C:4F:EE:17:3A:89) ─────────────────────────────────────────
+
+    [1/7] SDP enumeration...              6 services found
+    [2/7] L2CAP PSM scan...              8 PSMs open
+    [3/7] RFCOMM channel scan...         6 channels open
+    [4/7] Device fingerprint...          Harman IVI (BT 5.0, BlueZ)
+    [5/7] Capability detection...        14 profiles, dual-mode
+    [6/7] Finding correlation...         3 hidden services identified
+    [7/7] Spec interpretation...         2 security concerns flagged
+
+    Campaign complete: 7/7 probes executed
+    ```
+
+### Capability Detection
+
+Detects the target's full capability set by combining information from SDP, GATT, LMP feature pages, and advertisement data. Produces a unified profile of supported Bluetooth profiles, transports, and security features.
+
+```bash
+blue-tap recon 4C:4F:EE:17:3A:89 capabilities
+```
+
+!!! example "Capability detection output"
+    ```
+    $ sudo blue-tap recon 4C:4F:EE:17:3A:89 capabilities
+    Session: blue-tap_20260416_145200
+
+    ── Capabilities (4C:4F:EE:17:3A:89) ────────────────────────────────────────────
+
+    Transport:       Dual-mode (Classic + BLE)
+    Profiles:        A2DP, AVRCP, HFP, PBAP, MAP, OPP, PAN, SPP
+    Security:        SSP supported, Secure Connections NOT supported
+    Encryption:      E0 (legacy), AES-CCM not available
+    BLE Features:    GATT, GAP, Device Information
+    LMP Version:     5.0
+
+    Security Assessment:
+      [!] No Secure Connections — KNOB, BIAS viable
+      [!] Legacy encryption only — downgrade attacks possible
+      [i] 8 profiles exposed — large attack surface
+    ```
+
+### Capture Analysis
+
+Analyzes a previously captured pcap/btsnoop file for protocol breakdown, anomalies, and key events. Useful for post-hoc analysis of HCI captures taken during other operations.
+
+```bash
+blue-tap recon 4C:4F:EE:17:3A:89 analyze --pcap capture.btsnoop
+```
+
+!!! example "Capture analysis output"
+    ```
+    $ sudo blue-tap recon 4C:4F:EE:17:3A:89 analyze --pcap capture.btsnoop
+    Session: blue-tap_20260416_145400
+
+    ── Capture Analysis (capture.btsnoop) ──────────────────────────────────────────
+
+    Duration:        00:02:34
+    Packets:         1,847
+    Protocols:       HCI (1847), L2CAP (1203), SDP (89), RFCOMM (412)
+
+    Key Events:
+      00:00:02  Connection established (handle 0x0040)
+      00:00:03  Authentication started (SSP)
+      00:00:04  Encryption enabled (E0, key_size=16)
+      00:01:12  PBAP session opened (RFCOMM ch 15)
+      00:02:30  Disconnection (reason: 0x13)
+
+    Anomalies:
+      [!] Encryption key size negotiation: target accepted key_size=7
+      [i] 3 retransmissions on L2CAP channel 0x0040
+    ```
+
+### Finding Correlation
+
+Correlates findings from multiple reconnaissance probes into a unified target profile. Cross-references SDP services with L2CAP PSMs and RFCOMM channels to identify hidden services, inconsistencies, and additional attack surface not visible from any single probe.
+
+```bash
+blue-tap recon 4C:4F:EE:17:3A:89 correlate
+```
+
+!!! example "Correlation output"
+    ```
+    $ sudo blue-tap recon 4C:4F:EE:17:3A:89 correlate
+    Session: blue-tap_20260416_145600
+
+    ── Finding Correlation (4C:4F:EE:17:3A:89) ─────────────────────────────────────
+
+    Cross-Reference Results:
+      RFCOMM ch 22 — open but NOT in SDP (hidden service)
+      L2CAP PSM 4113 — open but NOT in SDP (vendor-specific)
+      SDP advertises HFP on ch 2 — confirmed open via RFCOMM scan
+
+    Unified Attack Surface:
+      Known services:     6 (SDP-advertised, channel-confirmed)
+      Hidden services:    2 (channel open, no SDP record)
+      BLE services:       4 (GATT-enumerated)
+      Total endpoints:   12
+    ```
+
+### Spec Interpretation
+
+Interprets raw Bluetooth specification data — LMP feature flags, version strings, Class of Device codes, and capability bits — into human-readable security assessments. Translates protocol-level observations into actionable findings.
+
+```bash
+blue-tap recon 4C:4F:EE:17:3A:89 interpret
+```
+
+!!! example "Spec interpretation output"
+    ```
+    $ sudo blue-tap recon 4C:4F:EE:17:3A:89 interpret
+    Session: blue-tap_20260416_145800
+
+    ── Spec Interpretation (4C:4F:EE:17:3A:89) ─────────────────────────────────────
+
+    LMP Features Page 0:
+      Bit 0x01 (3-slot packets):         Supported
+      Bit 0x08 (Encryption):             Supported
+      Bit 0x40 (SSP Controller):         Supported
+      Bit 0x100 (LE Supported):          Supported
+      Bit 0x200 (Secure Connections):    NOT Supported ← security gap
+
+    Version Interpretation:
+      LMP 5.0 → Bluetooth 5.0 (2016 spec)
+      Missing: Secure Connections Host Support (added in BT 4.1)
+
+    Class of Device (0x200424):
+      Major: Audio/Video (0x04)
+      Minor: Car Audio (0x08)
+      Services: Audio (bit 21)
+      Assessment: IVI system — high-value target
+    ```
+
 ---
 
 ## Internal Modules
 
-These modules are not directly exposed via CLI commands but are used by automated workflows (`auto`, playbooks) and other modules.
+These modules are not directly exposed via CLI commands but are used by automated workflows.
 
 | Module ID | Purpose |
 |-----------|---------|
-| `reconnaissance.capability_detector` | Detects target capabilities from combined recon data |
-| `reconnaissance.correlation` | Correlates findings across multiple recon probes |
-| `reconnaissance.capture_analysis` | Analyzes captured packets for protocol insights |
 | `reconnaissance.prerequisites` | Checks whether recon prerequisites are met for a target |
-| `reconnaissance.spec_interpretation` | Interprets BT spec compliance from observed behavior |
-| `reconnaissance.campaign` | Orchestrates a full recon campaign across all probes |
-
-!!! info "Recon Campaign"
-    The `auto` command and `recon-all` playbook use `reconnaissance.campaign` to run all applicable probes in sequence. The campaign module determines which probes to run based on the target type (Classic, BLE, or dual-mode) and skips probes that do not apply.
 
 ---
 
@@ -314,6 +456,13 @@ sudo blue-tap recon 4C:4F:EE:17:3A:89 rfcomm
 
 # 3. Device identification --- determine stack, version, capabilities
 sudo blue-tap recon 4C:4F:EE:17:3A:89 fingerprint
+sudo blue-tap recon 4C:4F:EE:17:3A:89 capabilities
+
+# 4. Correlate all findings into unified profile
+sudo blue-tap recon 4C:4F:EE:17:3A:89 correlate
+
+# Or run everything at once:
+sudo blue-tap recon 4C:4F:EE:17:3A:89 auto
 ```
 
 For a BLE target:

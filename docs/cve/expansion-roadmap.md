@@ -1,6 +1,6 @@
 # CVE Expansion Roadmap
 
-Current coverage: **21 CVEs in vulnscan** (behavioral + compliance) and **10 CVE-backed DoS checks**, plus heuristic detection for BrakTooth, KNOB, BIAS, BLUFFS, BLURtooth, BlueBorne, PerfektBlue, PIN bypass, and Invalid Curve.
+Current coverage: **25 CVEs in vulnscan** (behavioral + compliance) and **9 CVE-backed DoS checks**, plus heuristic detection for BrakTooth, KNOB, BIAS, BLUFFS, BLURtooth, BlueBorne, PerfektBlue, PIN bypass, and Invalid Curve.
 
 This document organizes the remaining detection candidates by tier, priority, and detection strategy.
 
@@ -246,9 +246,9 @@ These round out coverage for niche targets or require hardware capabilities not 
 
 | Category | Count |
 |----------|-------|
-| Currently detected (vulnscan behavioral + compliance) | 21 CVEs |
+| Currently detected (vulnscan behavioral + compliance) | 25 CVEs |
 | Currently detected (heuristic / version-based) | ~17 CVEs |
-| Currently detected (DoS module) | 10 CVEs |
+| Currently detected (DoS module) | 9 CVEs |
 | Expansion candidates | ~42 additional CVEs |
 | **Projected total after full expansion** | **~79 CVEs** |
 

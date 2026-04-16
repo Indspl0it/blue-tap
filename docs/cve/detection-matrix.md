@@ -29,14 +29,14 @@ L2CAP (Logical Link Control and Adaptation Protocol) is the multiplexing layer t
 
 ??? tip "How to run L2CAP checks"
     ```bash
-    # Run all L2CAP behavioral checks
-    blue-tap vulnscan TARGET --category l2cap
-
-    # Run a specific CVE check
-    blue-tap vulnscan TARGET --checks cve_2019_3459
+    # Run a specific L2CAP CVE check
+    blue-tap vulnscan TARGET --cve CVE-2019-3459
 
     # BlueFrag requires a DarkFirmware adapter
-    blue-tap vulnscan TARGET --checks cve_2020_0022 -i hci1
+    blue-tap vulnscan TARGET --cve CVE-2020-0022 -a hci1
+
+    # Run all checks (includes L2CAP)
+    blue-tap vulnscan TARGET
     ```
 
 ### BNEP Protocol Family
@@ -50,11 +50,11 @@ BNEP (Bluetooth Network Encapsulation Protocol) carries Ethernet frames over Blu
 
 ??? tip "How to run BNEP checks"
     ```bash
-    # Run all BNEP checks
-    blue-tap vulnscan TARGET --category bnep
+    # Run a specific BNEP CVE check (covers 4 related CVEs)
+    blue-tap vulnscan TARGET --cve CVE-2017-13258
 
-    # The BNEP info leak probe covers 4 CVEs in a single check
-    blue-tap vulnscan TARGET --checks cve_2017_13258
+    # BlueBorne BNEP heap overflow
+    blue-tap vulnscan TARGET --cve CVE-2017-0783
     ```
 
 ### SDP Protocol Family
@@ -67,7 +67,7 @@ SDP (Service Discovery Protocol) is how Bluetooth devices advertise and discover
 
 ??? tip "How to run SDP checks"
     ```bash
-    blue-tap vulnscan TARGET --checks cve_2017_0785
+    blue-tap vulnscan TARGET --cve CVE-2017-0785
     ```
 
 ### AVRCP Protocol Family
@@ -80,7 +80,7 @@ AVRCP (Audio/Video Remote Control Profile) controls media playback over Bluetoot
 
 ??? tip "How to run AVRCP checks"
     ```bash
-    blue-tap vulnscan TARGET --checks cve_2022_39176
+    blue-tap vulnscan TARGET --cve CVE-2022-39176
     ```
 
 ### HID Protocol Family
@@ -93,7 +93,7 @@ HID (Human Interface Device) profile enables keyboards, mice, and game controlle
 
 ??? tip "How to run HID checks"
     ```bash
-    blue-tap vulnscan TARGET --checks cve_2020_0556
+    blue-tap vulnscan TARGET --cve CVE-2020-0556
     ```
 
 ### Pairing Protocol Family
@@ -109,10 +109,10 @@ Pairing is the mechanism by which Bluetooth devices establish trust and derive e
 ??? tip "How to run pairing checks"
     ```bash
     # These checks initiate pairing -- the target user may see a prompt
-    blue-tap vulnscan TARGET --category pairing
+    blue-tap vulnscan TARGET --cve CVE-2019-2225
 
-    # Run with explicit pairing consent
-    blue-tap vulnscan TARGET --checks cve_2019_2225 --allow-pairing
+    # Run with active checks enabled
+    blue-tap vulnscan TARGET --cve CVE-2020-26558 --active --yes
     ```
 
 ### BLE SMP Family
@@ -125,7 +125,7 @@ SMP (Security Manager Protocol) handles pairing and key distribution for BLE (Bl
 
 ??? tip "How to run BLE SMP checks"
     ```bash
-    blue-tap vulnscan TARGET --checks cve_2024_34722
+    blue-tap vulnscan TARGET --cve CVE-2024-34722
     ```
 
 ### Vendor-Specific: Airoha
@@ -140,7 +140,9 @@ Airoha is a MediaTek subsidiary whose Bluetooth chipsets are found in many TWS (
 
 ??? tip "How to run Airoha checks"
     ```bash
-    blue-tap vulnscan TARGET --checks cve_2025_20700,cve_2025_20701,cve_2025_20702
+    blue-tap vulnscan TARGET --cve CVE-2025-20700
+    blue-tap vulnscan TARGET --cve CVE-2025-20701
+    blue-tap vulnscan TARGET --cve CVE-2025-20702
     ```
 
 ### Raw ACL
@@ -171,14 +173,11 @@ Checks whether the target correctly rejects invalid inputs per the Bluetooth spe
 
 ??? tip "How to run compliance checks"
     ```bash
-    # Run all compliance checks
-    blue-tap vulnscan TARGET --mode compliance
-
-    # Run all checks (behavioral + compliance)
+    # Run all checks (behavioral + compliance + posture)
     blue-tap vulnscan TARGET
 
     # Run a specific compliance check
-    blue-tap vulnscan TARGET --checks cve_2023_45866
+    blue-tap vulnscan TARGET --cve CVE-2023-45866
     ```
 
 ---
@@ -203,14 +202,11 @@ These posture assessment checks do not map to specific CVEs but reveal security-
 
 ??? tip "How to run posture checks"
     ```bash
-    # Run all non-CVE posture checks
-    blue-tap vulnscan TARGET --mode posture
+    # Run all checks (includes posture checks)
+    blue-tap vulnscan TARGET
 
-    # Run RFCOMM-specific checks
-    blue-tap vulnscan TARGET --category rfcomm
-
-    # Run a specific non-CVE check
-    blue-tap vulnscan TARGET --checks service_exposure
+    # Enable active (intrusive) posture checks
+    blue-tap vulnscan TARGET --active --yes
     ```
 
 ---
@@ -237,6 +233,115 @@ Source file locations within `blue_tap/modules/assessment/checks/`:
 
 ---
 
+## Complete CVE Cross-Reference
+
+Every CVE covered by Blue-Tap across all module families. Some CVEs appear in multiple modules (e.g., CVE-2020-0022 has both a detection check and a DoS crash probe).
+
+### Assessment (Vulnerability Scanner) — 25 checks
+
+These run via `blue-tap vulnscan TARGET`. Non-intrusive by default.
+
+| CVE | Name | Protocol | Detection | CLI |
+|-----|------|----------|-----------|-----|
+| CVE-2017-0783 | BlueBorne BNEP Role Swap | BNEP | Behavioral | `vulnscan TARGET --cve CVE-2017-0783` |
+| CVE-2017-0785 | BlueBorne SDP Info Leak | SDP | Behavioral | `vulnscan TARGET --cve CVE-2017-0785` |
+| CVE-2017-13258 | BNEP Extension Header Leak | BNEP | Behavioral | `vulnscan TARGET --cve CVE-2017-13258` |
+| CVE-2018-9359 | Android L2CAP Heap Jitter | L2CAP | Behavioral | `vulnscan TARGET --cve CVE-2018-9359` |
+| CVE-2018-9365 | SMP Cross-Transport OOB | BLE SMP | Compliance | `vulnscan TARGET --cve CVE-2018-9365` |
+| CVE-2019-2225 | JustWorks Silent Pairing | Pairing | Behavioral | `vulnscan TARGET --cve CVE-2019-2225` |
+| CVE-2019-3459 | L2CAP MTU Info Leak | L2CAP | Behavioral | `vulnscan TARGET --cve CVE-2019-3459` |
+| CVE-2020-0022 | BlueFrag ACL Boundary | Raw ACL | Behavioral | `vulnscan TARGET --cve CVE-2020-0022` |
+| CVE-2020-0556 | HID/HOGP Unauthenticated | HID | Behavioral | `vulnscan TARGET --cve CVE-2020-0556` |
+| CVE-2020-12352 | BadChoice A2MP Heap Leak | L2CAP/A2MP | Behavioral | `vulnscan TARGET --cve CVE-2020-12352` |
+| CVE-2020-26558 | Passkey Reflected Public Key | Pairing | Behavioral | `vulnscan TARGET --cve CVE-2020-26558` |
+| CVE-2021-0507 | AVRCP Event ID OOB | AVRCP | Compliance | `vulnscan TARGET --cve CVE-2021-0507` |
+| CVE-2022-0204 | BlueZ GATT Heap Overflow | GATT | Compliance | `vulnscan TARGET --cve CVE-2022-0204` |
+| CVE-2022-20345 | eCred 6-CID Overflow | BLE L2CAP | Compliance | `vulnscan TARGET --cve CVE-2022-20345` |
+| CVE-2022-25837 | SSP Method Confusion | Pairing | Behavioral | `vulnscan TARGET --cve CVE-2022-25837` |
+| CVE-2022-39176 | AVRCP GetCapabilities Leak | AVRCP | Behavioral | `vulnscan TARGET --cve CVE-2022-39176` |
+| CVE-2022-42895 | L2CAP EFS Info Leak | L2CAP | Behavioral | `vulnscan TARGET --cve CVE-2022-42895` |
+| CVE-2022-42896 | LE Credit PSM Zero UAF | BLE L2CAP | Compliance | `vulnscan TARGET --cve CVE-2022-42896` |
+| CVE-2023-35681 | EATT Integer Overflow | GATT | Compliance | `vulnscan TARGET --cve CVE-2023-35681` |
+| CVE-2023-45866 | HOGP Pre-Auth HID Write | HID | Compliance | `vulnscan TARGET --cve CVE-2023-45866` |
+| CVE-2024-34722 | BLE Legacy Pairing Bypass | BLE SMP | Behavioral | `vulnscan TARGET --cve CVE-2024-34722` |
+| CVE-2025-20700 | Airoha GATT RACE Auth Bypass | BLE GATT | Behavioral | `vulnscan TARGET --cve CVE-2025-20700` |
+| CVE-2025-20701 | Airoha BR/EDR RACE Auth Bypass | RFCOMM | Behavioral | `vulnscan TARGET --cve CVE-2025-20701` |
+| CVE-2025-20702 | Airoha RACE Link-Key Extraction | Airoha | Behavioral | `vulnscan TARGET --cve CVE-2025-20702` |
+| CVE-2026-23395 | eCred Duplicate Identifier | BLE L2CAP | Compliance | `vulnscan TARGET --cve CVE-2026-23395` |
+
+### Exploitation — 4 attacks
+
+Active attacks via `blue-tap exploit TARGET <command>`. Intrusive; require `--yes`.
+
+| CVE | Name | Attack | DarkFirmware | CLI |
+|-----|------|--------|:------------:|-----|
+| CVE-2019-9506 | KNOB Key Negotiation | Downgrade encryption key to 1 byte | Yes | `exploit TARGET knob` |
+| CVE-2020-10135 | BIAS Impersonation | Role-switch authentication bypass | Yes | `exploit TARGET bias PHONE` |
+| CVE-2020-15802 | BLURtooth CTKD | Cross-transport key overwrite | Yes | `exploit TARGET ctkd` |
+| CVE-2023-24023 | BLUFFS Session Key | Session key derivation downgrade | Yes | `exploit TARGET bluffs` |
+
+### Denial of Service — 9 CVE-backed crash probes
+
+Intrusive checks via `blue-tap dos TARGET --checks <id>`. See the [DoS Matrix](dos-matrix.md) for the full 30-check battery including 21 protocol stress tests.
+
+| CVE | Name | Protocol | Severity | CLI |
+|-----|------|----------|----------|-----|
+| CVE-2017-0781 | BlueBorne BNEP Heap Overflow | BNEP | Critical | `dos TARGET --checks dos_cve_2017_0781_bnep_heap` |
+| CVE-2017-0782 | BlueBorne BNEP Underflow | BNEP | Critical | `dos TARGET --checks dos_cve_2017_0782_bnep_underflow` |
+| CVE-2019-19192 | SweynTooth ATT Deadlock | BLE ATT | High | `dos TARGET --checks dos_cve_2019_19192_att_deadlock` |
+| CVE-2019-19196 | SweynTooth SMP Key Overflow | BLE SMP | High | `dos TARGET --checks dos_cve_2019_19196_key_size` |
+| CVE-2020-0022 | BlueFrag ACL Crash | Raw ACL | Critical | `dos TARGET --checks dos_cve_2020_0022_bluefrag` |
+| CVE-2022-39177 | AVDTP SETCONF Crash | AVDTP | High | `dos TARGET --checks dos_cve_2022_39177_avdtp_setconf` |
+| CVE-2023-27349 | AVRCP Event OOB Crash | AVRCP | Critical | `dos TARGET --checks dos_cve_2023_27349_avrcp_event` |
+| CVE-2025-0084 | SDP Double-Connection Race | SDP | High | `dos TARGET --checks dos_cve_2025_0084_sdp_race` |
+| CVE-2025-48593 | HFP Rapid Reconnect Race | HFP | High | `dos TARGET --checks dos_cve_2025_48593_hfp_reconnect` |
+
+### Cross-Module Summary
+
+| CVE | Vulnscan | Exploit | DoS | Notes |
+|-----|:--------:|:-------:|:---:|-------|
+| CVE-2017-0781 | | | x | DoS only — BNEP heap overflow crash probe |
+| CVE-2017-0782 | | | x | DoS only — BNEP underflow crash probe |
+| CVE-2017-0783 | x | | | Assessment only — behavioral role-swap detection |
+| CVE-2017-0785 | x | | | Assessment only — SDP continuation replay |
+| CVE-2017-13258 | x | | | Assessment only — covers 13258/13260/13261/13262 |
+| CVE-2018-9359 | x | | | Assessment only — covers 9359/9360/9361 |
+| CVE-2018-9365 | x | | | Assessment only — SMP cross-transport compliance |
+| CVE-2019-2225 | x | | | Assessment only — pairing required |
+| CVE-2019-3459 | x | | | Assessment only — L2CAP MTU jitter |
+| CVE-2019-9506 | | x | | Exploit only (KNOB) — DarkFirmware required |
+| CVE-2019-19192 | | | x | DoS only — SweynTooth ATT deadlock |
+| CVE-2019-19196 | | | x | DoS only — SweynTooth SMP key overflow |
+| CVE-2020-0022 | x | | x | **Both** — assessment detects, DoS confirms crash |
+| CVE-2020-0556 | x | | | Assessment only — HID unbonded connection |
+| CVE-2020-10135 | | x | | Exploit only (BIAS) — DarkFirmware required |
+| CVE-2020-12352 | x | | | Assessment only — A2MP heap jitter |
+| CVE-2020-15802 | | x | | Exploit only (CTKD) — DarkFirmware required |
+| CVE-2020-26558 | x | | | Assessment only — pairing required |
+| CVE-2021-0507 | x | | | Assessment only — AVRCP compliance |
+| CVE-2022-0204 | x | | | Assessment only — GATT compliance |
+| CVE-2022-20345 | x | | | Assessment only — eCred overflow compliance |
+| CVE-2022-25837 | x | | | Assessment only — pairing required |
+| CVE-2022-39176 | x | | | Assessment only — AVRCP heap jitter |
+| CVE-2022-39177 | | | x | DoS only — AVDTP SETCONF crash |
+| CVE-2022-42895 | x | | | Assessment only — L2CAP EFS jitter |
+| CVE-2022-42896 | x | | | Assessment only — LE PSM=0 compliance |
+| CVE-2023-24023 | | x | | Exploit only (BLUFFS) — DarkFirmware required |
+| CVE-2023-27349 | | | x | DoS only — AVRCP event OOB crash |
+| CVE-2023-35681 | x | | | Assessment only — EATT compliance |
+| CVE-2023-45866 | x | | | Assessment only — HOGP pre-auth write |
+| CVE-2024-34722 | x | | | Assessment only — BLE SMP bypass |
+| CVE-2025-0084 | | | x | DoS only — SDP race condition |
+| CVE-2025-20700 | x | | | Assessment only — Airoha GATT |
+| CVE-2025-20701 | x | | | Assessment only — Airoha BR/EDR |
+| CVE-2025-20702 | x | | | Assessment only — Airoha link-key |
+| CVE-2025-48593 | | | x | DoS only — HFP reconnect race |
+| CVE-2026-23395 | x | | | Assessment only — eCred duplicate ID |
+
+**Totals:** 37 unique CVEs — 25 in vulnscan, 4 in exploitation, 9 in DoS (1 overlaps vulnscan + DoS).
+
+---
+
 ## Finding Statuses
 
 | Status | Meaning |
@@ -251,33 +356,21 @@ Source file locations within `blue_tap/modules/assessment/checks/`:
 ## Quick Reference
 
 ```bash
-# Full vulnerability scan (all behavioral + compliance + posture checks)
-blue-tap vulnscan TARGET
+# Full vulnerability scan (all CVE + posture checks)
+sudo blue-tap vulnscan TARGET
 
-# List all available checks
-blue-tap vulnscan list
+# Specific CVE check
+sudo blue-tap vulnscan TARGET --cve CVE-2020-0022
 
-# Behavioral checks only
-blue-tap vulnscan TARGET --mode behavioral
+# Enable active (intrusive) checks
+sudo blue-tap vulnscan TARGET --active --yes
 
-# Compliance checks only
-blue-tap vulnscan TARGET --mode compliance
-
-# Posture checks only
-blue-tap vulnscan TARGET --mode posture
-
-# Specific protocol category
-blue-tap vulnscan TARGET --category l2cap
-
-# Specific CVE(s)
-blue-tap vulnscan TARGET --checks cve_2020_0022,cve_2022_42895
+# Provide phone address for impersonation checks
+sudo blue-tap vulnscan TARGET --phone 11:22:33:44:55:66
 
 # With explicit adapter
-blue-tap vulnscan TARGET -i hci0
+sudo blue-tap vulnscan TARGET -a hci0
 
 # With session logging
 blue-tap -s my-assessment vulnscan TARGET
-
-# JSON output for automation
-blue-tap vulnscan TARGET --json
 ```

@@ -133,20 +133,17 @@ Default recovery timeout: **180 seconds**. If the target does not recover within
 ## Usage
 
 ```bash
-# List all registered DoS checks
-blue-tap dos list
+# Run all applicable DoS checks
+sudo blue-tap dos TARGET --yes
 
-# Run full sequential battery
-blue-tap dos run <MAC>
+# Run specific checks
+sudo blue-tap dos TARGET --checks dos_cve_2020_0022_bluefrag,dos_cve_2022_39177_avdtp_setconf --yes
 
-# Run specific checks only
-blue-tap dos run <MAC> --checks cve_2020_0022_bluefrag,cve_2022_39177_avdtp_setconf
+# Custom recovery timeout
+sudo blue-tap dos TARGET --recovery-timeout 60 --yes
 
-# Single check with parameter override
-blue-tap dos check cve_2025_48593_hfp_reconnect <MAC> --set attempts=20
-
-# Single check on DarkFirmware adapter
-blue-tap dos check cve_2020_0022_bluefrag <MAC> -i hci1
+# With explicit adapter
+sudo blue-tap dos TARGET -a hci0 --yes
 ```
 
 ### Example Output
@@ -154,7 +151,7 @@ blue-tap dos check cve_2020_0022_bluefrag <MAC> -i hci1
 A typical DoS run produces output like this:
 
 ```
-$ sudo blue-tap dos run AA:BB:CC:DD:EE:FF
+$ sudo blue-tap dos AA:BB:CC:DD:EE:FF --yes
 
  DoS Assessment  Target: AA:BB:CC:DD:EE:FF  Adapter: hci0
  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

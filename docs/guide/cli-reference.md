@@ -12,9 +12,9 @@ Entry point: `blue-tap = blue_tap.interfaces.cli.main:main`
 Blue-Tap follows an **assessment workflow** that mirrors a real-world Bluetooth security engagement. Each command maps to a phase:
 
 ```
-discover  -->  recon  -->  vulnscan  -->  exploit  -->  extract  -->  report
-  Find         Enumerate     Scan for       Attack      Pull data    Generate
-  targets      services      vulns                                   findings
+discover  -->  recon  -->  vulnscan  -->  exploit  -->  dos  -->  extract  -->  fuzz  -->  report
+  Find         Enumerate     Scan for       Attack      Stress      Pull data    Protocol    Generate
+  targets      services      vulns                      test                     fuzzing     findings
 ```
 
 A typical engagement looks like this:
@@ -87,7 +87,7 @@ For details on scan modes, output fields, and dual-mode correlation, see the [Di
 Deep reconnaissance against a specific target. Run this after discovery to enumerate what services, channels, and capabilities the target exposes.
 
 ```bash
-blue-tap recon TARGET [sdp|gatt|l2cap|rfcomm|fingerprint|capture|sniff]
+blue-tap recon TARGET [sdp|gatt|l2cap|rfcomm|fingerprint|capture|sniff|auto|capabilities|analyze|correlate|interpret]
 ```
 
 === "sdp"
@@ -129,11 +129,30 @@ blue-tap recon TARGET [sdp|gatt|l2cap|rfcomm|fingerprint|capture|sniff]
     | `-d, --duration` | --- | Capture duration |
     | `-o, --output` | --- | Output file path |
 
+=== "auto"
+    Run all reconnaissance collectors against the target. The campaign module determines which probes to run based on target type.
+
+=== "capabilities"
+    Detect target capabilities — supported profiles, transports, and features. No additional options.
+
+=== "analyze"
+    Analyze a captured pcap file for protocol breakdown and anomalies.
+
+    | Option | Default | Description |
+    |--------|---------|-------------|
+    | `--pcap` | latest capture | Path to pcap file |
+
+=== "correlate"
+    Correlate findings from multiple collectors into a unified profile. No additional options.
+
+=== "interpret"
+    Interpret Bluetooth spec data — feature flags, version strings, class codes. No additional options.
+
 For probe details, example output, and security implications, see the [Reconnaissance guide](reconnaissance.md).
 
 ### vulnscan
 
-Vulnerability assessment against a target. Runs all registered checks (21 CVEs + 11 posture checks) and produces a unified report.
+Vulnerability assessment against a target. Runs all registered checks (25 CVEs + 11 posture checks) and produces a unified report.
 
 ```bash
 blue-tap vulnscan TARGET
@@ -175,7 +194,7 @@ Each sub-command has attack-specific options. See [Exploitation guide](exploitat
 
 ### dos
 
-Denial-of-service testing.
+Denial-of-service and resilience testing. Runs 30 checks across CVE-backed crash probes and protocol stress tests, with automatic recovery monitoring after each check.
 
 ```bash
 blue-tap dos TARGET
@@ -183,9 +202,25 @@ blue-tap dos TARGET
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `--checks` | string | --- | Comma-separated check IDs |
-| `--recovery-timeout` | int | --- | Seconds to wait for target recovery |
+| `--checks` | string | all | Comma-separated check IDs |
+| `--recovery-timeout` | int | 180 | Seconds to wait for device recovery |
 | `--yes` | flag | --- | Skip confirmation prompts |
+
+**CVE-backed crash probes (9):**
+
+| Check ID | CVE | Protocol |
+|----------|-----|----------|
+| `dos_cve_2020_0022` | CVE-2020-0022 | Raw ACL (DarkFirmware) |
+| `dos_cve_2017_0781` | CVE-2017-0781 | BNEP heap overflow |
+| `dos_cve_2017_0782` | CVE-2017-0782 | BNEP underflow |
+| `dos_cve_2019_19192` | CVE-2019-19192 | BLE ATT deadlock |
+| `dos_cve_2019_19196` | CVE-2019-19196 | BLE SMP key overflow |
+| `dos_cve_2022_39177` | CVE-2022-39177 | AVDTP SETCONF crash |
+| `dos_cve_2023_27349` | CVE-2023-27349 | AVRCP event OOB |
+| `dos_cve_2025_0084` | CVE-2025-0084 | SDP race condition |
+| `dos_cve_2025_48593` | CVE-2025-48593 | HFP reconnect race |
+
+**Protocol stress tests (21):** L2CAP (storm, CID exhaust, data flood, l2ping), SDP (continuation, DES bomb), RFCOMM (SABM, mux), OBEX (session flood), HFP (AT flood, SLC confusion), LMP (detach, switch, features, opcode, encryption, timing), Pairing (pair flood, name flood, rate test).
 
 !!! warning
     DoS checks will disrupt the target's Bluetooth stack. Some checks may require a power cycle to recover. Always verify you have authorization and physical access to the target.
@@ -195,7 +230,7 @@ blue-tap dos TARGET
 Post-exploitation data extraction. Requires an established connection to the target (typically after a successful exploit or pairing).
 
 ```bash
-blue-tap extract TARGET [contacts|messages|audio|media|push|snarf|at]
+blue-tap extract TARGET [contacts|messages|audio|stream|media|push|snarf|at]
 ```
 
 Each sub-command uses a different Bluetooth profile:
@@ -204,8 +239,9 @@ Each sub-command uses a different Bluetooth profile:
 |---------|---------|-----------------|
 | `contacts` | PBAP | Phonebook entries |
 | `messages` | MAP | SMS/MMS messages |
-| `audio` | HFP | Audio channel access |
-| `media` | A2DP/AVRCP | Media control and streaming |
+| `audio` | HFP | Call audio control |
+| `stream` | A2DP | Audio streaming — capture, inject, route |
+| `media` | AVRCP | Media control and playback |
 | `push` | OPP | Send files to target |
 | `snarf` | OBEX | Pull files from target |
 | `at` | AT Commands | Modem AT command interface |
@@ -428,6 +464,8 @@ sudo blue-tap recon 4C:4F:EE:17:3A:89 sdp
 sudo blue-tap recon 4C:4F:EE:17:3A:89 l2cap
 sudo blue-tap recon 4C:4F:EE:17:3A:89 rfcomm
 sudo blue-tap recon 4C:4F:EE:17:3A:89 fingerprint
+sudo blue-tap recon 4C:4F:EE:17:3A:89 capabilities
+sudo blue-tap recon 4C:4F:EE:17:3A:89 correlate
 
 # Vulnerability assessment
 sudo blue-tap vulnscan 4C:4F:EE:17:3A:89

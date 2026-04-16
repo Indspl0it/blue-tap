@@ -62,7 +62,7 @@ Blue-Tap operates at two layers. At the **host level**, it uses standard BlueZ A
 
     ---
 
-    21+ CVE detections covering KNOB, BIAS, BLURtooth, BlueBorne, and more. 30 denial-of-service checks targeting L2CAP, SDP, RFCOMM, and BNEP. Each finding includes severity classification, affected protocol, and remediation guidance -- structured for direct inclusion in pentest reports.
+    25 CVE detections covering KNOB, BIAS, BLURtooth, BlueBorne, Airoha RACE, and more. 30 denial-of-service checks targeting L2CAP, SDP, RFCOMM, and BNEP. Each finding includes severity classification, affected protocol, and remediation guidance -- structured for direct inclusion in pentest reports.
 
 -   :material-bug-outline: **Protocol Fuzzing**
 
@@ -202,7 +202,7 @@ For a deeper dive into the architecture, see the [Architecture Overview](develop
 |---|---|
 | **Module families** | Discovery, Reconnaissance, Assessment, Exploitation, Post-Exploitation, Fuzzing |
 | **Total modules** | 101 across 6 families |
-| **CVE detections** | 21+ (KNOB, BIAS, BLURtooth, BlueBorne, Invalid Curve, and more) |
+| **CVE detections** | 25 (KNOB, BIAS, BLURtooth, BlueBorne, Airoha RACE, Invalid Curve, and more) |
 | **DoS checks** | 30 (L2CAP, SDP, RFCOMM, BNEP, AVCTP) |
 | **Fuzzer protocols** | 16 (Classic + BLE) |
 | **Fuzzer seeds** | 6,685+ |

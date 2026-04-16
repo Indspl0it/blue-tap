@@ -214,7 +214,7 @@ blue-tap scan classic
 
 ```bash
 # Check what pairing method the target expects
-blue-tap vulnscan TARGET --checks pairing_method
+blue-tap vulnscan TARGET
 
 # Use the SSP downgrade probe to test pairing behavior
 blue-tap exploit TARGET ssp-downgrade --method probe

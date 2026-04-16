@@ -9,17 +9,19 @@
 <p align="center">
   <img src="https://img.shields.io/badge/python-3.10%2B-blue" alt="Python 3.10+"/>
   <img src="https://img.shields.io/badge/license-GPL--3.0-green" alt="License GPL-3.0"/>
-  <img src="https://img.shields.io/badge/version-2.5.0-orange" alt="Version 2.5.0"/>
+  <img src="https://img.shields.io/badge/version-2.6.0-orange" alt="Version 2.6.0"/>
 </p>
 
 ---
 
 Blue-Tap is a Bluetooth Classic and BLE penetration testing toolkit built for automotive IVI security assessments. It operates at both the HCI layer and below-HCI via DarkFirmware on RTL8761B.
 
-- **Discovers, fingerprints, and assesses** Bluetooth devices with 30+ CVE checks and non-CVE exposure analysis
+96 registered modules across 6 families: discovery, reconnaissance, assessment, exploitation, post-exploitation, and fuzzing.
+
+- **Discovers, fingerprints, and assesses** Bluetooth devices with 25 CVE detections, 11 posture checks, and 30 denial-of-service probes
 - **Exploits** protocol vulnerabilities: BIAS, KNOB, BLUFFS, SSP downgrade, encryption downgrade, connection hijacking
 - **Extracts data and intercepts audio** via PBAP, MAP, HFP, A2DP, AVRCP, AT commands, OBEX
-- **Fuzzes 12 Bluetooth protocols** with a response-guided engine, crash database, and minimization
+- **Fuzzes 16 Bluetooth protocols** with a response-guided engine, crash database, and minimization
 
 ## Installation
 
@@ -40,13 +42,12 @@ sudo blue-tap adapter list
 
 Full documentation: **[docs/](docs/index.md)**
 
-- [Features and Command Reference](docs/features.md)
-- [Usage Guide](docs/usage-guide.md)
+- [CLI Reference](docs/guide/cli-reference.md)
+- [Getting Started](docs/getting-started/installation.md)
+- [CVE Detection Matrix](docs/cve/detection-matrix.md)
 - [Hardware Compatibility](docs/reference/hardware-compatibility.md)
 - [Troubleshooting](docs/reference/troubleshooting.md)
-- [Platform Notes](docs/reference/platform-notes.md)
-- [Vulnscan CVE Matrix](docs/vulnscan-cve-matrix.md)
-- [Changelog](docs/CHANGELOG.md)
+- [Changelog](docs/changelog.md)
 
 ## Legal Disclaimer
 

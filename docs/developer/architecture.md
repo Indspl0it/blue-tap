@@ -39,12 +39,12 @@ blue_tap/
       adapters/                # 11 report adapters (one per module type)
       renderers/               # html.py, blocks.py, registry.py, sections.py
     sessions/                  # store.py (atomic persistence)
-  modules/                     # Domain behavior (101 modules across 6 families)
+  modules/                     # Domain behavior (96 modules across 6 families)
     discovery/                 # 1 module -- target scanning
     reconnaissance/            # 13 modules -- deep enumeration
-    assessment/                # 39 modules -- vulnerability checks
+    assessment/                # 43 modules -- vulnerability checks (25 CVE + 11 posture + meta)
     exploitation/              # 38 modules (8 attacks + dos_runner + 29 DoS checks)
-    post_exploitation/         # 7 modules -- data extraction, media control
+    post_exploitation/         # 8 modules -- data extraction, media control
     fuzzing/                   # 3 registered + engine, transport, corpus, crash_db
   interfaces/                  # User-facing integration surfaces
     cli/                       # Click commands (LoggedCommand / LoggedGroup)
@@ -359,7 +359,7 @@ Each command auto-logs its `RunEnvelope` to the active session. The `report` com
 graph LR
     A[blue-tap scan] -->|envelope| S[sessions/my-test/]
     B[blue-tap vulnscan] -->|envelope| S
-    C[blue-tap dos run] -->|envelope| S
+    C[blue-tap dos TARGET] -->|envelope| S
     D[blue-tap exploit] -->|envelope| S
     S -->|all envelopes| R[blue-tap report]
     R --> HTML[report.html]
