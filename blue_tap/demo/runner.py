@@ -13,7 +13,8 @@ from rich.text import Text
 
 from blue_tap.utils.output import (
     banner, info, success, warning, console, section, phase, step, substep,
-    device_table, service_table, vuln_table, get_progress,
+    device_table, service_table, vuln_table, channel_table, get_progress,
+    bare_table, print_table,
     CYAN, GREEN, YELLOW, RED, PURPLE, DIM, BLUE, ORANGE,
 )
 from blue_tap.demo import mock_data as M
@@ -25,35 +26,22 @@ def _delay(base: float = 0.3, variance: float = 0.2):
     time.sleep(base + random.uniform(0, variance))
 
 
-def _channel_table(channels: list[dict]) -> Table:
-    """Build RFCOMM channel scan table."""
-    table = Table(
-        title=f"[bold {CYAN}]RFCOMM Channel Scan[/bold {CYAN}]",
-        show_lines=False, border_style=DIM,
-    )
-    table.add_column("Ch", style=DIM, width=4, justify="right")
-    table.add_column("Status", width=10)
-    table.add_column("Service", style="bold white")
-
-    for ch in channels:
-        status = ch["status"]
-        if status == "open":
-            status_str = f"[bold {GREEN}]OPEN[/bold {GREEN}]"
-        else:
-            status_str = f"[{DIM}]closed[/{DIM}]"
-        svc = ch.get("service", "")
-        table.add_row(str(ch["channel"]), status_str, svc)
-    return table
+def _channel_table(channels: list[dict]) -> None:
+    """Print RFCOMM channel scan using shared flat-list formatter."""
+    # Normalise demo data: demo uses "service" key, channel_table uses "name"
+    normalised = [
+        {**ch, "name": ch.get("service", ch.get("name", ""))}
+        for ch in channels
+    ]
+    channel_table(normalised, title="RFCOMM Channel Scan")
 
 
 def _l2cap_table(results: list[dict]) -> Table:
     """Build L2CAP PSM scan table."""
-    table = Table(
-        title=f"[bold {CYAN}]L2CAP PSM Scan[/bold {CYAN}]",
-        show_lines=False, border_style=DIM,
-    )
-    table.add_column("PSM", style=DIM, width=8, justify="right")
-    table.add_column("Name", style="bold white")
+    table = bare_table()
+    table.title = "[bold]L2CAP PSM Scan[/bold]"
+    table.add_column("PSM", style="bt.yellow", width=8, justify="right")
+    table.add_column("Name")
     table.add_column("Status", width=14)
 
     for r in results:
@@ -71,15 +59,13 @@ def _l2cap_table(results: list[dict]) -> Table:
 
 def _dos_result_table(results: list[dict]) -> Table:
     """Build DoS test results table."""
-    table = Table(
-        title=f"[bold {CYAN}]DoS Resilience Test Results[/bold {CYAN}]",
-        show_lines=True, border_style=DIM,
-    )
-    table.add_column("#", style=DIM, width=3, justify="right")
-    table.add_column("Test", style="bold white")
+    table = bare_table()
+    table.title = "[bold]DoS Resilience Test Results[/bold]"
+    table.add_column("#", style="bt.dim", width=3, justify="right")
+    table.add_column("Test")
     table.add_column("Result", width=16)
-    table.add_column("Packets", style=CYAN, justify="right")
-    table.add_column("Response", style=DIM, justify="right")
+    table.add_column("Packets", justify="right")
+    table.add_column("Response", justify="right")
 
     for i, r in enumerate(results, 1):
         result = r["result"]
@@ -98,14 +84,12 @@ def _dos_result_table(results: list[dict]) -> Table:
 
 def _fuzz_table(stats: dict) -> Table:
     """Build fuzzing protocol statistics table."""
-    table = Table(
-        title=f"[bold {CYAN}]Fuzzing Campaign Statistics[/bold {CYAN}]",
-        show_lines=True, border_style=DIM,
-    )
-    table.add_column("Protocol", style="bold white")
-    table.add_column("Packets", style=CYAN, justify="right")
+    table = bare_table()
+    table.title = "[bold]Fuzzing Campaign Statistics[/bold]"
+    table.add_column("Protocol", style="bt.purple")
+    table.add_column("Packets", justify="right")
     table.add_column("Crashes", justify="right")
-    table.add_column("Coverage Paths", style=DIM, justify="right")
+    table.add_column("Coverage Paths", justify="right")
 
     for proto, data in stats.items():
         crashes = data["crashes"]
@@ -138,14 +122,12 @@ def _crash_detail_panel(crash: dict) -> Panel:
 
 def _lmp_table(captures: list[dict]) -> Table:
     """Build LMP capture table."""
-    table = Table(
-        title=f"[bold {CYAN}]LMP Capture (DarkFirmware)[/bold {CYAN}]",
-        show_lines=False, border_style=DIM,
-    )
-    table.add_column("Time", style=DIM, width=14)
+    table = bare_table()
+    table.title = "[bold]LMP Capture (DarkFirmware)[/bold]"
+    table.add_column("Time", style="bt.dim", width=14)
     table.add_column("Dir", width=4)
-    table.add_column("Opcode", style="bold white")
-    table.add_column("Data", style=DIM)
+    table.add_column("Opcode")
+    table.add_column("Data", style="bt.dim")
 
     for cap in captures:
         ts = cap["timestamp"].split("T")[1][:12]
@@ -164,7 +146,7 @@ def run_demo(output_dir: str = "demo_output"):
     start_time = time.time()
 
     console.print()
-    console.rule("[bold red]Blue-Tap Automated Pentest[/bold red]", style="red")
+    console.rule("[bold]Blue-Tap Demo[/bold]", style="dim")
     console.print()
     info(f"Target IVI: [bold]{M.IVI_NAME}[/bold] ({M.IVI_ADDRESS})")
     info(f"Adapter: {M.IVI_HCI}")
@@ -182,7 +164,7 @@ def run_demo(output_dir: str = "demo_output"):
                     progress.update(task, advance=1)
 
         info(f"Found [bold]{len(M.SCAN_DEVICES)}[/bold] device(s)")
-        console.print(device_table(M.SCAN_DEVICES))
+        device_table(M.SCAN_DEVICES)
 
         with step("Identifying paired phone"):
             _delay(0.5, 0.3)
@@ -204,10 +186,10 @@ def run_demo(output_dir: str = "demo_output"):
 
         fp = M.FINGERPRINT
 
-        fp_table = Table(title=f"[bold {CYAN}]Target Fingerprint[/bold {CYAN}]",
-                         show_lines=False, border_style=DIM)
-        fp_table.add_column("Property", style="bold white", width=24)
-        fp_table.add_column("Value", style=CYAN)
+        fp_table = bare_table()
+        fp_table.title = "[bold]Target Fingerprint[/bold]"
+        fp_table.add_column("Property", style="bt.dim", width=24)
+        fp_table.add_column("Value", style="bt.cyan")
 
         fp_table.add_row("Name", fp["name"])
         fp_table.add_row("Address", fp["address"])
@@ -219,7 +201,7 @@ def run_demo(output_dir: str = "demo_output"):
         fp_table.add_row("Secure Connections", f"[bold {RED}]No[/bold {RED}]")
         fp_table.add_row("IO Capability", fp["security_posture"]["io_capability"])
         fp_table.add_row("Min Key Size", str(fp["security_posture"]["min_encryption_key_size"]))
-        console.print(fp_table)
+        print_table(fp_table)
 
         with step("Analyzing attack surface"):
             _delay(0.3, 0.2)
@@ -235,7 +217,7 @@ def run_demo(output_dir: str = "demo_output"):
         with step("Browsing SDP services"):
             _delay(1.0, 0.5)
 
-        console.print(service_table(M.SDP_SERVICES, title="SDP Services"))
+        service_table(M.SDP_SERVICES, title="SDP Services")
         info(f"Found [bold]{len(M.SDP_SERVICES)}[/bold] SDP service(s)")
 
         with step("Scanning RFCOMM channels 1-30"):
@@ -246,7 +228,7 @@ def run_demo(output_dir: str = "demo_output"):
                     progress.update(task, advance=1)
 
         open_rfcomm = [ch for ch in M.RFCOMM_CHANNELS if ch["status"] == "open"]
-        console.print(_channel_table(M.RFCOMM_CHANNELS))
+        _channel_table(M.RFCOMM_CHANNELS)
         info(f"RFCOMM: [bold]{len(open_rfcomm)}[/bold] open channel(s)")
 
         with step("Scanning L2CAP PSMs"):
@@ -274,7 +256,7 @@ def run_demo(output_dir: str = "demo_output"):
                     substep(f"Checking: {finding['name']}")
                     progress.update(task, advance=1)
 
-        console.print(vuln_table(M.VULN_FINDINGS, title="Vulnerability Findings"))
+        vuln_table(M.VULN_FINDINGS, title="Vulnerability Findings")
 
         sev_counts = {}
         for f in M.VULN_FINDINGS:
@@ -313,7 +295,7 @@ def run_demo(output_dir: str = "demo_output"):
         with step("LMP security negotiation capture"):
             _delay(0.8, 0.3)
 
-        console.print(_lmp_table(M.LMP_CAPTURES))
+        print_table(_lmp_table(M.LMP_CAPTURES))
 
         results["phases"]["pairing_attacks"] = {
             "status": "success",
@@ -346,14 +328,14 @@ def run_demo(output_dir: str = "demo_output"):
              f"call history entries")
 
         # Show sample contacts
-        contact_table = Table(title=f"[bold {RED}]Extracted Contacts (sample)[/bold {RED}]",
-                              show_lines=False, border_style=DIM)
-        contact_table.add_column("Name", style="bold white")
-        contact_table.add_column("Phone", style=CYAN)
-        contact_table.add_column("Email", style=DIM)
+        contact_table = bare_table()
+        contact_table.title = "[bold]Extracted Contacts (sample)[/bold]"
+        contact_table.add_column("Name")
+        contact_table.add_column("Phone", style="bt.cyan")
+        contact_table.add_column("Email")
         for c in pbap["sample_entries"]:
             contact_table.add_row(c["fn"], c["tel"], c.get("email", ""))
-        console.print(contact_table)
+        print_table(contact_table)
 
         with step("Extracting messages via MAP (ch20)"):
             with get_progress() as progress:
@@ -369,14 +351,14 @@ def run_demo(output_dir: str = "demo_output"):
              f"[bold]{msg['sent_count']}[/bold] sent messages")
 
         # Show sample messages
-        msg_table = Table(title=f"[bold {RED}]Extracted Messages (sample)[/bold {RED}]",
-                          show_lines=False, border_style=DIM)
-        msg_table.add_column("From", style=CYAN)
-        msg_table.add_column("Subject", style="bold white")
-        msg_table.add_column("Preview", style=DIM, max_width=50)
+        msg_table = bare_table()
+        msg_table.title = "[bold]Extracted Messages (sample)[/bold]"
+        msg_table.add_column("From", style="bt.cyan")
+        msg_table.add_column("Subject")
+        msg_table.add_column("Preview", style="bt.dim", max_width=50)
         for m in msg["sample_messages"]:
             msg_table.add_row(m["from"], m["subject"], m["snippet"])
-        console.print(msg_table)
+        print_table(msg_table)
 
         with step("Cleaning up — restoring original MAC"):
             _delay(0.5, 0.2)
@@ -403,7 +385,7 @@ def run_demo(output_dir: str = "demo_output"):
                         warning(f"[bold]CRASH[/bold] detected in L2CAP — continuing campaign")
                 progress.update(task, completed=fz["packets_sent"])
 
-        console.print(_fuzz_table(fz["protocol_stats"]))
+        print_table(_fuzz_table(fz["protocol_stats"]))
 
         info(f"Sent [bold]{fz['packets_sent']:,}[/bold] test cases across 4 protocols")
         info(f"Coverage paths discovered: [bold]{fz['coverage_paths']}[/bold]")
@@ -433,7 +415,7 @@ def run_demo(output_dir: str = "demo_output"):
                 else:
                     warning(f"    {r['test']}: [bold red]UNRESPONSIVE[/bold red]")
 
-        console.print(_dos_result_table(dos))
+        print_table(_dos_result_table(dos))
 
         unresponsive = sum(1 for r in dos if r["result"] == "target_unresponsive")
         degraded = sum(1 for r in dos if r["result"] == "target_degraded")
@@ -451,7 +433,7 @@ def run_demo(output_dir: str = "demo_output"):
         with step("Compiling assessment data"):
             _delay(0.5, 0.2)
 
-        from blue_tap.report.generator import ReportGenerator
+        from blue_tap.interfaces.reporting.generator import ReportGenerator
         from blue_tap.demo.report_data import (
             build_demo_dos_result,
             build_demo_fingerprint_result,
@@ -493,8 +475,8 @@ def run_demo(output_dir: str = "demo_output"):
             )
         )
 
-        from blue_tap.core.attack_framework import build_attack_result
-        from blue_tap.core.data_framework import build_data_result
+        from blue_tap.framework.envelopes.attack import build_attack_result
+        from blue_tap.framework.envelopes.data import build_data_result
 
         report.add_run_envelope(
             build_attack_result(
@@ -618,8 +600,7 @@ def run_demo(output_dir: str = "demo_output"):
     results["status"] = "complete"
 
     console.print()
-    console.rule(f"[bold green]Pentest Complete "
-                 f"(9/9 phases, {total_time:.1f}s)[/bold green]", style="green")
+    console.rule(f"[bold]Demo Complete (9/9 phases, {total_time:.1f}s)[/bold]", style="dim")
     console.print()
 
     # Executive summary panel

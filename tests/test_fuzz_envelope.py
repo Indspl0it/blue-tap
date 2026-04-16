@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 
-from blue_tap.core.fuzz_framework import (
+from blue_tap.framework.envelopes.fuzz import (
     FUZZ_MODULE_OUTCOMES,
     build_fuzz_campaign_result,
     build_fuzz_operation_result,
@@ -11,12 +11,12 @@ from blue_tap.core.fuzz_framework import (
     build_fuzz_result,
     make_fuzz_run_id,
 )
-from blue_tap.core.result_schema import validate_run_envelope
-from blue_tap.fuzz.engine import FuzzCampaign, PROTOCOL_TRANSPORT_MAP
-from blue_tap.fuzz.protocols.l2cap_raw import generate_all_l2cap_sig_fuzz_cases
+from blue_tap.framework.contracts.result_schema import validate_run_envelope
+from blue_tap.modules.fuzzing.engine import FuzzCampaign, PROTOCOL_TRANSPORT_MAP
+from blue_tap.modules.fuzzing.protocols.l2cap_raw import generate_all_l2cap_sig_fuzz_cases
 
 
-def _assert_envelope_v2(envelope: dict, module: str = "fuzz"):
+def _assert_envelope_v2(envelope: dict, module: str = "fuzzing"):
     assert envelope["schema_version"] == 2
     assert envelope["module"] == module
     assert envelope["schema"] == "blue_tap.fuzz.result"
@@ -149,7 +149,7 @@ def test_protocol_execution_has_required_fields():
     _assert_execution_record(rec)
     assert rec["kind"] == "probe"
     assert rec["id"] == "fuzz_sdp"
-    assert rec["module"] == "fuzz"
+    assert rec["module"] == "fuzzing"
     assert rec["protocol"] == "sdp"
 
 

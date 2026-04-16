@@ -1,13 +1,13 @@
 """Tests for attack module standardized envelope outputs."""
 from __future__ import annotations
 
-from blue_tap.attack.hijack import HijackSession
-from blue_tap.attack.knob import KNOBAttack
-from blue_tap.attack.bias import BIASAttack
-from blue_tap.attack.ssp_downgrade import SSPDowngradeAttack
-from blue_tap.attack.bluffs import BLUFFSAttack
-from blue_tap.attack.encryption_downgrade import EncryptionDowngradeAttack
-from blue_tap.attack.ctkd import CTKDAttack
+from blue_tap.modules.exploitation.hijack import HijackSession
+from blue_tap.modules.exploitation.knob import KNOBAttack
+from blue_tap.modules.exploitation.bias import BIASAttack
+from blue_tap.modules.exploitation.ssp_downgrade import SSPDowngradeAttack
+from blue_tap.modules.exploitation.bluffs import BLUFFSAttack
+from blue_tap.modules.exploitation.encryption_downgrade import EncryptionDowngradeAttack
+from blue_tap.modules.exploitation.ctkd import CTKDAttack
 
 
 # ---------------------------------------------------------------------------
@@ -27,7 +27,7 @@ def _stub_hijack_session(monkeypatch) -> HijackSession:
     return session
 
 
-def _assert_envelope_v2(envelope: dict, module: str = "attack"):
+def _assert_envelope_v2(envelope: dict, module: str = "exploitation"):
     """Verify an envelope satisfies v2 schema requirements."""
     assert envelope["schema_version"] == 2, f"Expected schema_version 2, got {envelope.get('schema_version')}"
     assert envelope["module"] == module
@@ -57,8 +57,8 @@ def _assert_execution_record(rec: dict):
 
 def test_hijack_build_envelope_produces_v2(monkeypatch):
     """HijackSession.build_envelope() returns a valid v2 RunEnvelope."""
-    from blue_tap.core import scanner as _scanner_mod
-    from blue_tap.recon import fingerprint as _fp_mod, sdp as _sdp_mod
+    from blue_tap.hardware import scanner as _scanner_mod
+    from blue_tap.modules.reconnaissance import fingerprint as _fp_mod, sdp as _sdp_mod
 
     session = _stub_hijack_session(monkeypatch)
 
@@ -85,8 +85,8 @@ def test_hijack_build_envelope_produces_v2(monkeypatch):
 
 def test_hijack_envelope_has_cli_events(monkeypatch):
     """Hijack envelope includes collected CLI events in module_data."""
-    from blue_tap.core import scanner as _scanner_mod
-    from blue_tap.recon import fingerprint as _fp_mod, sdp as _sdp_mod
+    from blue_tap.hardware import scanner as _scanner_mod
+    from blue_tap.modules.reconnaissance import fingerprint as _fp_mod, sdp as _sdp_mod
 
     session = _stub_hijack_session(monkeypatch)
     monkeypatch.setattr(_scanner_mod, "resolve_name", lambda addr, hci="hci0": "Phone")
@@ -106,14 +106,14 @@ def test_hijack_envelope_has_cli_events(monkeypatch):
 
 def test_hijack_failed_phase_records_error(monkeypatch):
     """A failed recon produces an execution record with error status."""
-    from blue_tap.core import scanner as _scanner_mod
-    from blue_tap.recon import fingerprint as _fp_mod
+    from blue_tap.hardware import scanner as _scanner_mod
+    from blue_tap.modules.reconnaissance import fingerprint as _fp_mod
 
     session = _stub_hijack_session(monkeypatch)
     monkeypatch.setattr(_scanner_mod, "resolve_name", lambda addr, hci="hci0": "Phone")
     monkeypatch.setattr(_fp_mod, "fingerprint_device", lambda addr, hci="hci0": None)
 
-    from blue_tap.recon import sdp as _sdp_mod
+    from blue_tap.modules.reconnaissance import sdp as _sdp_mod
     monkeypatch.setattr(_sdp_mod, "browse_services", lambda addr: [])
     monkeypatch.setattr(_sdp_mod, "find_service_channel", lambda addr, name, services=None: None)
 
@@ -144,12 +144,13 @@ def test_knob_probe_produces_execution_record(monkeypatch):
     rec = attack._executions[0]
     _assert_execution_record(rec)
     assert rec["id"] == "knob_probe"
-    assert rec["module_outcome"] == "confirmed"
+    # Exploitation family outcome: success (vulnerable target identified)
+    assert rec["module_outcome"] == "success"
     assert "CVE-2019-9506" in rec.get("tags", [])
 
 
 def test_knob_probe_not_vulnerable(monkeypatch):
-    """KNOB probe on patched device produces not_applicable outcome."""
+    """KNOB probe on patched device produces recovered outcome (target survived)."""
     attack = KNOBAttack("AA:BB:CC:DD:EE:FF", hci="hci0")
     monkeypatch.setattr(attack, "_get_bt_version", lambda: (5.2, "5.2 (0xb)"))
     monkeypatch.setattr(attack, "_get_connection_handle", lambda: None)
@@ -159,7 +160,8 @@ def test_knob_probe_not_vulnerable(monkeypatch):
 
     assert result["likely_vulnerable"] is False
     rec = attack._executions[0]
-    assert rec["module_outcome"] == "not_applicable"
+    # Exploitation outcome: recovered = target held its ground / not exploitable
+    assert rec["module_outcome"] == "recovered"
 
 
 def test_knob_build_envelope_v2(monkeypatch):
@@ -191,7 +193,9 @@ def test_knob_brute_force_execution_record(monkeypatch):
     rec = attack._executions[0]
     _assert_execution_record(rec)
     assert rec["id"] == "knob_brute_force"
-    assert rec["module_outcome"] == "success"
+    # Brute-force uses heuristic validator (not real E0), so outcome is
+    # "recovered" (low confidence candidate found) rather than "success".
+    assert rec["module_outcome"] == "recovered"
 
 
 def test_knob_execute_uses_requested_key_size(monkeypatch):
@@ -210,7 +214,7 @@ def test_knob_execute_uses_requested_key_size(monkeypatch):
 
     brute_force_calls: list[int] = []
 
-    def _fake_brute_force(key_size: int = 1, acl_data=None):
+    def _fake_brute_force(key_size: int = 1, acl_data=None, encryption_context=None):
         brute_force_calls.append(key_size)
         return {
             "key_found": False,
@@ -282,7 +286,7 @@ def test_ssp_downgrade_probe_produces_execution_record(monkeypatch):
     attack = SSPDowngradeAttack("AA:BB:CC:DD:EE:FF", hci="hci0")
 
     # Stub hcitool and btmgmt
-    from blue_tap.attack import ssp_downgrade as _mod
+    from blue_tap.modules.exploitation import ssp_downgrade as _mod
     from unittest.mock import MagicMock
     mock_result = MagicMock()
     mock_result.returncode = 1
@@ -326,13 +330,13 @@ def test_bluffs_build_envelope_v2():
     assert envelope["summary"]["cve"] == "CVE-2023-24023"
 
 
-def test_bluffs_execute_unimplemented_variant():
-    """Unimplemented variant (a2) produces a skipped execution record."""
+def test_bluffs_execute_a2_without_darkfirmware():
+    """A2 variant runs but fails gracefully without DarkFirmware hardware."""
     attack = BLUFFSAttack("AA:BB:CC:DD:EE:FF", hci="hci0")
     result = attack.execute(variant="a2")
+    # Without DarkFirmware, A2 should complete but report failure
+    assert result["variant"] == "a2"
     assert result["success"] is False
-    assert len(attack._executions) == 1
-    assert attack._executions[0]["execution_status"] == "skipped"
 
 
 # ---------------------------------------------------------------------------
@@ -393,7 +397,7 @@ def test_ctkd_probe_no_darkfirmware(monkeypatch):
     mock_fw = MagicMock()
     mock_fw.is_darkfirmware_loaded.return_value = False
     monkeypatch.setattr(
-        "blue_tap.core.firmware.DarkFirmwareManager", lambda: mock_fw
+        "blue_tap.hardware.firmware.DarkFirmwareManager", lambda: mock_fw
     )
 
     attack = CTKDAttack("AA:BB:CC:DD:EE:FF", hci="hci1")
@@ -402,5 +406,7 @@ def test_ctkd_probe_no_darkfirmware(monkeypatch):
     assert len(attack._executions) == 1
     rec = attack._executions[0]
     _assert_execution_record(rec)
+    # execution_status=failed: the execution could not run
+    # module_outcome=not_applicable: hardware prereq missing (valid exploitation outcome)
     assert rec["execution_status"] == "failed"
-    assert rec["module_outcome"] == "failed"
+    assert rec["module_outcome"] == "not_applicable"

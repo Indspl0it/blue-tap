@@ -5,13 +5,13 @@ import json
 
 import pytest
 
-from blue_tap.core.fuzz_framework import (
+from blue_tap.framework.envelopes.fuzz import (
     build_fuzz_campaign_result,
     build_fuzz_protocol_execution,
 )
-from blue_tap.core.report_contract import SectionModel
-from blue_tap.report.adapters.fuzz import FuzzReportAdapter
-from blue_tap.report.renderers import render_sections
+from blue_tap.framework.contracts.report_contract import SectionModel
+from blue_tap.framework.reporting.adapters.fuzz import FuzzReportAdapter
+from blue_tap.framework.reporting.renderers import render_sections
 
 
 # ---------------------------------------------------------------------------

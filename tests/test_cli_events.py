@@ -7,7 +7,7 @@ import re
 
 import pytest
 
-from blue_tap.core.cli_events import CANONICAL_EVENT_TYPES, emit_cli_event
+from blue_tap.framework.runtime.cli_events import CANONICAL_EVENT_TYPES, emit_cli_event
 
 
 _EXPECTED_CANONICAL = {
@@ -16,6 +16,7 @@ _EXPECTED_CANONICAL = {
     "execution_started",
     "execution_result",
     "execution_skipped",
+    "execution_observation",
     "pairing_required",
     "recovery_wait_started",
     "recovery_wait_progress",
@@ -36,7 +37,7 @@ def test_canonical_event_types_has_expected_members():
 
 
 def test_emit_cli_event_canonical_no_warning(caplog):
-    with caplog.at_level(logging.WARNING, logger="blue_tap.core.cli_events"):
+    with caplog.at_level(logging.WARNING, logger="blue_tap.framework.runtime.cli_events"):
         emit_cli_event(
             event_type="run_started",
             module="test",
@@ -48,7 +49,7 @@ def test_emit_cli_event_canonical_no_warning(caplog):
 
 
 def test_emit_cli_event_non_canonical_logs_warning(caplog):
-    with caplog.at_level(logging.WARNING, logger="blue_tap.core.cli_events"):
+    with caplog.at_level(logging.WARNING, logger="blue_tap.framework.runtime.cli_events"):
         result = emit_cli_event(
             event_type="execution_error",
             module="test",
@@ -64,7 +65,7 @@ def test_emit_cli_event_non_canonical_logs_warning(caplog):
 
 
 def test_emit_cli_event_non_canonical_mentions_module_in_warning(caplog):
-    with caplog.at_level(logging.WARNING, logger="blue_tap.core.cli_events"):
+    with caplog.at_level(logging.WARNING, logger="blue_tap.framework.runtime.cli_events"):
         emit_cli_event(
             event_type="bad_type",
             module="mymodule",
@@ -78,7 +79,7 @@ def test_emit_cli_event_non_canonical_mentions_module_in_warning(caplog):
 def test_emit_cli_event_returns_correct_fields():
     event = emit_cli_event(
         event_type="run_completed",
-        module="vulnscan",
+        module="assessment.vuln_scanner",
         run_id="abc-123",
         message="Done",
         target="AA:BB:CC:DD:EE:FF",
@@ -88,7 +89,7 @@ def test_emit_cli_event_returns_correct_fields():
         echo=False,
     )
     assert event["event_type"] == "run_completed"
-    assert event["module"] == "vulnscan"
+    assert event["module"] == "assessment.vuln_scanner"
     assert event["run_id"] == "abc-123"
     assert event["target"] == "AA:BB:CC:DD:EE:FF"
     assert event["adapter"] == "hci0"

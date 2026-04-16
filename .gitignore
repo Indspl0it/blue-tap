@@ -16,7 +16,7 @@ build/
 .serena/
 .pytest_cache/
 .ruff_cache/
-sessions/
+/sessions/
 sample-reports/
 scripts/
 aflnet/
@@ -34,3 +34,6 @@ PROJECT_INDEX.json
 demo_output/
 AGENTS.md
 docs/cve-expansion-plan.md
+
+# repowise API keys (local)
+.repowise/.env

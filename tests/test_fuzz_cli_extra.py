@@ -3,7 +3,7 @@ from __future__ import annotations
 import click
 from click.testing import CliRunner
 
-from blue_tap.fuzz import cli_extra
+from blue_tap.modules.fuzzing import cli_extra
 
 
 def _build_fuzz_cli() -> click.Group:
@@ -78,7 +78,7 @@ def test_at_deep_all_routes_across_protocol_surfaces(monkeypatch):
                 "device_info": 1,
             }
 
-    monkeypatch.setattr("blue_tap.fuzz.protocols.at_commands.ATCorpus", FakeATCorpus)
+    monkeypatch.setattr("blue_tap.modules.fuzzing.protocols.at_commands.ATCorpus", FakeATCorpus)
 
     runner = CliRunner()
     result = runner.invoke(_build_fuzz_cli(), ["at-deep", "AA:BB:CC:DD:EE:FF", "--category", "all", "--channel", "7", "--no-autodiscover"])
@@ -111,7 +111,7 @@ def test_l2cap_sig_uses_raw_acl_engine_protocol(monkeypatch):
             {"sent": len(cases), "crashes": 0, "errors": 0, "elapsed": 0.0, "total_cases": len(cases), "logged_by_engine": True},
         )[1],
     )
-    monkeypatch.setattr("blue_tap.fuzz.protocols.l2cap_raw.generate_all_l2cap_sig_fuzz_cases", lambda: [b"sig"])
+    monkeypatch.setattr("blue_tap.modules.fuzzing.protocols.l2cap_raw.generate_all_l2cap_sig_fuzz_cases", lambda: [b"sig"])
 
     runner = CliRunner()
     result = runner.invoke(_build_fuzz_cli(), ["l2cap-sig", "AA:BB:CC:DD:EE:FF", "--hci", "hci3"])

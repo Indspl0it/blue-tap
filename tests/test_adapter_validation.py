@@ -4,12 +4,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from blue_tap.core.adapter import (
+from blue_tap.hardware.adapter import (
     adapter_up,
     set_device_class,
     set_device_name,
 )
-from blue_tap.core.spoofer import clone_device_identity
+from blue_tap.hardware.spoofer import clone_device_identity
 
 
 # ---------------------------------------------------------------------------
@@ -36,7 +36,7 @@ def test_device_class_rejects_out_of_range():
 
 def test_device_class_accepts_valid_with_prefix():
     """Valid hex with 0x prefix proceeds past validation (no ValueError)."""
-    with patch("blue_tap.core.adapter._adapter_exists", return_value=False):
+    with patch("blue_tap.hardware.adapter._adapter_exists", return_value=False):
         result = set_device_class("hci0", "0x5a020c")
     # adapter doesn't exist → success=False, but no ValueError raised
     assert result["success"] is False
@@ -46,7 +46,7 @@ def test_device_class_accepts_valid_with_prefix():
 
 def test_device_class_accepts_valid_without_prefix():
     """Valid hex without 0x prefix is normalised and accepted."""
-    with patch("blue_tap.core.adapter._adapter_exists", return_value=False):
+    with patch("blue_tap.hardware.adapter._adapter_exists", return_value=False):
         result = set_device_class("hci0", "5a020c")
     assert result["success"] is False
     assert result["device_class"] == "0x5a020c"
@@ -54,14 +54,14 @@ def test_device_class_accepts_valid_without_prefix():
 
 def test_device_class_accepts_boundary_zero():
     """0x000000 is on the lower boundary and must be accepted."""
-    with patch("blue_tap.core.adapter._adapter_exists", return_value=False):
+    with patch("blue_tap.hardware.adapter._adapter_exists", return_value=False):
         result = set_device_class("hci0", "0x000000")
     assert result["device_class"] == "0x000000"
 
 
 def test_device_class_accepts_boundary_max():
     """0xFFFFFF is on the upper boundary and must be accepted."""
-    with patch("blue_tap.core.adapter._adapter_exists", return_value=False):
+    with patch("blue_tap.hardware.adapter._adapter_exists", return_value=False):
         result = set_device_class("hci0", "0xFFFFFF")
     assert result["device_class"] == "0xFFFFFF"
 
@@ -88,7 +88,7 @@ def test_device_name_rejects_multibyte_overflow():
 
 def test_device_name_accepts_valid():
     """Normal ASCII name proceeds past validation without raising."""
-    with patch("blue_tap.core.adapter._adapter_exists", return_value=False):
+    with patch("blue_tap.hardware.adapter._adapter_exists", return_value=False):
         result = set_device_name("hci0", "TestPhone")
     assert result["success"] is False  # adapter missing, but no ValueError
     assert result["name"] == "TestPhone"
@@ -98,7 +98,7 @@ def test_device_name_accepts_valid():
 def test_device_name_accepts_exactly_248_bytes():
     """Name of exactly 248 ASCII bytes is at the limit and must be accepted."""
     name_at_limit = "B" * 248
-    with patch("blue_tap.core.adapter._adapter_exists", return_value=False):
+    with patch("blue_tap.hardware.adapter._adapter_exists", return_value=False):
         result = set_device_name("hci0", name_at_limit)
     assert result["name"] == name_at_limit
 
@@ -109,7 +109,7 @@ def test_device_name_accepts_exactly_248_bytes():
 
 def test_adapter_up_returns_dict():
     """adapter_up always returns a dict with the required keys."""
-    with patch("blue_tap.core.adapter._adapter_exists", return_value=False):
+    with patch("blue_tap.hardware.adapter._adapter_exists", return_value=False):
         result = adapter_up("hci0")
     assert isinstance(result, dict)
     assert "success" in result
@@ -120,7 +120,7 @@ def test_adapter_up_returns_dict():
 
 def test_adapter_up_returns_false_when_adapter_missing():
     """adapter_up returns success=False when the adapter doesn't exist."""
-    with patch("blue_tap.core.adapter._adapter_exists", return_value=False):
+    with patch("blue_tap.hardware.adapter._adapter_exists", return_value=False):
         result = adapter_up("hci99")
     assert result["success"] is False
     assert result["hci"] == "hci99"
@@ -133,9 +133,9 @@ def test_adapter_up_returns_true_on_success():
     mock_run = MagicMock()
     mock_run.returncode = 0
     mock_run.stderr = ""
-    with patch("blue_tap.core.adapter._adapter_exists", return_value=True), \
-         patch("blue_tap.core.adapter.run_cmd", return_value=mock_run), \
-         patch("blue_tap.core.adapter.success"):
+    with patch("blue_tap.hardware.adapter._adapter_exists", return_value=True), \
+         patch("blue_tap.hardware.adapter.run_cmd", return_value=mock_run), \
+         patch("blue_tap.hardware.adapter.success"):
         result = adapter_up("hci0")
     assert result["success"] is True
     assert result["operation"] == "up"
@@ -144,10 +144,10 @@ def test_adapter_up_returns_true_on_success():
 
 def test_clone_device_identity_checks_structured_helper_success_flags():
     """clone_device_identity must not treat failed helper result dicts as truthy success."""
-    with patch("blue_tap.core.spoofer.get_adapter_address", return_value="11:22:33:44:55:66"), \
-         patch("blue_tap.core.spoofer.spoof_address", return_value={"success": True}), \
-         patch("blue_tap.core.adapter.set_device_name", return_value={"success": False, "name": "Phone", "previous_name": "Old"}), \
-         patch("blue_tap.core.adapter.set_device_class", return_value={"success": False, "device_class": "0x5a020c"}):
+    with patch("blue_tap.hardware.spoofer.get_adapter_address", return_value="11:22:33:44:55:66"), \
+         patch("blue_tap.hardware.spoofer.spoof_address", return_value={"success": True}), \
+         patch("blue_tap.hardware.adapter.set_device_name", return_value={"success": False, "name": "Phone", "previous_name": "Old"}), \
+         patch("blue_tap.hardware.adapter.set_device_class", return_value={"success": False, "device_class": "0x5a020c"}):
         result = clone_device_identity("hci0", "AA:BB:CC:DD:EE:FF", "Phone", "0x5a020c")
 
     assert result["success"] is False

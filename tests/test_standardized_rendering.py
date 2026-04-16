@@ -1,7 +1,7 @@
 """Tests for standardized block renderers, adapters, and rendering pipeline."""
 import json
-from blue_tap.core.report_contract import SectionBlock, SectionModel
-from blue_tap.report.renderers.blocks import (
+from blue_tap.framework.contracts.report_contract import SectionBlock, SectionModel
+from blue_tap.framework.reporting.renderers.blocks import (
     render_block,
     render_card_list,
     render_status_summary,
@@ -9,9 +9,9 @@ from blue_tap.report.renderers.blocks import (
     render_key_value,
     render_badge_group,
 )
-from blue_tap.report.renderers.registry import get_default_block_renderer_registry
-from blue_tap.report.renderers.sections import render_sections
-from blue_tap.report.adapters import REPORT_ADAPTERS
+from blue_tap.framework.reporting.renderers.registry import get_default_block_renderer_registry
+from blue_tap.framework.reporting.renderers.sections import render_sections
+from blue_tap.framework.reporting.adapters import REPORT_ADAPTERS
 
 
 def test_all_block_types_render():
@@ -86,10 +86,10 @@ def test_key_value_dict_input():
 
 def test_vulnscan_adapter_uses_rich_blocks():
     """Vulnscan adapter should produce status_summary and card_list blocks."""
-    adapter = next(a for a in REPORT_ADAPTERS if a.module == "vulnscan")
+    adapter = next(a for a in REPORT_ADAPTERS if a.module == "assessment")
     envelope = {
         "schema": "blue_tap.vulnscan.result",
-        "module": "vulnscan",
+        "module": "assessment.vuln_scanner",
         "summary": {"confirmed": 1, "inconclusive": 1, "pairing_required": 0, "not_applicable": 2},
         "executions": [
             {"kind": "check", "id": "CVE-2020-0022", "title": "BlueFrag",
@@ -115,10 +115,10 @@ def test_vulnscan_adapter_uses_rich_blocks():
 
 def test_dos_adapter_uses_rich_blocks():
     """DoS adapter should produce status_summary and card_list blocks."""
-    adapter = next(a for a in REPORT_ADAPTERS if a.module == "dos")
+    adapter = next(a for a in REPORT_ADAPTERS if a.module == "exploitation.dos")
     envelope = {
         "schema": "blue_tap.dos.result",
-        "module": "dos",
+        "module": "exploitation.dos",
         "summary": {"success": 1, "recovered": 1, "unresponsive": 0, "failed": 0},
         "executions": [
             {"id": "dos-1", "title": "L2CAP Flood", "protocol": "L2CAP",
@@ -139,10 +139,10 @@ def test_dos_adapter_uses_rich_blocks():
 
 def test_fuzz_adapter_uses_badge_group():
     """Fuzz adapter should produce badge_group and table blocks."""
-    adapter = next(a for a in REPORT_ADAPTERS if a.module == "fuzz")
+    adapter = next(a for a in REPORT_ADAPTERS if a.module == "fuzzing")
     envelope = {
         "schema": "blue_tap.fuzz.result",
-        "module": "fuzz",
+        "module": "fuzzing",
         "target": "AA:BB:CC:DD:EE:FF",
         "summary": {"packets_sent": 1000, "crashes": 2, "errors": 1, "runtime_seconds": 30.0},
         "executions": [],
@@ -162,10 +162,10 @@ def test_fuzz_adapter_uses_badge_group():
 
 def test_discovery_adapter_uses_badge_group():
     """Discovery adapter should produce badge_group and table blocks."""
-    adapter = next(a for a in REPORT_ADAPTERS if a.module == "scan")
+    adapter = next(a for a in REPORT_ADAPTERS if a.module == "discovery")
     envelope = {
         "schema": "blue_tap.scan.result",
-        "module": "scan",
+        "module": "discovery",
         "summary": {"exact_dual_mode_matches": 1, "correlated_candidates": 0},
         "executions": [],
         "module_data": {
@@ -187,10 +187,10 @@ def test_discovery_adapter_uses_badge_group():
 
 def test_full_rendering_pipeline():
     """End-to-end: adapter -> sections -> render_sections produces HTML."""
-    adapter = next(a for a in REPORT_ADAPTERS if a.module == "vulnscan")
+    adapter = next(a for a in REPORT_ADAPTERS if a.module == "assessment")
     state = {}
     adapter.ingest({
-        "schema": "blue_tap.vulnscan.result", "module": "vulnscan",
+        "schema": "blue_tap.vulnscan.result", "module": "assessment.vuln_scanner",
         "summary": {"confirmed": 1}, "executions": [],
         "module_data": {"findings": [
             {"cve": "CVE-TEST", "name": "Test", "severity": "HIGH",
@@ -206,10 +206,10 @@ def test_full_rendering_pipeline():
 
 def test_attack_adapter_renders_limitations_and_artifacts():
     """Attack adapter should surface capability limitations and artifact refs."""
-    adapter = next(a for a in REPORT_ADAPTERS if a.module == "attack")
+    adapter = next(a for a in REPORT_ADAPTERS if a.module == "exploitation")
     envelope = {
         "schema": "blue_tap.attack.result",
-        "module": "attack",
+        "module": "exploitation",
         "summary": {
             "operation": "knob",
             "capability_limitations": ["DarkFirmware unavailable on current adapter"],
@@ -220,7 +220,7 @@ def test_attack_adapter_renders_limitations_and_artifacts():
                 "kind": "check",
                 "id": "knob_brute_force",
                 "title": "KNOB Brute Force",
-                "module": "attack",
+                "module": "exploitation",
                 "protocol": "BR/EDR",
                 "module_outcome": "failed",
                 "execution_status": "completed",

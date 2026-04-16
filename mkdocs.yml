@@ -1,0 +1,127 @@
+site_name: Blue-Tap Documentation
+site_description: Bluetooth/BLE Penetration Testing Toolkit for Automotive IVI Systems
+site_url: https://indspl0it.github.io/blue-tap
+repo_url: https://github.com/Indspl0it/blue-tap
+repo_name: Indspl0it/blue-tap
+copyright: Copyright &copy; 2024-2026 Santhosh Ballikonda
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: cyan
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: cyan
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+  font:
+    text: Inter
+    code: JetBrains Mono
+  icon:
+    repo: fontawesome/brands/github
+    logo: material/bluetooth
+  features:
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.sections
+    - navigation.expand
+    - navigation.path
+    - navigation.top
+    - navigation.footer
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+    - toc.follow
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/Indspl0it/blue-tap
+
+markdown_extensions:
+  - abbr
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.betterem
+  - pymdownx.caret
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.keys
+  - pymdownx.mark
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.tilde
+
+plugins:
+  - search
+
+nav:
+  - Home: index.md
+  - Getting Started:
+      - Installation: getting-started/installation.md
+      - Hardware Setup: getting-started/hardware-setup.md
+      - Quick Start: getting-started/quick-start.md
+      - IVI Simulator: getting-started/ivi-simulator.md
+  - User Guide:
+      - CLI Reference: guide/cli-reference.md
+      - Discovery & Scanning: guide/discovery.md
+      - Reconnaissance: guide/reconnaissance.md
+      - Vulnerability Assessment: guide/vulnerability-assessment.md
+      - Exploitation: guide/exploitation.md
+      - Post-Exploitation: guide/post-exploitation.md
+      - Protocol Fuzzing: guide/fuzzing.md
+      - Denial of Service: guide/denial-of-service.md
+      - Sessions & Reporting: guide/sessions-and-reporting.md
+      - Automation & Playbooks: guide/automation.md
+  - Workflows:
+      - Quick Assessment: workflows/quick-assessment.md
+      - Full Penetration Test: workflows/full-pentest.md
+      - Audio Eavesdropping: workflows/audio-eavesdropping.md
+      - Fuzzing Campaign: workflows/fuzzing-campaign.md
+      - Encryption Downgrade Chain: workflows/encryption-downgrade.md
+      - Custom Playbooks: workflows/custom-playbooks.md
+  - CVE Coverage:
+      - Detection Matrix: cve/detection-matrix.md
+      - DoS Matrix: cve/dos-matrix.md
+      - Expansion Roadmap: cve/expansion-roadmap.md
+  - Developer Guide:
+      - Architecture Overview: developer/architecture.md
+      - Module System: developer/module-system.md
+      - Writing a Module: developer/writing-a-module.md
+      - Report Adapters: developer/report-adapters.md
+      - Plugin Entry Points: developer/plugin-entry-points.md
+  - Reference:
+      - Troubleshooting: reference/troubleshooting.md
+      - Hardware Compatibility: reference/hardware-compatibility.md
+      - Platform Notes: reference/platform-notes.md
+  - References & Credits: references.md
+  - Changelog: changelog.md

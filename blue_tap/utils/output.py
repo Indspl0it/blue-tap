@@ -4,6 +4,7 @@ import time
 from contextlib import contextmanager
 from datetime import datetime
 
+from rich import box as rich_box
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import (
@@ -13,36 +14,35 @@ from rich.progress import (
     TextColumn,
     TimeElapsedColumn,
 )
-from rich.style import Style
 from rich.table import Table
 from rich.text import Text
 from rich.theme import Theme
 
 # ── Color Palette ──────────────────────────────────────────────────────────
-# Raw hex values for use in Style objects (Table headers, columns, etc.)
-# Theme names (bt.cyan etc.) only work inside [markup] tags via console.print.
+# Muted, professional palette. Color conveys meaning, not decoration.
+# Raw hex for Style objects; theme names (bt.*) for Rich markup strings.
 
-CYAN = "#00d4ff"
-GREEN = "#00ff9f"
-YELLOW = "#ffaa00"
-RED = "#ff3333"
-PURPLE = "#bf5af2"
-DIM = "#666666"
-BLUE = "#4488ff"
-ORANGE = "#ff6b35"
-PINK = "#ff79c6"
+CYAN   = "#5B9FD4"   # steel blue  — primary / info
+GREEN  = "#4BAE82"   # sage green  — success / ok
+YELLOW = "#C99A3E"   # warm amber  — warning / caution
+RED    = "#C85F5F"   # muted red   — error / destructive
+PURPLE = "#8E7FC0"   # soft violet — addresses / secondary
+DIM    = "#6E7681"   # neutral gray
+BLUE   = "#5A8FC4"   # medium blue — alternate accent
+ORANGE = "#C07848"   # muted rust  — tertiary accent
+PINK   = "#B87AAE"   # soft rose   — unused / spare
 
 _THEME = Theme(
     {
-        "bt.cyan": CYAN,
-        "bt.green": GREEN,
+        "bt.cyan":   CYAN,
+        "bt.green":  GREEN,
         "bt.yellow": YELLOW,
-        "bt.red": RED,
+        "bt.red":    RED,
         "bt.purple": PURPLE,
-        "bt.dim": DIM,
-        "bt.blue": BLUE,
+        "bt.dim":    DIM,
+        "bt.blue":   BLUE,
         "bt.orange": ORANGE,
-        "bt.pink": PINK,
+        "bt.pink":   PINK,
     }
 )
 
@@ -66,11 +66,11 @@ def get_verbosity() -> int:
 # ── Banner ─────────────────────────────────────────────────────────────────
 
 _LOGO = """\
-  [bold #00d4ff]██████╗ ██╗     ██╗   ██╗███████╗[/bold #00d4ff] [bold #bf5af2]████████╗ █████╗ ██████╗[/bold #bf5af2]
-  [bold #00d4ff]██╔══██╗██║     ██║   ██║██╔════╝[/bold #00d4ff] [bold #bf5af2]╚══██╔══╝██╔══██╗██╔══██╗[/bold #bf5af2]
-  [#00ccee]██████╔╝██║     ██║   ██║█████╗[/#00ccee]   [#ff3366]   ██║   ███████║██████╔╝[/#ff3366]
-  [#00bbdd]██╔══██╗██║     ██║   ██║██╔══╝[/#00bbdd]   [#ff4477]   ██║   ██╔══██║██╔═══╝[/#ff4477]
-  [#00aacc]██████╔╝███████╗╚██████╔╝███████╗[/#00aacc] [#ff5588]   ██║   ██║  ██║██║[/#ff5588]
+  [bold #5B9FD4]██████╗ ██╗     ██╗   ██╗███████╗[/bold #5B9FD4] [bold #8E7FC0]████████╗ █████╗ ██████╗[/bold #8E7FC0]
+  [bold #5B9FD4]██╔══██╗██║     ██║   ██║██╔════╝[/bold #5B9FD4] [bold #8E7FC0]╚══██╔══╝██╔══██╗██╔══██╗[/bold #8E7FC0]
+  [bold #5B9FD4]██████╔╝██║     ██║   ██║█████╗  [/bold #5B9FD4] [bold #8E7FC0]   ██║   ███████║██████╔╝[/bold #8E7FC0]
+  [bold #5B9FD4]██╔══██╗██║     ██║   ██║██╔══╝  [/bold #5B9FD4] [bold #8E7FC0]   ██║   ██╔══██║██╔═══╝[/bold #8E7FC0]
+  [bold #5B9FD4]██████╔╝███████╗╚██████╔╝███████╗[/bold #5B9FD4] [bold #8E7FC0]   ██║   ██║  ██║██║[/bold #8E7FC0]
   [dim]╚═════╝ ╚══════╝ ╚═════╝ ╚══════╝    ╚═╝   ╚═╝  ╚═╝╚═╝[/dim]"""
 
 _BANNER_SHOWN = False
@@ -83,17 +83,13 @@ def banner():
     _BANNER_SHOWN = True
     console.print()
     console.print(_LOGO, highlight=False)
-    tagline = (
-        "  [bt.dim]─────── [/bt.dim]"
-        "[bt.cyan]Bluetooth/BLE[/bt.cyan] "
-        "[bt.purple]Automotive IVI[/bt.purple] "
-        "[bt.red]Pentest Toolkit[/bt.red]"
-        "[bt.dim] ───────[/bt.dim]"
+    console.print(
+        "  [bt.dim]──────────────────────────────────────────────────────[/bt.dim]",
+        highlight=False,
     )
-    console.print(tagline, highlight=False)
     from blue_tap import __version__
     console.print(
-        f"  [bt.dim]v{__version__} │ by Indspl0it[/bt.dim]",
+        f"  [bt.dim]Bluetooth Security Toolkit  ·  v{__version__}[/bt.dim]",
         highlight=False,
     )
     console.print()
@@ -108,36 +104,69 @@ def _ts() -> str:
 
 # ── Core log functions ─────────────────────────────────────────────────────
 
+def _safe_print(formatted: str, fallback_plain: str) -> None:
+    """Print a Rich-markup string; fall back to plain text on MarkupError.
+
+    User-provided strings (device names, error text, target addresses) may
+    contain stray brackets that Rich interprets as malformed markup. Instead of
+    forcing every caller to escape, we catch MarkupError and re-print with
+    markup disabled so the operator still sees the message.
+    """
+    from rich.errors import MarkupError
+    try:
+        console.print(formatted)
+    except MarkupError:
+        console.print(fallback_plain, markup=False)
+
+
 def info(msg: str):
     """Informational message — cyan [*]."""
-    console.print(f"  [bt.dim]{_ts()}[/bt.dim]  [bt.cyan]●[/bt.cyan]  {msg}")
+    _safe_print(
+        f"  [bt.dim]{_ts()}[/bt.dim]  [bt.cyan]●[/bt.cyan]  {msg}",
+        f"  {_ts()}  ●  {msg}",
+    )
 
 
 def success(msg: str):
     """Success message — green [+]."""
-    console.print(f"  [bt.dim]{_ts()}[/bt.dim]  [bt.green]✔[/bt.green]  {msg}")
+    _safe_print(
+        f"  [bt.dim]{_ts()}[/bt.dim]  [bt.green]✔[/bt.green]  {msg}",
+        f"  {_ts()}  ✔  {msg}",
+    )
 
 
 def warning(msg: str):
     """Warning message — amber [!]."""
-    console.print(f"  [bt.dim]{_ts()}[/bt.dim]  [bt.yellow]⚠[/bt.yellow]  {msg}")
+    _safe_print(
+        f"  [bt.dim]{_ts()}[/bt.dim]  [bt.yellow]⚠[/bt.yellow]  {msg}",
+        f"  {_ts()}  ⚠  {msg}",
+    )
 
 
 def error(msg: str):
     """Error message — red [-]."""
-    console.print(f"  [bt.dim]{_ts()}[/bt.dim]  [bt.red]✖[/bt.red]  {msg}")
+    _safe_print(
+        f"  [bt.dim]{_ts()}[/bt.dim]  [bt.red]✖[/bt.red]  {msg}",
+        f"  {_ts()}  ✖  {msg}",
+    )
 
 
 def verbose(msg: str):
     """Only printed when -v or higher."""
     if _VERBOSITY >= 1:
-        console.print(f"  [bt.dim]{_ts()}[/bt.dim]  [bt.dim]·[/bt.dim]  [bt.dim]{msg}[/bt.dim]")
+        _safe_print(
+            f"  [bt.dim]{_ts()}[/bt.dim]  [bt.dim]·[/bt.dim]  [bt.dim]{msg}[/bt.dim]",
+            f"  {_ts()}  ·  {msg}",
+        )
 
 
 def debug(msg: str):
     """Only printed when -vv."""
     if _VERBOSITY >= 2:
-        console.print(f"  [bt.dim]{_ts()}[/bt.dim]  [bt.dim]⋯[/bt.dim]  [dim]{msg}[/dim]")
+        _safe_print(
+            f"  [bt.dim]{_ts()}[/bt.dim]  [bt.dim]⋯[/bt.dim]  [dim]{msg}[/dim]",
+            f"  {_ts()}  ⋯  {msg}",
+        )
 
 
 # ── Target highlighting ───────────────────────────────────────────────────
@@ -154,9 +183,6 @@ def highlight(text: str, style: str = "bt.cyan") -> str:
 
 # ── Phase / Step tracking ─────────────────────────────────────────────────
 
-_PHASE_COLORS = ["bt.cyan", "bt.yellow", "bt.red", "bt.green", "bt.purple", "bt.orange", "bt.pink", "bt.blue"]
-
-
 @contextmanager
 def phase(name: str, number: int = None, total: int = None):
     """Context manager for a numbered attack/recon phase.
@@ -169,14 +195,13 @@ def phase(name: str, number: int = None, total: int = None):
     Prints a styled header on entry, elapsed time + status on exit.
     """
     if number is not None and total is not None:
-        color = _PHASE_COLORS[(number - 1) % len(_PHASE_COLORS)]
-        header = f"[bold {color}]▶ Phase {number}/{total}: {name}[/bold {color}]"
+        counter = f"[bt.dim]{number}/{total}[/bt.dim]  "
     elif number is not None:
-        color = _PHASE_COLORS[(number - 1) % len(_PHASE_COLORS)]
-        header = f"[bold {color}]▶ Phase {number}: {name}[/bold {color}]"
+        counter = f"[bt.dim]{number}[/bt.dim]  "
     else:
-        header = f"[bold bt.cyan]▶ {name}[/bold bt.cyan]"
+        counter = ""
 
+    header = f"{counter}[bold]{name}[/bold]"
     console.print()
     console.rule(header, style="dim")
     t0 = time.time()
@@ -186,7 +211,7 @@ def phase(name: str, number: int = None, total: int = None):
         elapsed = time.time() - t0
         console.print(
             f"  [bt.dim]{_ts()}[/bt.dim]  [bt.red]✖[/bt.red]  "
-            f"Phase failed after [bt.yellow]{elapsed:.1f}s[/bt.yellow]"
+            f"Phase failed [bt.dim]({elapsed:.1f}s)[/bt.dim]"
         )
         raise
     else:
@@ -243,7 +268,7 @@ def section(title: str, style: str = "bt.cyan"):
 # ── Summary panel ──────────────────────────────────────────────────────────
 
 def summary_panel(title: str, items: dict, style: str = "cyan"):
-    """Print a summary panel with key-value pairs.
+    """Print a summary block with key-value pairs.
 
     Usage:
         summary_panel("Recon Results", {
@@ -252,20 +277,18 @@ def summary_panel(title: str, items: dict, style: str = "cyan"):
             "PBAP Channel": "19",
         })
     """
-    text = Text()
+    console.print(f"\n[bold]{title}[/bold]")
+    console.print(f"[bt.dim]{'─' * 50}[/bt.dim]")
     for key, value in items.items():
-        text.append(f"  {key}: ", style="bold")
-        text.append(f"{value}\n", style="")
-    console.print(Panel(text, title=f"[bold]{title}[/bold]", border_style=style, padding=(1, 2)))
+        console.print(f"  [bt.dim]{key:<20}[/bt.dim]{value}")
+    console.print()
 
 
 # ── Result box ─────────────────────────────────────────────────────────────
 
 def result_box(title: str, content: str, style: str = "green"):
-    """Small result panel for single-value outcomes."""
-    console.print(
-        Panel(content, title=title, border_style=style, padding=(0, 2), expand=False)
-    )
+    """Small result block for single-value outcomes."""
+    console.print(f"\n[bold]{title}[/bold]  {content}\n")
 
 
 # ── Progress helpers ───────────────────────────────────────────────────────
@@ -290,181 +313,177 @@ def get_spinner(description: str = "Working..."):
 
 # ── Tables ─────────────────────────────────────────────────────────────────
 
-def device_table(devices: list[dict], title: str = "Discovered Devices") -> Table:
-    """Create a styled table of discovered devices."""
-    table = Table(
-        title=f"[bold {CYAN}]{title}[/bold {CYAN}]",
-        show_lines=True,
-        border_style=DIM,
-        header_style=Style(bold=True, color=CYAN),
-        title_style=Style(bold=True, color=CYAN),
+_CIRCLED = "①②③④⑤⑥⑦⑧⑨"
+
+_HDR = "bt.dim"       # column header style
+_PAD = (0, 2)         # cell padding: 0 vertical, 2 horizontal gives breathing room
+
+
+def _idx(i: int) -> str:
+    return _CIRCLED[i - 1] if 1 <= i <= len(_CIRCLED) else f"{i}."
+
+
+def bare_table() -> Table:
+    """A borderless table with dim headers and comfortable column padding.
+
+    Wrap in a Panel via ``print_table()`` to get the rich_click-style outer
+    border without internal column or row separators.
+    """
+    return Table(
+        box=None,
+        show_header=True,
+        show_lines=False,
+        header_style=_HDR,
+        padding=_PAD,
+        pad_edge=False,
     )
-    table.add_column("#", style=DIM, width=4, justify="right")
-    table.add_column("Address", style=PURPLE)
-    table.add_column("Name", style="bold white")
-    table.add_column("RSSI", style=YELLOW, justify="right")
-    table.add_column("Type", style=BLUE)
-    table.add_column("Class", style=DIM)
-    table.add_column("Manufacturer", style=CYAN)
-    table.add_column("Services", style=PURPLE)
-    table.add_column("Dist", style=DIM, justify="right")
+
+
+def print_table(table: Table, *, con: "Console | None" = None, expand: bool = False) -> None:
+    """Print a Rich table wrapped in a rich_click-style rounded Panel.
+
+    Moves the table's title into the Panel border (``╭─ Title ───╮``) and
+    prints with a blank line of breathing space above and below.
+
+    ``expand=False`` (default) shrinks the Panel to content width — ideal
+    for narrow data tables (adapter lists, host lists, etc.).
+    ``expand=True`` fills the full terminal width — use when columns contain
+    long text that should wrap naturally (list-modules, etc.).
+    """
+    _con = con or console
+    title = table.title
+    table.title = None
+    panel = Panel(
+        table,
+        title=title,
+        title_align="left",
+        border_style=DIM,
+        box=rich_box.ROUNDED,
+        padding=(0, 1),
+        expand=expand,
+    )
+    _con.print()
+    _con.print(panel)
+    _con.print()
+
+
+def device_table(devices: list[dict], title: str = "Discovered Devices") -> None:
+    """Print an aligned device summary."""
+    t = bare_table()
+    t.title = f"[bold]{title}[/bold]  [bt.dim]({len(devices)} found)[/bt.dim]"
+    t.add_column("")                          # circled index, narrow
+    t.add_column("Address", style="bt.purple")
+    t.add_column("Name")
+    t.add_column("RSSI", justify="right")
+    t.add_column("Type", style="bt.dim")
+    t.add_column("Class / Mfr", style="bt.dim")
+
     for i, dev in enumerate(devices, 1):
-        rssi = str(dev.get("rssi", "N/A"))
-        rssi_style = ""
-        if rssi != "N/A":
+        address = dev.get("address", "N/A")
+        name = dev.get("name", "Unknown")
+        name_cell = f"[bold]{name}[/bold]" if name != "Unknown" else f"[bt.dim]{name}[/bt.dim]"
+
+        rssi_raw = dev.get("rssi")
+        if rssi_raw is not None:
             try:
-                val = int(rssi)
-                if val > -50:
-                    rssi_style = GREEN
-                elif val > -70:
-                    rssi_style = YELLOW
-                else:
-                    rssi_style = RED
-                rssi = f"[{rssi_style}]{rssi} dBm[/{rssi_style}]"
-            except ValueError:
-                pass
-        # Device class info
-        class_info = dev.get("class_info", {})
-        class_str = class_info.get("major", "") if class_info else ""
-        if class_info.get("minor") and class_info["minor"] != "Unknown":
-            class_str = class_info["minor"]
-        manufacturer = dev.get("manufacturer_name") or dev.get("oui_vendor") or ""
-        if not manufacturer:
-            manufacturer_data = dev.get("manufacturer_data") or []
-            if manufacturer_data:
-                manufacturer = manufacturer_data[0].get("company_hex", "")
-        service_uuids = dev.get("service_uuids") or []
-        if len(service_uuids) <= 2:
-            service_preview = ", ".join(service_uuids)
-        elif service_uuids:
-            service_preview = f"{', '.join(service_uuids[:2])} (+{len(service_uuids) - 2})"
+                val = int(rssi_raw)
+                clr = "bt.green" if val > -50 else ("bt.yellow" if val > -70 else "bt.red")
+                rssi_cell = f"[{clr}]{val} dBm[/{clr}]"
+            except (ValueError, TypeError):
+                rssi_cell = str(rssi_raw)
         else:
-            service_preview = ""
-        # Distance
-        dist = dev.get("distance_m")
-        dist_str = f"~{dist}m" if dist else ""
-        table.add_row(
-            str(i),
-            dev.get("address", "N/A"),
-            dev.get("name", "Unknown"),
-            rssi,
-            dev.get("type", "Classic"),
-            class_str,
-            manufacturer,
-            service_preview,
-            dist_str,
-        )
-    return table
+            rssi_cell = "[bt.dim]—[/bt.dim]"
+
+        dev_type = dev.get("type", "Classic")
+
+        class_info = dev.get("class_info", {}) or {}
+        extra = class_info.get("minor", "") or class_info.get("major", "")
+        if not extra or extra == "Unknown":
+            extra = dev.get("manufacturer_name") or dev.get("oui_vendor") or ""
+        if not extra:
+            mfr_data = dev.get("manufacturer_data") or []
+            extra = mfr_data[0].get("company_hex", "") if mfr_data else ""
+
+        t.add_row(_idx(i), address, name_cell, rssi_cell, dev_type, extra)
+
+    print_table(t)
 
 
-def service_table(services: list[dict], title: str = "Services") -> Table:
-    """Create a styled table of discovered services."""
-    table = Table(
-        title=f"[bold {CYAN}]{title}[/bold {CYAN}]",
-        show_lines=True,
-        border_style=DIM,
-        header_style=Style(bold=True, color=CYAN),
-        title_style=Style(bold=True, color=CYAN),
-    )
-    table.add_column("#", style=DIM, width=4, justify="right")
-    table.add_column("Name", style="bold white")
-    table.add_column("Protocol", style=CYAN)
-    table.add_column("Channel/PSM", style=YELLOW, justify="right")
-    table.add_column("Profile", style=PURPLE)
-    table.add_column("Ver", style=DIM, width=5)
+def service_table(services: list[dict], title: str = "Services") -> None:
+    """Print an aligned service summary."""
+    t = bare_table()
+    t.title = f"[bold]{title}[/bold]  [bt.dim]({len(services)} found)[/bt.dim]"
+    t.add_column("#", style="bt.dim", justify="right")
+    t.add_column("Ch / PSM", style="bt.yellow", justify="right")
+    t.add_column("Protocol", style="bt.cyan")
+    t.add_column("Name")
+    t.add_column("Ver", style="bt.dim")
+
     for i, svc in enumerate(services, 1):
-        table.add_row(
-            str(i),
-            svc.get("name", "Unknown"),
-            svc.get("protocol", "N/A"),
-            str(svc.get("channel", "N/A")),
-            svc.get("profile", ""),
-            svc.get("profile_version", ""),
-        )
-    return table
+        ch_val = svc.get("channel") or svc.get("psm")
+        proto = svc.get("protocol", "N/A")
+        ch_label = ("ch " if "channel" in svc else "psm ") if ch_val is not None else ""
+        ch_cell = f"{ch_label}{ch_val}" if ch_val is not None else "—"
+        name = svc.get("name", "Unknown")
+        ver = svc.get("profile_version") or svc.get("version") or ""
+        t.add_row(str(i), ch_cell, proto, f"[bold]{name}[/bold]", ver)
+
+    print_table(t)
 
 
-def vuln_table(findings: list[dict], title: str = "Vulnerability Findings") -> Table:
-    """Create a styled vulnerability findings table."""
-    sev_styles = {
-        "critical": f"bold {RED}",
-        "high": RED,
-        "medium": YELLOW,
-        "low": GREEN,
-        "info": BLUE,
+def vuln_table(findings: list[dict], title: str = "Vulnerability Findings") -> None:
+    """Print an aligned vulnerability findings summary."""
+    t = bare_table()
+    t.title = f"[bold]{title}[/bold]  [bt.dim]({len(findings)} found)[/bt.dim]"
+    t.add_column("Severity")
+    t.add_column("Status")
+    t.add_column("Name")
+    t.add_column("CVE", style="bt.dim")
+
+    _sev_color = {"critical": "bt.red", "high": "bt.red", "medium": "bt.yellow"}
+    _status_color = {
+        "confirmed": "bt.green",
+        "inconclusive": "bt.yellow",
+        "pairing_required": "bt.yellow",
+        "potential": "bt.yellow",
     }
-    table = Table(
-        title=f"[bold {RED}]{title}[/bold {RED}]",
-        show_lines=True,
-        border_style=DIM,
-        header_style=Style(bold=True, color=RED),
-        title_style=Style(bold=True, color=RED),
-    )
-    status_styles = {
-        "confirmed": f"bold {GREEN}",
-        "potential": YELLOW,
-        "unverified": DIM,
-        "not_applicable": DIM,
-        "inconclusive": YELLOW,
-        "pairing_required": BLUE,
-    }
-    table.add_column("#", style=DIM, width=4, justify="right")
-    table.add_column("Severity", width=10)
-    table.add_column("Status", width=18)
-    table.add_column("Name", style="bold white")
-    table.add_column("CVE", style=YELLOW)
-    table.add_column("Description", max_width=45)
-    for i, v in enumerate(findings, 1):
+
+    for v in findings:
         sev = v.get("severity", "info").lower()
-        style = sev_styles.get(sev, "bt.blue")
-        sev_display = f"[{style}]■ {sev.upper()}[/{style}]"
+        clr = _sev_color.get(sev, "bt.dim")
+        sev_cell = f"[{clr}]■ {sev.upper()}[/{clr}]"
+
         status = v.get("status", "potential")
-        st_style = status_styles.get(status, DIM)
-        status_display = f"[{st_style}]{status}[/{st_style}]"
-        conf = v.get("confidence", "")
-        if conf:
-            status_display += f" [dim]({conf})[/dim]"
-        table.add_row(
-            str(i),
-            sev_display,
-            status_display,
-            v.get("name", ""),
-            v.get("cve", "N/A"),
-            v.get("description", ""),
-        )
-    return table
+        st_clr = _status_color.get(status, "bt.dim")
+        status_cell = f"[{st_clr}]{status}[/{st_clr}]"
+
+        t.add_row(sev_cell, status_cell, f"[bold]{v.get('name', '')}[/bold]", v.get("cve") or "")
+
+    print_table(t)
 
 
-def channel_table(results: list[dict], title: str = "Channel Scan") -> Table:
-    """Create a styled table for RFCOMM/L2CAP scan results."""
-    table = Table(
-        title=f"[bold {CYAN}]{title}[/bold {CYAN}]",
-        show_lines=True,
-        border_style=DIM,
-        header_style=Style(bold=True, color=CYAN),
-        title_style=Style(bold=True, color=CYAN),
-    )
-    # Detect if RFCOMM (has "channel") or L2CAP (has "psm")
+def channel_table(results: list[dict], title: str = "Channel Scan") -> None:
+    """Print an aligned channel scan summary."""
     is_rfcomm = any("channel" in r for r in results) if results else True
-    if is_rfcomm:
-        table.add_column("Channel", style=YELLOW, justify="right", width=8)
-    else:
-        table.add_column("PSM", style=YELLOW, justify="right", width=8)
-    table.add_column("Status", width=16)
-    table.add_column("Service/Type", style="bold white")
 
-    status_styles = {
-        "open": "[bt.green]● OPEN[/bt.green]",
-        "auth_required": "[bt.yellow]◐ AUTH REQ[/bt.yellow]",
-        "closed": "[bt.dim]○ closed[/bt.dim]",
-        "timeout": "[bt.orange]◌ timeout[/bt.orange]",
+    t = bare_table()
+    t.title = f"[bold]{title}[/bold]"
+    t.add_column("CH" if is_rfcomm else "PSM", style="bt.yellow", justify="right")
+    t.add_column("Status")
+    t.add_column("Service")
+
+    _status_display = {
+        "open":             "[bt.green]● open[/bt.green]",
+        "auth_required":    "[bt.yellow]◐ auth required[/bt.yellow]",
+        "closed":           "[bt.dim]○ closed[/bt.dim]",
+        "timeout":          "[bt.orange]◌ timeout[/bt.orange]",
         "host_unreachable": "[bt.red]✖ unreachable[/bt.red]",
     }
 
     for r in results:
         ch = str(r.get("channel", r.get("psm", "?")))
         status = r.get("status", "closed")
-        status_display = status_styles.get(status, f"[bt.dim]{status}[/bt.dim]")
         name = r.get("name", r.get("response_type", ""))
-        table.add_row(ch, status_display, name)
-    return table
+        t.add_row(ch, _status_display.get(status, f"[bt.dim]{status}[/bt.dim]"), name)
+
+    print_table(t)

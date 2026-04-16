@@ -2,8 +2,8 @@
 features previously rendered by the legacy _build_dos_html path."""
 
 import pytest
-from blue_tap.report.adapters.dos import DosReportAdapter
-from blue_tap.report.renderers.sections import render_sections
+from blue_tap.framework.reporting.adapters.dos import DosReportAdapter
+from blue_tap.framework.reporting.renderers.sections import render_sections
 
 
 def _make_envelope(executions=None, summary=None, module_data=None, extra=None):

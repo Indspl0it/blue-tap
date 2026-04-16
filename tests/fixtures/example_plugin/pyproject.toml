@@ -1,0 +1,16 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "bt-example-plugin"
+version = "0.1.0"
+description = "Example Blue-Tap plugin — demonstrates the module extension API"
+requires-python = ">=3.10"
+dependencies = ["blue-tap"]
+
+# ── Blue-Tap module entry point ───────────────────────────────────────────────
+# Blue-Tap discovers plugins via this entry-point group.
+# The value must be a dotted import path to a ModuleDescriptor instance.
+[project.entry-points."blue_tap.modules"]
+example-ping = "bt_example_plugin:DESCRIPTOR"

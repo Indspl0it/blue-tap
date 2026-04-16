@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from blue_tap.attack.bluesnarfer import ATClient
+from blue_tap.modules.post_exploitation.data.bluesnarfer import ATClient
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "profiles"

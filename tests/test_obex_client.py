@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from blue_tap.core.obex_client import MAPSession, OPPSession, PBAPSession, ObexSession, detect_obex_capability, variant_to_python
+from blue_tap.hardware.obex_client import MAPSession, OPPSession, PBAPSession, ObexSession, detect_obex_capability, variant_to_python
 
 
 class FakeClientInterface:
