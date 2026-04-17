@@ -654,9 +654,23 @@ class HCIVSCSocket:
 
         Raises:
             OSError: If the socket is not open.
+            RuntimeError: If called from an external thread while the LMP
+                monitor is running (two threads reading the same HCI socket
+                can corrupt event frames). The monitor's own loop is allowed.
         """
         if self._sock is None:
             raise OSError("HCI socket is not open")
+        monitor = self._monitor_thread
+        if (
+            monitor is not None
+            and monitor.is_alive()
+            and threading.get_ident() != monitor.ident
+        ):
+            raise RuntimeError(
+                "recv_event() cannot be called while the LMP monitor thread is "
+                "reading the same socket; call stop_lmp_monitor() first or "
+                "consume events via the monitor's callback"
+            )
 
         # Release _lock during blocking syscalls (select + recv) so concurrent
         # send_vsc() calls are not blocked for the full timeout duration.

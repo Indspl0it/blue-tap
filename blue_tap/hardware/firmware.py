@@ -33,6 +33,8 @@ FIRMWARE_PATH = "/lib/firmware/rtl_bt/rtl8761bu_fw.bin"
 FIRMWARE_ORIG = "/lib/firmware/rtl_bt/rtl8761bu_fw.bin.orig"
 BDADDR_OFFSET = 0xAD85
 USB_VID_PID = "2357:0604"
+# Known RTL8761B-bearing dongles: TP-Link UB500 (2357:0604) and generic Realtek (0BDA:8771).
+RTL8761B_VID_PIDS = ("2357:0604", "0bda:8771")
 
 # Hook backup addresses and expected values (from DarkFirmware RE)
 # Hook 1: HCI CMD handler — intercepts VSC 0xFE22 for LMP injection
@@ -144,9 +146,14 @@ class DarkFirmwareManager:
         """
         import glob
 
-        # Step 1: confirm USB device exists before touching sysfs
-        lsusb_result = run_cmd(["lsusb", "-d", USB_VID_PID])
-        if lsusb_result.returncode != 0 or not lsusb_result.stdout.strip():
+        # Step 1: confirm at least one RTL8761B-bearing USB device exists before touching sysfs
+        usb_present = False
+        for vid_pid in RTL8761B_VID_PIDS:
+            lsusb_result = run_cmd(["lsusb", "-d", vid_pid])
+            if lsusb_result.returncode == 0 and lsusb_result.stdout.strip():
+                usb_present = True
+                break
+        if not usb_present:
             return None
 
         # Step 2: map USB VID:PID → HCI via sysfs modalias
@@ -161,7 +168,8 @@ class DarkFirmwareManager:
                 if not os.path.exists(modalias_file):
                     continue
                 try:
-                    modalias = open(modalias_file).read().strip().lower()
+                    with open(modalias_file) as f:
+                        modalias = f.read().strip().lower()
                     # USB modalias format: usb:v2357p0604d...
                     if "v2357p0604" in modalias or "v0bdap8771" in modalias:
                         return hci_name
@@ -978,9 +986,9 @@ class DarkFirmwareManager:
             with HCIVSCSocket(hci_idx) as vsc:
                 # Read current RAM to get the next 2 bytes (preserve them)
                 current_ram = vsc.read_memory(ram_addr, size=4)
-                if len(current_ram) < 4:
-                    warning(f"Could not read RAM at 0x{ram_addr:08X} — file patched but RAM not updated. "
-                            f"Reset adapter to apply.")
+                if len(current_ram) != 4:
+                    warning(f"Could not read 4 bytes of RAM at 0x{ram_addr:08X} (got {len(current_ram)}) — "
+                            f"file patched but RAM not updated. Reset adapter to apply.")
                     return True  # File patch succeeded
 
                 ram_opcode = current_ram[1] if len(current_ram) > 1 else 0
@@ -1688,13 +1696,16 @@ class DarkFirmwareWatchdog:
         self._udev_thread: threading.Thread | None = None
         self._poll_thread: threading.Thread | None = None
         self._fw = DarkFirmwareManager()
+        self._reinit_lock = threading.Lock()
         self._reinit_count = 0
         self._last_reinit: float = 0.0
+        self._reinit_in_progress = False
 
     @property
     def reinit_count(self) -> int:
         """Number of times hooks have been re-initialized."""
-        return self._reinit_count
+        with self._reinit_lock:
+            return self._reinit_count
 
     def start(self) -> None:
         """Start both watchdog threads (udev monitor + periodic health check)."""
@@ -1736,36 +1747,45 @@ class DarkFirmwareWatchdog:
             self._udev_thread.join(timeout=5.0)
             self._udev_thread = None
 
-        info(f"DarkFirmware watchdog stopped (reinit_count={self._reinit_count})")
+        with self._reinit_lock:
+            final_count = self._reinit_count
+        info(f"DarkFirmware watchdog stopped (reinit_count={final_count})")
 
     def _reinit_hooks(self, event: str) -> None:
         """Re-initialize hooks and notify."""
-        # Debounce: don't reinit more than once per 5 seconds
-        now = time.monotonic()
-        if now - self._last_reinit < 5.0:
-            return
+        with self._reinit_lock:
+            now = time.monotonic()
+            if self._reinit_in_progress:
+                return
+            if now - self._last_reinit < 5.0:
+                return
+            self._reinit_in_progress = True
 
-        warning(f"DarkFirmware watchdog: {event} — re-initializing hooks on {self.hci}")
+        try:
+            warning(f"DarkFirmware watchdog: {event} — re-initializing hooks on {self.hci}")
 
-        # Wait for HCI device to settle after USB event
-        time.sleep(3.0)
+            time.sleep(3.0)
 
-        # Verify DarkFirmware is still loaded (firmware file is persistent)
-        if not self._fw.is_darkfirmware_loaded(self.hci):
-            warning(
-                f"DarkFirmware not detected on {self.hci} after {event} — "
-                f"firmware may have been replaced"
-            )
-            return
+            if not self._fw.is_darkfirmware_loaded(self.hci):
+                warning(
+                    f"DarkFirmware not detected on {self.hci} after {event} — "
+                    f"firmware may have been replaced"
+                )
+                return
 
-        result = self._fw.init_hooks(self.hci)
-        self._last_reinit = time.monotonic()
+            result = self._fw.init_hooks(self.hci)
+        finally:
+            with self._reinit_lock:
+                self._last_reinit = time.monotonic()
+                self._reinit_in_progress = False
 
         if result.get("all_ok"):
-            self._reinit_count += 1
+            with self._reinit_lock:
+                self._reinit_count += 1
+                count = self._reinit_count
             success(
                 f"DarkFirmware watchdog: hooks re-initialized on {self.hci} "
-                f"(total reinits: {self._reinit_count})"
+                f"(total reinits: {count})"
             )
             if self.on_reinit:
                 try:

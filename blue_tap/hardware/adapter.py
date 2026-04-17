@@ -398,12 +398,30 @@ def _hci_cmd(hci: str, *args: str) -> bool:
     return True
 
 
+def _resolve_hci_or_fail(hci: str | None, operation: str) -> tuple[str | None, dict | None]:
+    """Resolve optional hci to a concrete adapter, or return an error dict."""
+    if hci:
+        return hci, None
+    resolved = resolve_active_hci()
+    if not resolved:
+        return None, {
+            "success": False,
+            "hci": "",
+            "operation": operation,
+            "error": "No HCI adapter specified and none could be auto-discovered",
+        }
+    return resolved, None
+
+
 def adapter_up(hci: str | None = None) -> dict:
     """Bring an adapter up.
 
     Returns:
         {"success": bool, "hci": str, "operation": str, "error": str|None}
     """
+    hci, err = _resolve_hci_or_fail(hci, "up")
+    if err is not None:
+        return err
     if not _adapter_exists(hci):
         return {"success": False, "hci": hci, "operation": "up", "error": f"Adapter {hci} not found"}
     if _hci_cmd(hci, "up"):
@@ -419,6 +437,9 @@ def adapter_down(hci: str | None = None) -> dict:
     Returns:
         {"success": bool, "hci": str, "operation": str, "error": str|None}
     """
+    hci, err = _resolve_hci_or_fail(hci, "down")
+    if err is not None:
+        return err
     if not _adapter_exists(hci):
         return {"success": False, "hci": hci, "operation": "down", "error": f"Adapter {hci} not found"}
     if _hci_cmd(hci, "down"):
@@ -434,6 +455,9 @@ def adapter_reset(hci: str | None = None) -> dict:
     Returns:
         {"success": bool, "hci": str, "operation": str, "error": str|None}
     """
+    hci, err = _resolve_hci_or_fail(hci, "reset")
+    if err is not None:
+        return err
     if not _adapter_exists(hci):
         return {"success": False, "hci": hci, "operation": "reset", "error": f"Adapter {hci} not found"}
     if _hci_cmd(hci, "reset"):

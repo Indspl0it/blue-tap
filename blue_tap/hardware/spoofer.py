@@ -36,10 +36,17 @@ def save_original_mac(hci: str):
     if hci not in data:  # Only save if not already stored (idempotent)
         data[hci] = addr
         tmp_path = _ORIGINAL_MAC_FILE + ".tmp"
-        with open(tmp_path, "w") as f:
-            json.dump(data, f, indent=2)
-        os.replace(tmp_path, _ORIGINAL_MAC_FILE)
-        info(f"Saved original MAC for {hci}: {addr}")
+        try:
+            with open(tmp_path, "w") as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp_path, _ORIGINAL_MAC_FILE)
+            info(f"Saved original MAC for {hci}: {addr}")
+        except PermissionError as exc:
+            warning(
+                f"Cannot persist original MAC for {hci}: {exc}. "
+                f"The file at {_ORIGINAL_MAC_FILE} may be root-owned — "
+                f"chown it to the current user to re-enable MAC restore."
+            )
 
 
 def get_original_mac(hci: str) -> str | None:
@@ -304,15 +311,21 @@ def spoof_rtl8761b(hci: str, target_mac: str) -> dict:
                     "target_mac": target_mac, "verified": False, "hci": hci,
                     "error": "RTL8761B not detected on this adapter"}
 
-        # Preferred: RAM-only live patch (no file modification, instant)
+        # Preferred: RAM-only live patch. Fall through to firmware file patch
+        # if RAM patch doesn't actually change the adapter address.
         if fw.is_darkfirmware_loaded(hci):
             info("Attempting RAM-only BDADDR patch (preferred, no USB reset)...")
             if fw.patch_bdaddr_ram(target_mac, hci):
                 new_addr = get_adapter_address(hci) or ""
-                verified = new_addr.upper() == target_mac.upper()
-                return {"success": True, "method": "rtl8761b", "original_mac": original,
-                        "target_mac": target_mac, "verified": verified, "hci": hci, "error": ""}
-            warning("RAM patch did not verify — falling back to firmware file patch")
+                if new_addr.upper() == target_mac.upper():
+                    return {"success": True, "method": "rtl8761b", "original_mac": original,
+                            "target_mac": target_mac, "verified": True, "hci": hci, "error": ""}
+                warning(
+                    f"RAM patch applied but adapter still reports {new_addr!r} "
+                    f"(expected {target_mac!r}) — falling back to firmware file patch"
+                )
+            else:
+                warning("RAM patch did not verify — falling back to firmware file patch")
 
         # Fallback: firmware file patch + USB reset (persistent, slower)
         info("Using firmware file BDADDR patch (USB reset required)...")
@@ -320,8 +333,9 @@ def spoof_rtl8761b(hci: str, target_mac: str) -> dict:
         if ok:
             new_addr = get_adapter_address(hci) or ""
             verified = new_addr.upper() == target_mac.upper()
-            return {"success": True, "method": "rtl8761b", "original_mac": original,
-                    "target_mac": target_mac, "verified": verified, "hci": hci, "error": ""}
+            return {"success": verified, "method": "rtl8761b", "original_mac": original,
+                    "target_mac": target_mac, "verified": verified, "hci": hci,
+                    "error": "" if verified else f"patch applied but adapter reports {new_addr!r}"}
         return {"success": False, "method": "rtl8761b", "original_mac": original,
                 "target_mac": target_mac, "verified": False, "hci": hci,
                 "error": "firmware file BDADDR patch failed"}
