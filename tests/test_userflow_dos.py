@@ -80,9 +80,9 @@ def test_dos_unknown_module_clean_error(tmp_path):
          f"RHOST={TARGET}", "CONFIRM=yes"],
     )
 
-    # Must not crash with exit code != 0 due to unhandled exception
-    assert result.exit_code == 0, \
-        f"Expected graceful exit, got {result.exit_code}:\n{result.output}"
+    # Failed module runs now correctly exit non-zero (clean error, not crash)
+    assert result.exit_code == 1, \
+        f"Expected non-zero exit for unknown module, got {result.exit_code}:\n{result.output}"
 
     # Must say "not found" or similar — not a raw traceback
     output_lower = result.output.lower()

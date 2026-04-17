@@ -98,9 +98,10 @@ def test_vulnscan_accepts_options(runner):
     assert "--phone" in result.output
 
 
-def test_vulnscan_requires_target(runner):
+def test_vulnscan_interactive_picker_when_no_target(runner):
+    """Without a target, vulnscan launches the interactive device picker."""
     result = runner.invoke(cli, ["vulnscan"])
-    assert result.exit_code != 0
+    assert "Select target" in result.output or "Device Discovery" in result.output
 
 
 # ── exploit ──────────────────────────────────────────────────────────────────
@@ -152,9 +153,10 @@ def test_dos_accepts_options(runner):
     assert "--recovery-timeout" in result.output
 
 
-def test_dos_requires_target(runner):
+def test_dos_interactive_picker_when_no_target(runner):
+    """Without a target, dos launches the interactive device picker."""
     result = runner.invoke(cli, ["dos"])
-    assert result.exit_code != 0
+    assert "Select target" in result.output or "Device Discovery" in result.output
 
 
 # ── extract ──────────────────────────────────────────────────────────────────
@@ -234,7 +236,7 @@ def test_fuzz_analysis_commands_registered(runner):
 def test_auto_help(runner):
     result = runner.invoke(cli, ["auto", "--help"])
     assert result.exit_code == 0
-    assert "Full automated assessment" in result.output
+    assert "Four-phase assessment shortcut" in result.output
 
 
 def test_auto_accepts_options(runner):
@@ -244,6 +246,7 @@ def test_auto_accepts_options(runner):
 
 
 def test_auto_requires_target(runner):
+    """auto runs non-interactively and requires a target address."""
     result = runner.invoke(cli, ["auto"])
     assert result.exit_code != 0
 

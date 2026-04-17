@@ -4,10 +4,10 @@ duration: ~5 minutes
 risk: none (completely passive)
 
 steps:
-  - command: scan classic -d 20
+  - command: discover classic -d 20
     description: Extended Classic BT scan
 
-  - command: scan ble -d 20 --passive
+  - command: discover ble -d 20 --passive
     description: Passive BLE advertisement scan
 
   - command: adapter firmware-status

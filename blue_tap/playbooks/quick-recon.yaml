@@ -4,13 +4,13 @@ duration: ~2 minutes
 risk: none
 
 steps:
-  - command: scan classic -d 10
+  - command: discover classic -d 10
     description: Discover nearby Bluetooth Classic devices
 
-  - command: recon fingerprint {target}
+  - command: recon {target} fingerprint
     description: Fingerprint target device (version, features)
 
-  - command: recon sdp {target}
+  - command: recon {target} sdp
     description: Enumerate SDP services
 
   - command: vulnscan {target}

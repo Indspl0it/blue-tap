@@ -4,16 +4,16 @@ duration: ~10 minutes
 risk: low (active probing may be detected)
 
 steps:
-  - command: vulnscan {target} -i {hci}
+  - command: vulnscan {target} -a {hci}
     description: Full vulnerability scan
 
-  - command: recon rfcomm-scan {target}
+  - command: recon {target} rfcomm
     description: Scan all 30 RFCOMM channels
 
-  - command: recon l2cap-scan {target}
+  - command: recon {target} l2cap
     description: Scan L2CAP PSM range
 
-  - command: recon lmp-sniff {target} -d 30 --filter security --hci {hci} -o lmp_capture.json
+  - command: recon {target} sniff -m lmp -d 30 -o lmp_capture.pcap
     description: Capture LMP security negotiation
 
   - command: report -o assessment_report.html

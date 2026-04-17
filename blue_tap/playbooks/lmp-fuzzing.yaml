@@ -13,10 +13,7 @@ steps:
   - command: adapter firmware-set lmp-size 17
     description: Unlock full LMP PDU size
 
-  - command: fuzz lmp {target} -m all -c 500 --hci {hci}
-    description: Run all LMP fuzz cases
-
-  - command: fuzz campaign {target} --protocols lmp,l2cap,sdp --duration 1h --strategy coverage-guided
+  - command: fuzz campaign {target} -p sdp -p rfcomm -p bnep --duration 1h --strategy coverage_guided
     description: Full multi-protocol fuzzing campaign
 
   - command: report -o fuzz_report.html
