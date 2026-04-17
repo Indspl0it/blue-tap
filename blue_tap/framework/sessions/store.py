@@ -22,12 +22,17 @@ Session directory structure:
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from blue_tap.framework.contracts.result_schema import looks_like_run_envelope, validate_run_envelope
 
 _logger = logging.getLogger(__name__)
+
+
+def _now_iso_utc() -> str:
+    """Return the current time as a UTC ISO-8601 string."""
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _atomic_write_bytes_or_text(filepath: str, content: str | bytes) -> None:
@@ -176,8 +181,8 @@ class Session:
         os.makedirs(self.dir, exist_ok=True)
         self.metadata = {
             "name": self.name,
-            "created": datetime.now().isoformat(),
-            "last_updated": datetime.now().isoformat(),
+            "created": _now_iso_utc(),
+            "last_updated": _now_iso_utc(),
             "adapter": "",
             "targets": [],
             "hosts": [],
@@ -205,7 +210,7 @@ class Session:
         instead of producing a truncated file that ``_load`` would interpret as
         corrupt and silently recreate.
         """
-        self.metadata["last_updated"] = datetime.now().isoformat()
+        self.metadata["last_updated"] = _now_iso_utc()
         tmp_path = f"{self.meta_file}.tmp"
         try:
             with open(tmp_path, "w") as f:
@@ -240,7 +245,7 @@ class Session:
             "command": command,
             "category": category,
             "target": target,
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": _now_iso_utc(),
             "data": data,
         }
         if looks_like_run_envelope(data):
@@ -264,7 +269,7 @@ class Session:
             "command": command,
             "category": category,
             "target": target,
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": _now_iso_utc(),
             "file": filename,
         }
         if "validation" in entry:
@@ -320,7 +325,7 @@ class Session:
 
         self.metadata.setdefault("files", []).append({
             "path": os.path.relpath(filepath, self.dir),
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": _now_iso_utc(),
             "size": len(content),
             "artifact_type": artifact_type or "",
         })
@@ -347,7 +352,7 @@ class Session:
                     host["type"] = device_type
                 if manufacturer:
                     host["manufacturer"] = manufacturer
-                host["last_seen"] = datetime.now().isoformat()
+                host["last_seen"] = _now_iso_utc()
                 self._save_meta()
                 return
         hosts.append({
@@ -355,7 +360,7 @@ class Session:
             "name": name,
             "type": device_type,
             "manufacturer": manufacturer,
-            "last_seen": datetime.now().isoformat(),
+            "last_seen": _now_iso_utc(),
         })
         self._save_meta()
 

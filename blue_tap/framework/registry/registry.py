@@ -25,6 +25,14 @@ class ModuleRegistry:
         self._modules[descriptor.module_id] = descriptor
         logger.debug("Registered module %s", descriptor.module_id)
 
+    def unregister(self, module_id: str) -> bool:
+        """Remove a module descriptor. Returns True if the id was present."""
+        if module_id in self._modules:
+            del self._modules[module_id]
+            logger.debug("Unregistered module %s", module_id)
+            return True
+        return False
+
     def get(self, module_id: str) -> ModuleDescriptor:
         return self._modules[module_id]
 
@@ -62,7 +70,8 @@ class ModuleRegistry:
         loaded = []
         try:
             eps = importlib.metadata.entry_points(group="blue_tap.modules")
-        except Exception:
+        except Exception as exc:
+            logger.warning("Plugin discovery failed: %s", exc, exc_info=True)
             return loaded
         for ep in eps:
             try:

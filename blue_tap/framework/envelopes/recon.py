@@ -125,6 +125,7 @@ def build_recon_execution(
     started_at: str,
     completed_at: str | None = None,
     execution_id: str | None = None,
+    module_id: str | None = None,
 ) -> dict[str, Any]:
     finished = completed_at or now_iso()
     extra = dict(module_data_extra or {})
@@ -144,6 +145,7 @@ def build_recon_execution(
         id=operation,
         title=title,
         module="reconnaissance",
+        module_id=module_id or f"reconnaissance.{operation}",
         protocol=protocol,
         execution_status=execution_status,
         module_outcome=module_outcome,

@@ -24,6 +24,9 @@ class SectionModel:
 class ReportAdapter(ABC):
     module: str = ""
 
+    #: Lower priority runs first. Wildcard fallback adapters should raise priority.
+    priority: int = 100
+
     @abstractmethod
     def accepts(self, envelope: dict[str, Any]) -> bool:
         raise NotImplementedError

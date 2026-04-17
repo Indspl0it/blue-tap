@@ -37,25 +37,10 @@ _BUILTIN_ADAPTER_CLASSES: frozenset[type] = frozenset(type(a) for a in REPORT_AD
 
 
 def get_report_adapters() -> tuple:
-    """Return all active report adapters: built-in static ones plus any registered
-    via the framework registry through ``report_adapter_path``.
-
-    Third-party plugins advertise their adapter by setting ``report_adapter_path``
-    on their :class:`~blue_tap.framework.registry.ModuleDescriptor`.  This function
-    imports those classes at call time (lazy) and appends them to the static tuple.
-
-    Dedup: adapters are identified by class. A plugin descriptor that points to an
-    already-built-in adapter class (or to the same class as another plugin
-    descriptor) is loaded only once.
-
-    Returns:
-        Tuple of :class:`~blue_tap.framework.contracts.report_contract.ReportAdapter`
-        instances.  Safe to call multiple times (re-imports on each call; callers
-        should cache the result if performance matters).
-    """
+    """Return all active report adapters, ordered by ``priority`` (ascending)."""
     from blue_tap.framework.registry import get_registry
 
-    extra: list = []
+    all_adapters: list = list(REPORT_ADAPTERS)
     seen_classes: set[type] = set(_BUILTIN_ADAPTER_CLASSES)
     try:
         registry = get_registry()
@@ -68,12 +53,16 @@ def get_report_adapters() -> tuple:
                 cls = getattr(mod, class_name)
                 if cls in seen_classes:
                     continue
-                extra.append(cls())
+                instance = cls()
+                if "priority" not in cls.__dict__ and instance.priority == 100:
+                    instance.priority = 50
+                all_adapters.append(instance)
                 seen_classes.add(cls)
                 _logger.debug(
-                    "Loaded plugin report adapter %s for module %s",
+                    "Loaded plugin report adapter %s for module %s (priority=%d)",
                     desc.report_adapter_path,
                     desc.module_id,
+                    instance.priority,
                 )
             except Exception as exc:
                 _logger.warning(
@@ -85,9 +74,8 @@ def get_report_adapters() -> tuple:
     except Exception as exc:
         _logger.warning("Registry unavailable when loading report adapters: %s", exc)
 
-    if extra:
-        return REPORT_ADAPTERS + tuple(extra)
-    return REPORT_ADAPTERS
+    all_adapters.sort(key=lambda a: getattr(a, "priority", 100))
+    return tuple(all_adapters)
 
 
 def get_adapters_for_report(schema: str) -> list:

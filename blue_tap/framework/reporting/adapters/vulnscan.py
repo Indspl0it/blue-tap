@@ -10,6 +10,8 @@ from blue_tap.framework.contracts.result_schema import envelope_executions, enve
 
 class VulnscanReportAdapter(ReportAdapter):
     module = "assessment"
+    # Fallback adapter — runs after plugin adapters (default 50).
+    priority = 200
 
     def accepts(self, envelope: dict[str, Any]) -> bool:
         """Accept any vulnscan-family envelope.

@@ -209,6 +209,17 @@ def function_module(
         _FunctionModule.__qualname__ = fn.__qualname__
         _FunctionModule.__doc__ = fn.__doc__
 
+        # Place the dynamic class into the *calling* module's namespace so
+        # that the entry_point string resolves at import time. Without this,
+        # Invoker.resolve() cannot find the class because it lives in a
+        # local scope inside base.py's decorator.
+        import sys
+        caller_module_name = fn.__module__
+        caller_module = sys.modules.get(caller_module_name)
+        if caller_module is not None:
+            setattr(caller_module, _FunctionModule.__name__, _FunctionModule)
+        _FunctionModule.__module__ = caller_module_name
+
         # Trigger registration by setting module_id after class creation
         # (The class was created with module_id="" so __init_subclass__ skipped it)
         # We need to manually register now
@@ -223,7 +234,7 @@ def function_module(
             requires_pairing=requires_pairing,
             schema_prefix=schema_prefix,
             has_report_adapter=has_report_adapter,
-            entry_point=f"{_FunctionModule.__module__}:{_FunctionModule.__name__}",
+            entry_point=f"{caller_module_name}:{_FunctionModule.__name__}",
             internal=internal,
             report_adapter_path=report_adapter_path,
             category=category,

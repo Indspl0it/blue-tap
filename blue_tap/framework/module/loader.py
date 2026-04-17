@@ -79,10 +79,30 @@ def load_plugins(reload: bool = False) -> tuple[list[str], dict[str, str]]:
     except ImportError:
         import importlib_metadata  # type: ignore
 
-    if reload:
-        _plugin_registry.clear()
-
     from blue_tap.framework.registry import get_registry
+
+    if reload:
+        import sys
+        registry = get_registry()
+        previously_loaded_modules: list[str] = []
+        for plugin_name, plugin_data in list(_plugin_registry.items()):
+            for module_id in plugin_data.get("modules", []) or []:
+                try:
+                    registry.unregister(module_id)
+                except Exception:
+                    logger.debug(
+                        "Failed to unregister %s during plugin reload",
+                        module_id,
+                        exc_info=True,
+                    )
+            ep_value = plugin_data.get("entry_point", "")
+            if ep_value:
+                top_module = ep_value.split(":", 1)[0].split(".", 1)[0]
+                previously_loaded_modules.append(top_module)
+        for mod_name in set(previously_loaded_modules):
+            for cached in [k for k in sys.modules if k == mod_name or k.startswith(mod_name + ".")]:
+                del sys.modules[cached]
+        _plugin_registry.clear()
 
     loaded = []
     failed = {}

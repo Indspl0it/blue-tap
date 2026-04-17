@@ -48,9 +48,16 @@ VALID_OUTCOMES_BY_FAMILY: dict[str, frozenset[str]] = {
         "observed", "merged", "correlated", "partial", "not_applicable",
         # legacy / specialised outcomes emitted by recon modules
         "unsupported_transport", "collector_unavailable", "prerequisite_missing",
-        "artifact_collected",      # hci_capture, pcap dumps
-        "hidden_surface_detected", # rfcomm_scan hidden-channel discovery
-        "no_relevant_traffic",     # sniffer with no captured frames
+        "artifact_collected",
+        "hidden_surface_detected",
+        "no_relevant_traffic",
+        "undetermined",
+        "partial_observation",
+        "auth_required",
+        "not_found",
+        "not_connectable",
+        "timeout",
+        "no_results",
     }),
     "assessment": frozenset({
         "confirmed", "inconclusive", "pairing_required", "not_applicable",

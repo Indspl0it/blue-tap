@@ -249,13 +249,13 @@ class OptPath(Opt):
     must_be_file: bool = False
     must_be_dir: bool = False
 
-    def validate(self, value: Any) -> str:
+    def validate(self, value: Any) -> str | None:
         if value is None:
             if self.required:
                 raise OptionError(self.name, "is required")
             if self.default:
                 return str(self.default)
-            raise OptionError(self.name, "is required (no default)")
+            return None
 
         path_str = str(value).strip()
 
