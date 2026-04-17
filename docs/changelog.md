@@ -5,6 +5,25 @@ All notable changes to Blue-Tap are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.2] - 2026-04-17
+
+### Summary
+
+Blue-Tap 2.6.2 is a small follow-up to 2.6.1 that fixes post-USB-reset verification on RTL8761B adapters and wires up automated GitHub Pages deployment for the docs site.
+
+### Fixed — Hardware
+
+- **`DarkFirmwareManager.usb_reset_and_wait()`** — new method that resets the RTL8761B, waits for teardown, then polls `find_rtl8761b_hci()` until the adapter re-enumerates and returns the new `hciX` name. The kernel can re-enumerate the adapter under a different index after reset (e.g. `hci8 → hci0`); callers that verified post-reset state (`is_darkfirmware_loaded`, `get_current_bdaddr`) were probing the pre-reset name and reporting "verification inconclusive" even when install/patch succeeded
+- **`firmware-install` (install + restore)**, **`patch_bdaddr`**, and the startup auto-install prompt now use the re-enumerated `hci` for verification and user-facing messages
+
+### Build
+
+- **Version** bumped to `2.6.2`
+- **`.github/workflows/docs.yml`** — new workflow auto-builds MkDocs site with `--strict` and deploys to GitHub Pages on every push to `main`
+- **`pyproject.toml`** — license metadata format fixed to satisfy PEP 639 (SPDX expression only, no classifier duplication)
+
+---
+
 ## [2.6.1] - 2026-04-17
 
 ### Summary
@@ -751,6 +770,7 @@ This release extends Blue-Tap below the HCI boundary with a custom firmware plat
 - 4 fuzzing strategies, crash database, minimization
 - Session management, HTML/JSON reports, auto pentest, playbooks
 
+[2.6.2]: https://github.com/Indspl0it/blue-tap/compare/v2.6.1...v2.6.2
 [2.6.1]: https://github.com/Indspl0it/blue-tap/compare/v2.6.0...v2.6.1
 [2.6.0]: https://github.com/Indspl0it/blue-tap/compare/v2.5.0...v2.6.0
 [2.5.0]: https://github.com/Indspl0it/blue-tap/compare/v2.3.2...v2.5.0

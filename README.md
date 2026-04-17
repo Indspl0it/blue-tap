@@ -9,7 +9,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/python-3.10%2B-blue" alt="Python 3.10+"/>
   <img src="https://img.shields.io/badge/license-GPL--3.0-green" alt="License GPL-3.0"/>
-  <img src="https://img.shields.io/badge/version-2.6.1-orange" alt="Version 2.6.1"/>
+  <img src="https://img.shields.io/badge/version-2.6.2-orange" alt="Version 2.6.2"/>
   <img src="https://img.shields.io/badge/modules-101-cyan" alt="101 Modules"/>
   <img src="https://img.shields.io/badge/CVEs-37-red" alt="37 CVEs"/>
   <img src="https://img.shields.io/badge/platform-Linux%20(Kali)-557C94" alt="Linux"/>
@@ -73,7 +73,7 @@ pip install -e .
 ### Verify Installation
 
 ```bash
-blue-tap --version          # Should print 2.6.1
+blue-tap --version          # Should print 2.6.2
 blue-tap doctor             # Check all prerequisites
 sudo blue-tap adapter list  # List Bluetooth adapters
 ```
