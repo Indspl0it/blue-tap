@@ -100,24 +100,62 @@ All transports share a common interface: `connect()`, `send()`, `recv()`, `recon
 ### Multi-protocol campaign
 
 ```bash
-blue-tap fuzz campaign TARGET --protocols l2cap,sdp --duration 2h --strategy coverage_guided --cooldown 0.5 --continue
+blue-tap fuzz campaign TARGET -p sdp -p rfcomm --duration 2h --strategy coverage_guided --delay 0.5
 ```
 
 | Flag | Description |
 |------|-------------|
-| `--protocols` | Comma-separated protocol list |
-| `--duration` | Campaign time limit (e.g., `2h`, `30m`) |
-| `--strategy` | Mutation strategy (default: `coverage_guided`) |
-| `--cooldown` | Seconds between packets |
-| `--continue` | Resume from existing corpus/crash state |
+| `-p/--protocol` | Protocol to fuzz — repeat for multiple (`-p sdp -p rfcomm`). Choices: `sdp`, `rfcomm`, `bnep`, `obex-pbap`, `obex-map`, `obex-opp`, `at-hfp`, `at-phonebook`, `at-sms`, `ble-att`, `ble-smp`, `all`. |
+| `--strategy/-s` | Mutation strategy — `coverage_guided` (default), `random`, `state_machine`, `targeted` |
+| `--duration/-d` | Campaign time limit (e.g., `2h`, `30m`, `24h`) |
+| `--iterations/-n` | Cap total test cases (overrides duration) |
+| `--delay` | Seconds between test cases (default `0.5`) |
+| `--cooldown` | Seconds to wait after crash detection |
+| `--capture/--no-capture` | Record a btsnoop pcap during fuzzing |
+| `--resume` | Resume the previous campaign from the session's `fuzz/campaign_state.json`. Restores stats, corpus, crash DB, and coverage state. If the state file is missing or unreadable, starts a fresh campaign. |
+
+!!! tip "Protocol name aliases"
+    When protocols are supplied as a comma-separated string (module `PROTOCOLS=pbap,hfp` via `blue-tap run fuzzing.engine`), short aliases are accepted and normalized: `pbap→obex-pbap`, `hfp→at-hfp`, `map→obex-map`, `opp→obex-opp`, `att→ble-att`, `smp→ble-smp`, `phonebook→at-phonebook`, `sms→at-sms`. The `fuzz campaign --protocol` CLI flag is a strict Click choice — pass the canonical name there.
 
 ### Single protocol
 
 ```bash
 blue-tap fuzz sdp-deep TARGET
 blue-tap fuzz ble-att TARGET
-blue-tap fuzz l2cap TARGET
+blue-tap fuzz l2cap-sig TARGET
 ```
+
+??? example "Example output (sdp-deep)"
+
+    ```
+    $ sudo blue-tap fuzz sdp-deep 4C:4F:EE:17:3A:89
+
+    ─────────────────────── SDP Deep Fuzzing ───────────────────────
+    15:30:00  ●  Target: 4C:4F:EE:17:3A:89 | Mode: all
+    15:30:00  ●  Generated 858 SDP fuzz cases
+    Generating fuzzing corpus ━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1/1 done — 858 seeds
+    15:30:00  ●  Strategy: coverage-guided (response-diversity feedback)
+    15:30:00  ●  Single-protocol fuzz: sdp, 858 cases
+    15:30:01  ●  Connected to 4C:4F:EE:17:3A:89 (L2CAP PSM 1)
+    15:30:45  ●  Sent 412/858 — 0 crashes, 7 unique responses
+    15:31:22  ⚠  Target unresponsive after case 651 (continuation_overflow_003)
+    15:31:22  ●  CRASH detected: device_disappeared (sdp)
+    15:31:22  ●  Payload: 38 bytes, hash: c4a92f...
+    15:31:22  ●  Saved: crash_001_sdp_device_disappeared.bin
+    15:31:32  ●  Target recovered after 10s
+    15:32:01  ✔  Phase complete (121.0s)
+
+    Fuzz SDP Results
+    ──────────────────────────────────────────────────
+      Target              4C:4F:EE:17:3A:89
+      Protocol            sdp
+      Cases sent          858
+      Crashes             1
+      Unique responses    23
+      Errors              4
+      Duration            121.0s
+      Crash DB            ./sessions/blue-tap_.../fuzz/crashes.db
+    ```
 
 ### CVE reproduction
 
@@ -125,19 +163,46 @@ blue-tap fuzz l2cap TARGET
 blue-tap fuzz cve TARGET --cve CVE-2017-0785
 ```
 
+??? example "Example output"
+
+    ```
+    $ sudo blue-tap fuzz cve 4C:4F:EE:17:3A:89 --cve CVE-2017-0785
+
+    ─────────────── CVE Reproduction: CVE-2017-0785 ────────────────
+    15:35:00  ●  Loading CVE-2017-0785 template (SDP continuation state attack)
+    15:35:00  ●  Base pattern: SDP ServiceSearchAttributeRequest with crafted
+                 continuation state (12 variants)
+    15:35:00  ●  Strategy: targeted (exploit structure + boundary mutations)
+    15:35:01  ●  Connected to 4C:4F:EE:17:3A:89 (L2CAP PSM 1)
+    15:35:01  ●  Sending 12 CVE-derived variants...
+    15:35:03  ●  Variant 1/12: original PoC → response 48 bytes (normal)
+    15:35:04  ●  Variant 4/12: extended continuation → response 312 bytes (LEAK)
+    15:35:04  ⚠  Info leak detected: 264 extra bytes in response (heap data)
+    15:35:06  ●  Variant 8/12: oversized continuation → connection reset
+    15:35:06  ●  CRASH detected: connection_reset (sdp)
+    15:35:16  ✔  Target recovered
+
+    CVE-2017-0785 Reproduction Results
+    ──────────────────────────────────────────────────
+      Variants sent       12
+      Info leaks           1  (variant 4: 264 bytes leaked)
+      Crashes              1  (variant 8: connection reset)
+      Verdict              VULNERABLE
+    ```
+
 7 CVE patterns are included as targeted fuzzing templates. The `targeted` strategy applies the known exploit structure plus variant mutations to probe for related vulnerabilities.
 
 ### Example: Starting a campaign from scratch
 
 ```
-$ blue-tap fuzz campaign AA:BB:CC:DD:EE:FF --protocols sdp,l2cap --duration 1h --strategy coverage_guided
+$ blue-tap fuzz campaign AA:BB:CC:DD:EE:FF -p sdp -p rfcomm --duration 1h --strategy coverage_guided
 
 [15:00:01] Initializing FuzzCampaign
 [15:00:01] Target: AA:BB:CC:DD:EE:FF
-[15:00:01] Protocols: sdp, l2cap
+[15:00:01] Protocols: sdp, rfcomm
 [15:00:01] Strategy: coverage_guided
 [15:00:01] Duration: 1h
-[15:00:02] Loading corpus: 847 seeds (sdp: 412, l2cap: 435)
+[15:00:02] Loading corpus: 847 seeds (sdp: 412, rfcomm: 435)
 [15:00:02] Baseline learning phase: sending 50 valid packets per protocol...
 [15:00:08] Baseline established: 12 unique response fingerprints
 [15:00:08] Switching to anomaly detection mode
@@ -376,7 +441,7 @@ A complete workflow from crash detection to actionable report.
 After a fuzzing campaign, list all recorded crashes:
 
 ```
-$ blue-tap fuzz crashes --protocol sdp --severity HIGH
+$ blue-tap fuzz crashes list --protocol sdp --severity HIGH
 
   Crashes (sdp, HIGH+):
   ──────────────────────────────────────────────────────────
@@ -416,17 +481,20 @@ $ blue-tap fuzz crashes show c_001
 
 ### Step 3: Replay and confirm
 
+`crashes replay` delegates to `CrashDB.reproduce_crash()`, which reads the stored `packet_sequence_json` (if any) and replays **all** packets in order. State-machine crashes that required a setup sequence at discovery time are correctly reproduced; single-packet legacy records fall back to replaying `payload_hex` alone.
+
 ```
 $ blue-tap fuzz crashes replay c_001
 
 [15:30:01] Replaying crash c_001 against AA:BB:CC:DD:EE:FF
 [15:30:01] Protocol: sdp, Transport: L2CAP PSM 1
-[15:30:02] Sending payload (48 bytes)...
-[15:30:02] Waiting for response (timeout: 10s)...
-[15:30:12] No response. Probing target...
-[15:30:15] Target not found in inquiry scan.
-[15:30:15] CONFIRMED: device_disappeared reproduced.
+[15:30:02] Reproducing crash 1: 1 packet(s), 48 total bytes via sdp
+[15:30:02] Sent 48 bytes (1 packet(s)), waiting for response
+[15:30:12] recv timed out, checking device liveness
+[15:30:15] Crash 1 reproduced: device unresponsive after timeout
 ```
+
+For stateful crashes that need multiple packets (e.g. an OBEX CONNECT followed by a malformed GET), the same command replays the full sequence — you will see `N packet(s), M total bytes` reflecting the stored setup chain.
 
 ### Step 4: Minimize
 
@@ -490,7 +558,7 @@ SQLite-backed crash database with deduplication:
 
 ```bash
 # List crashes filtered by protocol and severity
-blue-tap fuzz crashes --protocol sdp --severity HIGH
+blue-tap fuzz crashes list --protocol sdp --severity HIGH
 
 # Show crash details
 blue-tap fuzz crashes show CRASH_ID
@@ -553,6 +621,34 @@ Import and replay packets from Bluetooth snoop captures.
 ```bash
 blue-tap fuzz replay --capture file.btsnoop TARGET
 ```
+
+??? example "Example output"
+
+    ```
+    $ sudo blue-tap fuzz replay --capture crash_capture.btsnoop 4C:4F:EE:17:3A:89
+
+    ──────────────────── PCAP Replay ────────────────────
+    16:00:00  ●  Parsing crash_capture.btsnoop (btsnoop v1)
+    16:00:00  ●  Extracted 47 packets (L2CAP: 31, SDP: 12, ACL: 4)
+    16:00:00  ●  Connecting to 4C:4F:EE:17:3A:89...
+    16:00:02  ✔  Connected (ACL handle=0x000B)
+    16:00:02  ●  Replaying 47 packets with original timing...
+    16:00:02  ●  Packet  1/47: L2CAP Connection Request (PSM=0x0001) → OK
+    16:00:03  ●  Packet 12/47: SDP ServiceSearchAttrReq → response 48 bytes
+    16:00:04  ●  Packet 23/47: SDP malformed continuation → response 312 bytes
+    16:00:04  ⚠  Anomaly: response 264 bytes larger than baseline
+    16:00:05  ●  Packet 35/47: SDP oversized continuation → connection reset
+    16:00:05  ●  CRASH reproduced at packet 35
+    16:00:05  ●  Crash matches original capture (hash: c4a92f...)
+    16:00:15  ✔  Target recovered
+
+    Replay Results
+    ──────────────────────────────────────────────────
+      Packets replayed    35/47
+      Crash reproduced    Yes (packet 35)
+      Crash type          connection_reset
+      Match               Exact (same hash as original)
+    ```
 
 - Parses btsnoop v1 format
 - Extracts L2CAP frames from ACL packets

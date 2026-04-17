@@ -6,6 +6,9 @@ All reconnaissance probes are **non-intrusive** and require **no pairing**.
 
 Reconnaissance is the deep-dive phase that follows [Discovery](discovery.md). Where discovery answers "what devices are nearby?", reconnaissance answers "what does this specific target expose?" Each probe reveals a different facet of the target's attack surface: which services it offers, which channels are open, what firmware it runs, and how its Bluetooth stack behaves.
 
+!!! note "Target is optional"
+    All recon commands accept the target address as an optional argument. When omitted, Blue-Tap scans for nearby devices and presents an interactive picker.
+
 The findings from reconnaissance directly inform which vulnerability checks and exploits apply. For example, if SDP reveals OBEX Object Push on RFCOMM channel 12, you know the target may be vulnerable to Bluesnarfing. If GATT enumeration shows writable characteristics without authentication, the target has a BLE posture weakness.
 
 ---
@@ -14,18 +17,18 @@ The findings from reconnaissance directly inform which vulnerability checks and 
 
 | Command | Module ID | What It Collects | Key Options |
 |---------|-----------|------------------|-------------|
-| `recon TARGET sdp` | `reconnaissance.sdp` | SDP services, profiles, channels | `--retries` |
-| `recon TARGET gatt` | `reconnaissance.gatt` | BLE GATT services, characteristics | --- |
-| `recon TARGET l2cap` | `reconnaissance.l2cap_scan` | Open L2CAP PSMs | `--start-psm` (1), `--end-psm` (4097), `--timeout` (1000ms) |
-| `recon TARGET rfcomm` | `reconnaissance.rfcomm_scan` | Open RFCOMM channels | `--start-channel` (1), `--end-channel` (30), `--timeout` (2000ms) |
-| `recon TARGET fingerprint` | `reconnaissance.fingerprint` | Device identification | --- |
-| `recon TARGET capture` | `reconnaissance.hci_capture` | HCI packet capture | `-d` duration, `-o` output |
-| `recon TARGET sniff` | `reconnaissance.sniffer` | Passive BT sniffing | `-m` mode, `-d` duration, `-o` output |
-| `recon TARGET auto` | `reconnaissance.campaign` | Full recon campaign — all applicable probes | --- |
-| `recon TARGET capabilities` | `reconnaissance.capability_detector` | Supported profiles, transports, features | --- |
-| `recon TARGET analyze` | `reconnaissance.capture_analysis` | Pcap protocol breakdown, anomalies | `--pcap` (file path) |
-| `recon TARGET correlate` | `reconnaissance.correlation` | Cross-probe correlation, unified profile | --- |
-| `recon TARGET interpret` | `reconnaissance.spec_interpretation` | BT spec data — flags, versions, class codes | --- |
+| `recon [TARGET] sdp` | `reconnaissance.sdp` | SDP services, profiles, channels | `--retries` |
+| `recon [TARGET] gatt` | `reconnaissance.gatt` | BLE GATT services, characteristics | --- |
+| `recon [TARGET] l2cap` | `reconnaissance.l2cap_scan` | Open L2CAP PSMs | `--start-psm` (1), `--end-psm` (4097), `--timeout` (1000ms) |
+| `recon [TARGET] rfcomm` | `reconnaissance.rfcomm_scan` | Open RFCOMM channels | `--start-channel` (1), `--end-channel` (30), `--timeout` (2000ms) |
+| `recon [TARGET] fingerprint` | `reconnaissance.fingerprint` | Device identification | --- |
+| `recon [TARGET] capture` | `reconnaissance.hci_capture` | HCI packet capture | `-d` duration, `-o` output |
+| `recon [TARGET] sniff` | `reconnaissance.sniffer` | Passive BT sniffing | `-m` mode, `-d` duration, `-o` output |
+| `recon [TARGET] auto` | `reconnaissance.campaign` | Full recon campaign — all applicable probes | --- |
+| `recon [TARGET] capabilities` | `reconnaissance.capability_detector` | Supported profiles, transports, features | --- |
+| `recon [TARGET] analyze` | `reconnaissance.capture_analysis` | Pcap protocol breakdown, anomalies | `--pcap` (file path) |
+| `recon [TARGET] correlate` | `reconnaissance.correlation` | Cross-probe correlation, unified profile | --- |
+| `recon [TARGET] interpret` | `reconnaissance.spec_interpretation` | BT spec data — flags, versions, class codes | --- |
 
 ---
 
@@ -244,6 +247,19 @@ HCI capture is useful for understanding the protocol exchange in detail --- trou
 blue-tap recon 4C:4F:EE:17:3A:89 capture -d 30 -o capture.btsnoop
 ```
 
+??? example "Example output"
+
+    ```
+    $ sudo blue-tap recon 4C:4F:EE:17:3A:89 capture -d 30 -o capture.btsnoop
+
+    15:10:00  ●  Running: HCI Capture
+    15:10:00  ●  Starting reconnaissance.hci_capture
+    15:10:00  ●  btmon capture started -> capture.btsnoop (btsnoop/pcap)
+    15:10:30  ✔  btmon capture stopped
+    15:10:30  ✔  Completed reconnaissance.hci_capture
+    15:10:30  ●  Result: capture.btsnoop (14.2 KB, 30s, 247 frames)
+    ```
+
 !!! tip "When to Capture"
     Run a capture during other operations to record the full protocol exchange. For example, capture during `vulnscan` to have packet-level evidence of vulnerability detection, or during `exploit` to document the attack for your report.
 
@@ -255,15 +271,55 @@ Passive Bluetooth sniffing. Captures over-the-air Bluetooth traffic without esta
 blue-tap recon 4C:4F:EE:17:3A:89 sniff -m ble -d 60 -o sniff.pcap
 ```
 
+??? example "Example output"
+
+    ```
+    $ sudo blue-tap recon 4C:4F:EE:17:3A:89 sniff -m ble -d 60 -o sniff.pcap
+
+    15:15:00  ●  Running: Bluetooth Sniffer
+    15:15:00  ●  Starting reconnaissance.sniffer
+    15:15:00  ●  Mode: ble | Duration: 60s | Output: sniff.pcap
+    15:15:00  ●  nRF Sniffer started on /dev/ttyACM0
+    15:15:00  ●  Scanning for BLE advertisements...
+    15:15:08  ●  Captured 34 advertisement frames (12 unique devices)
+    15:15:22  ●  Target 4C:4F:EE:17:3A:89 detected — following connection events
+    15:15:60  ✔  Completed reconnaissance.sniffer
+    15:15:60  ●  Result: sniff.pcap (87.4 KB, 60s, 1,842 packets)
+    ```
+
+!!! note "nRF Sniffer Required"
+    BLE connection sniffing requires an nRF52840 dongle with the nrf_sniffer_ble
+    extcap plugin for Wireshark/tshark. Without it, the sniffer falls back to
+    advertisement-only capture using the standard adapter. LMP sniffing
+    requires DarkFirmware on the RTL8761B.
+
 **Sniff modes:**
 
 | Mode | Description | Hardware |
 |------|-------------|----------|
-| `ble` | BLE advertisement sniffing | Any BLE adapter |
-| `ble_connection` | BLE connection event capture | Any BLE adapter |
-| `ble_pairing` | BLE pairing exchange capture | Any BLE adapter |
-| `lmp` | LMP (Link Manager Protocol) sniffing | DarkFirmware dongle |
-| `combined` | All modes simultaneously | DarkFirmware dongle |
+| `ble` (default) | BLE advertisement sniffing | Any BLE adapter |
+| `ble_advertise` | Alias for `ble` | Any BLE adapter |
+| `ble_connection` | Targeted BLE connection capture (requires RHOST) | nRF52840 sniffer |
+| `ble_pairing` | BLE pairing exchange capture | nRF52840 sniffer |
+| `lmp` | LMP (Link Manager Protocol) sniffing | DarkFirmware RTL8761B |
+| `combined` | BLE + LMP simultaneously, correlated | nRF52840 + DarkFirmware |
+
+!!! tip "Outcome taxonomy"
+    The sniffer maps results to the recon outcomes:
+
+    * `observed` --- packets counted (scapy enumerated the pcap successfully)
+    * `artifact_collected` --- pcap has bytes on disk but Blue-Tap could not count frames (scapy missing). The file is still usable in Wireshark.
+    * `not_applicable` --- capture produced nothing.
+
+    If you are seeing `artifact_collected` consistently, `pip install scapy` inside the Blue-Tap virtualenv to unlock frame counts.
+
+### Prerequisites
+
+```bash
+blue-tap run reconnaissance.prerequisites CAPABILITY=dual_mode
+```
+
+The prerequisites module reports `available` / `applicable` / `reason` for each recon collector. A collector that is not applicable to the current target capability (e.g. LMP sniffing on a BLE-only target) is reported as `applicable=false` and is **not** counted as "missing" in the summary. Earlier versions flagged inapplicable checks as missing, which misled operators into installing LMP tooling they did not need.
 
 !!! warning "LMP Sniffing"
     The `lmp` and `combined` modes require a DarkFirmware-patched RTL8761B dongle. Standard HCI adapters cannot capture LMP frames because they are handled below the HCI layer by the controller firmware. See the DarkFirmware documentation for setup instructions.

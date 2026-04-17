@@ -25,11 +25,11 @@ Start a 4-hour campaign against the IVI head unit, targeting the protocols ident
 
 ```bash
 $ sudo blue-tap fuzz campaign AA:BB:CC:DD:EE:FF \
-    --protocols sdp,l2cap,rfcomm,bnep \
+    -p sdp -p rfcomm -p bnep \
     --duration 4h \
     --strategy coverage_guided
 [*] Starting fuzzing campaign against AA:BB:CC:DD:EE:FF (IVI-Headunit)
-[*] Protocols: sdp, l2cap, rfcomm, bnep
+[*] Protocols: sdp, rfcomm, bnep
 [*] Strategy: coverage_guided
 [*] Duration: 4h
 [*] Corpus: 6,685 seeds loaded (built-in)
@@ -44,7 +44,7 @@ $ sudo blue-tap fuzz campaign AA:BB:CC:DD:EE:FF \
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `--protocols` | Comma-separated list of protocols to fuzz | All supported |
+| `-p/--protocol` | Protocol to fuzz (repeat for multiple: `-p sdp -p rfcomm`) | All supported |
 | `--duration` | Campaign duration (e.g., `30m`, `4h`, `12h`) | 1h |
 | `--strategy` | Mutation strategy | `coverage_guided` |
 | `--cooldown` | Delay between packets in ms | 10 |
@@ -142,7 +142,7 @@ Let the campaign run. At the 4-hour mark:
 Now the campaign is done. Let's look at what we found:
 
 ```bash
-$ sudo blue-tap fuzz crashes --severity HIGH
+$ sudo blue-tap fuzz crashes list --severity HIGH
 [*] Filtering crashes: severity >= HIGH
 
   ID                          | Protocol | Severity | Time     | Recovery
@@ -383,7 +383,7 @@ Pre-load with your own protocol packets for better coverage:
 
 ```bash
 $ sudo blue-tap fuzz campaign AA:BB:CC:DD:EE:FF \
-    --protocols sdp \
+    -p sdp \
     --seed-dir ./my-sdp-seeds/ \
     --duration 2h
 ```

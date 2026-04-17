@@ -37,7 +37,7 @@ a real car head unit -- making it the ideal training and validation environment.
     The most convenient setup uses two USB Bluetooth dongles on the same laptop. One
     runs the IVI simulator (e.g., `hci1`), the other runs Blue-Tap (e.g., `hci0`).
     This way you only need a single machine for the entire training environment.
-    See [Hardware Setup -- Recommended Two-Adapter Setup](hardware-setup.md#recommended-two-adapter-setup)
+    See [Hardware Setup -- Two-Adapter Setup](hardware-setup.md#optional-two-adapter-setup)
     for adapter recommendations.
 
 ### Software

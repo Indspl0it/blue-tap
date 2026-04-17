@@ -341,23 +341,18 @@ envelope = build_attack_result(
 ### Reconnaissance (via `build_recon_result`)
 
 ```python
-from blue_tap.framework.envelopes.recon import build_recon_result, build_recon_execution
-
-executions = [
-    build_recon_execution(
-        collector_id="sdp_services",
-        title="SDP Service Discovery",
-        protocol="SDP",
-        entries=[{"name": "OBEX Push", "channel": 9}],
-        observation="Found 3 SDP services",
-    ),
-]
+from blue_tap.framework.envelopes.recon import build_recon_result
+from blue_tap.framework.contracts.result_schema import now_iso
 
 envelope = build_recon_result(
     target="AA:BB:CC:DD:EE:FF",
     adapter="hci0",
-    executions=executions,
-    module_data={"collectors_run": 1},
+    operation="sdp_services",
+    title="SDP Service Discovery",
+    protocol="SDP",
+    entries=[{"name": "OBEX Push", "channel": 9}],
+    observations=["Found 3 SDP services"],
+    started_at=now_iso(),
 )
 ```
 
@@ -369,10 +364,9 @@ from blue_tap.framework.envelopes.fuzz import build_fuzz_result
 envelope = build_fuzz_result(
     target="AA:BB:CC:DD:EE:FF",
     adapter="hci0",
+    command="l2cap_fuzz",
     protocol="L2CAP",
-    executions=executions,
-    stats={"iterations": 50000, "crashes": 2},
-    module_data={"protocol": "L2CAP", "strategy": "mutation"},
+    result={"sent": 50000, "crashes": 2, "errors": 0, "elapsed": 120.5, "total_cases": 50000},
 )
 ```
 

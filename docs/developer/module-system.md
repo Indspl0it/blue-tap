@@ -253,7 +253,7 @@ Third-party packages register modules via `setuptools` entry points. See [Plugin
 
 | What you need | Import from |
 |---|---|
-| `RunEnvelope`, `ExecutionRecord`, `EvidenceRecord`, `ArtifactRef` | `blue_tap.framework.contracts.result_schema` |
+| `EvidenceRecord`, `ArtifactRef` | `blue_tap.framework.contracts.result_schema` |
 | `build_run_envelope`, `make_execution`, `make_evidence`, `make_artifact` | `blue_tap.framework.contracts.result_schema` |
 | `emit_cli_event` | `blue_tap.framework.runtime.cli_events` |
 | `ReportAdapter`, `SectionModel`, `SectionBlock` | `blue_tap.framework.contracts.report_contract` |
@@ -283,8 +283,8 @@ Each family has specialized builders in `blue_tap.framework.envelopes`:
 | `build_attack_result` | exploitation | `blue_tap.framework.envelopes.attack` |
 | `build_audio_result` | post_exploitation | `blue_tap.framework.envelopes.audio` |
 | `build_data_result` | post_exploitation | `blue_tap.framework.envelopes.data` |
-| `build_fuzz_result`, `build_fuzz_campaign_result` | fuzzing | `blue_tap.framework.envelopes.fuzz` |
-| `build_firmware_status_result`, `build_firmware_dump_result` | firmware ops | `blue_tap.framework.envelopes.firmware` |
+| `build_fuzz_result`, `build_fuzz_campaign_result`, `build_fuzz_operation_result`, `build_fuzz_protocol_execution` | fuzzing | `blue_tap.framework.envelopes.fuzz` |
+| `build_firmware_status_result`, `build_firmware_dump_result`, `build_connection_inspect_result`, `build_firmware_operation_result` | firmware ops | `blue_tap.framework.envelopes.firmware` |
 | `build_spoof_result` | spoof ops | `blue_tap.framework.envelopes.spoof` |
 
 All builders return a `dict` matching the `RunEnvelope` shape. They handle run ID generation, timestamps, and evidence/execution construction internally.

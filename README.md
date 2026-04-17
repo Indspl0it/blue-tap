@@ -128,10 +128,10 @@ sudo blue-tap run-playbook --playbook ivi-full-audit.yaml
 
 ```bash
 # Multi-protocol fuzzing campaign
-sudo blue-tap fuzz campaign 4C:4F:EE:17:3A:89 --protocols sdp,l2cap --duration 2h
+sudo blue-tap fuzz campaign 4C:4F:EE:17:3A:89 -p sdp -p rfcomm --duration 2h
 
 # Crash analysis
-blue-tap fuzz crashes --protocol sdp --severity HIGH
+blue-tap fuzz crashes list --protocol sdp --severity HIGH
 blue-tap fuzz minimize CRASH_ID
 ```
 

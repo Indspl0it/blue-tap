@@ -73,27 +73,161 @@ blue_tap/
 
 Old paths (`core/`, `attack/`, `recon/`, `fuzz/`, `report/`) contain deprecation notices only. Never import from them.
 
-### Dependency Direction
+### Layered Architecture
+
+The diagram below shows every major component grouped by layer, with dependency arrows pointing in the direction of allowed imports. Framework never imports from modules. Modules never cross-import between families. Interfaces contain no business logic.
 
 ```mermaid
 graph TD
-    interfaces["interfaces/<br/>(CLI, reporting, playbooks)"]
-    modules["modules/<br/>(discovery, recon, assessment,<br/>exploitation, post_exploitation, fuzzing)"]
-    framework["framework/<br/>(contracts, registry, envelopes,<br/>reporting, sessions, runtime)"]
-    hardware["hardware/<br/>(adapter, scanner, spoofer,<br/>firmware, hci_vsc)"]
+    subgraph interfaces_layer["interfaces/ — User-Facing"]
+        CLI["CLI<br/>(Click commands)"]
+        RepGen["ReportGenerator"]
+        PBLoader["PlaybookLoader"]
+    end
 
-    interfaces --> modules
-    interfaces --> framework
-    modules --> framework
-    modules --> hardware
+    subgraph modules_layer["modules/ — Domain Behavior (101 modules)"]
+        disc["discovery<br/>(1 module)"]
+        recon["reconnaissance<br/>(13 modules)"]
+        assess["assessment<br/>(43 modules)"]
+        exploit["exploitation<br/>(38 modules)"]
+        postex["post_exploitation<br/>(8 modules)"]
+        fuzz["fuzzing<br/>(3 + engine)"]
+    end
 
-    style framework fill:#2d5016,stroke:#4a8c2a,color:#fff
-    style modules fill:#1a3a5c,stroke:#2980b9,color:#fff
-    style interfaces fill:#5c3a1a,stroke:#b97029,color:#fff
-    style hardware fill:#3a1a5c,stroke:#7029b9,color:#fff
+    subgraph framework_layer["framework/ — Stable Infrastructure"]
+        contracts["contracts<br/>(result_schema,<br/>report_contract)"]
+        registry["registry<br/>(ModuleDescriptor,<br/>ModuleFamily,<br/>ModuleRegistry)"]
+        envelopes["envelopes<br/>(family builders)"]
+        reporting["reporting<br/>(11 adapters,<br/>4 renderers)"]
+        sessions["sessions<br/>(atomic store)"]
+        runtime["runtime<br/>(cli_events)"]
+    end
+
+    subgraph hardware_layer["hardware/ — Low-Level Primitives"]
+        adapter["adapter<br/>(HCI mgmt,<br/>chipset detect)"]
+        scanner["scanner<br/>(Classic + BLE)"]
+        spoofer["spoofer<br/>(4 methods)"]
+        firmware["firmware<br/>(DarkFirmware<br/>RTL8761B)"]
+        hci_vsc["hci_vsc<br/>(vendor HCI)"]
+        obex["obex_client<br/>(D-Bus OBEX)"]
+    end
+
+    CLI --> disc & recon & assess & exploit & postex & fuzz
+    CLI --> registry & runtime
+    RepGen --> reporting & sessions
+    PBLoader --> registry
+
+    disc & recon & assess & exploit & postex & fuzz --> contracts & envelopes & runtime
+    disc & recon --> scanner
+    exploit & fuzz --> adapter & spoofer & firmware & hci_vsc
+    postex --> obex & adapter
+
+    style interfaces_layer fill:#5c3a1a,stroke:#b97029,color:#fff
+    style modules_layer fill:#1a3a5c,stroke:#2980b9,color:#fff
+    style framework_layer fill:#2d5016,stroke:#4a8c2a,color:#fff
+    style hardware_layer fill:#3a1a5c,stroke:#7029b9,color:#fff
+
+    style CLI fill:#5c3a1a,stroke:#b97029,color:#fff
+    style RepGen fill:#5c3a1a,stroke:#b97029,color:#fff
+    style PBLoader fill:#5c3a1a,stroke:#b97029,color:#fff
+
+    style disc fill:#1a3a5c,stroke:#2980b9,color:#fff
+    style recon fill:#1a3a5c,stroke:#2980b9,color:#fff
+    style assess fill:#1a3a5c,stroke:#2980b9,color:#fff
+    style exploit fill:#1a3a5c,stroke:#2980b9,color:#fff
+    style postex fill:#1a3a5c,stroke:#2980b9,color:#fff
+    style fuzz fill:#1a3a5c,stroke:#2980b9,color:#fff
+
+    style contracts fill:#2d5016,stroke:#4a8c2a,color:#fff
+    style registry fill:#2d5016,stroke:#4a8c2a,color:#fff
+    style envelopes fill:#2d5016,stroke:#4a8c2a,color:#fff
+    style reporting fill:#2d5016,stroke:#4a8c2a,color:#fff
+    style sessions fill:#2d5016,stroke:#4a8c2a,color:#fff
+    style runtime fill:#2d5016,stroke:#4a8c2a,color:#fff
+
+    style adapter fill:#3a1a5c,stroke:#7029b9,color:#fff
+    style scanner fill:#3a1a5c,stroke:#7029b9,color:#fff
+    style spoofer fill:#3a1a5c,stroke:#7029b9,color:#fff
+    style firmware fill:#3a1a5c,stroke:#7029b9,color:#fff
+    style hci_vsc fill:#3a1a5c,stroke:#7029b9,color:#fff
+    style obex fill:#3a1a5c,stroke:#7029b9,color:#fff
 ```
 
-Arrows point in the direction of allowed imports. No arrow from `framework` to `modules` means framework code never imports module code. No arrow between module families means no cross-family imports.
+No arrow from `framework` to `modules` means framework code never imports module code. No arrow between module families means no cross-family imports.
+
+---
+
+## Module Registration Flow
+
+Every module declares itself via a `ModuleDescriptor` in its family `__init__.py`. The registry is the single source of truth for what modules exist, what they need, and how to load them. CLI commands never hard-code module references -- they discover modules through the registry at runtime.
+
+```mermaid
+flowchart LR
+    subgraph registration["Registration (import time)"]
+        init["Family __init__.py"]
+        reg["get_registry().register()"]
+        desc["ModuleDescriptor<br/>(id, family, entry_point,<br/>protocols, requires)"]
+    end
+
+    subgraph discovery["Discovery (CLI startup)"]
+        cli["CLI command"]
+        lookup["registry.get(module_id)"]
+        resolve["resolve entry_point<br/>→ Module class"]
+    end
+
+    subgraph execution["Execution (runtime)"]
+        run["Module.run()<br/>(target, adapter, ...)"]
+        envelope["→ RunEnvelope"]
+    end
+
+    init --> desc --> reg
+    cli --> lookup --> resolve --> run --> envelope
+
+    style registration fill:#2d5016,stroke:#4a8c2a,color:#fff
+    style discovery fill:#5c3a1a,stroke:#b97029,color:#fff
+    style execution fill:#1a3a5c,stroke:#2980b9,color:#fff
+```
+
+The `entry_point` string (e.g. `"blue_tap.modules.assessment.checks.cve_2020_26555:CVE2020_26555"`) is resolved via Python's import machinery. This means modules are loaded lazily -- only when a user actually runs a command that needs them.
+
+---
+
+## Envelope Lifecycle
+
+A `RunEnvelope` is the universal data container that flows through the entire pipeline: from module execution to session persistence to report generation. The diagram below traces its lifecycle end to end.
+
+```mermaid
+flowchart LR
+    subgraph mod["Module Layer"]
+        direction TB
+        run["Module.run()"]
+        builder["EnvelopeBuilder<br/>.build()"]
+    end
+
+    subgraph persist["Persistence Layer"]
+        direction TB
+        log["Session.log_command()"]
+        atomic["atomic write<br/>(tmp + os.replace)"]
+        disk["sessions/NNN_cmd.json"]
+    end
+
+    subgraph report["Report Layer"]
+        direction TB
+        load["ReportGenerator<br/>.load()"]
+        adapt["ReportAdapter<br/>.ingest()"]
+        section["SectionModel"]
+        render["Renderer"]
+        html["HTML report"]
+    end
+
+    run --> builder --> log --> atomic --> disk --> load --> adapt --> section --> render --> html
+
+    style mod fill:#1a3a5c,stroke:#2980b9,color:#fff
+    style persist fill:#2d5016,stroke:#4a8c2a,color:#fff
+    style report fill:#5c3a1a,stroke:#b97029,color:#fff
+```
+
+Key design points: the envelope dict is pure data (no methods, no classes) so it serializes cleanly to JSON. The atomic write in the persistence layer ensures a crash mid-write never corrupts the session directory. Report adapters are matched to envelopes by schema prefix, so adding a new module type only requires registering a new adapter.
 
 ---
 
@@ -332,6 +466,43 @@ def emit_cli_event(
 ) -> dict[str, Any]:
 ```
 
+### CLI Event Flow
+
+Events are emitted by modules during execution, routed through the event system for terminal display, and captured in the session log for later replay or reporting.
+
+```mermaid
+flowchart TD
+    subgraph module["Module Execution"]
+        run["Module.run()"]
+    end
+
+    emit["emit_cli_event()"]
+
+    subgraph routing["Event Router (by event_type)"]
+        direction LR
+        info_ev["info()<br/>run_started<br/>phase_started<br/>execution_started"]
+        success_ev["success()<br/>execution_result<br/>run_completed<br/>artifact_saved"]
+        warning_ev["warning()<br/>execution_skipped<br/>pairing_required<br/>recovery_wait_*<br/>run_aborted"]
+        error_ev["error()<br/>run_error"]
+        verbose_ev["verbose()<br/>execution_observation<br/>recovery_wait_finished"]
+    end
+
+    subgraph output["Output Destinations"]
+        terminal["Terminal<br/>(Rich formatted)"]
+        event_dict["Event dict<br/>(returned to caller)"]
+    end
+
+    run --> emit --> routing
+    info_ev & success_ev & warning_ev & error_ev & verbose_ev --> terminal
+    emit --> event_dict
+
+    style module fill:#1a3a5c,stroke:#2980b9,color:#fff
+    style routing fill:#2d5016,stroke:#4a8c2a,color:#fff
+    style output fill:#5c3a1a,stroke:#b97029,color:#fff
+```
+
+The `echo=True` flag controls whether the event prints to terminal. When `echo=False`, the event dict is still returned to the caller (useful for programmatic consumers). Non-canonical event types emit a `logger.warning` before routing.
+
 ---
 
 ## Session Persistence
@@ -342,26 +513,135 @@ Sessions are managed by `blue_tap.framework.sessions.store`. All writes are atom
 
 ```
 sessions/<session_name>/
-    session.json              # Metadata + command log
-    001_scan_classic.json     # First command output
-    002_vulnscan.json         # Second command output
-    pbap/                     # PBAP vCard dumps
-    map/                      # MAP message dumps
-    audio/                    # Audio captures
+    session.json              # Metadata (name, targets, command log, files)
+    001_scan_classic.json     # Command output #1 (envelope wrapper)
+    002_recon_sdp.json        # Command output #2
+    003_vulnscan.json         # Command output #3
+    fuzz/                     # Fuzzing artifacts (crashes.db, corpus/)
     report.html               # Generated report
 ```
 
-Each command auto-logs its `RunEnvelope` to the active session. The `report` command collects all envelopes from the session directory at generation time.
+Command files use `{seq:03d}_{command}.json` naming. Each wraps the module's `RunEnvelope` with metadata (`command`, `category`, `target`, `timestamp`, `validation`). Subdirectories are created on demand by modules that produce artifacts. The `report` command collects all envelopes from the session directory at generation time.
 
 ### Session Data Flow
 
+Each command writes its envelope through the atomic write pipeline: content goes to a temp file, `os.fsync()` ensures it hits disk, then `os.replace()` atomically swaps it into place. A crash at any point leaves either the old file intact or no file -- never a partial write.
+
 ```mermaid
-graph LR
-    A[blue-tap scan] -->|envelope| S[sessions/my-test/]
-    B[blue-tap vulnscan] -->|envelope| S
-    C[blue-tap dos TARGET] -->|envelope| S
-    D[blue-tap exploit] -->|envelope| S
-    S -->|all envelopes| R[blue-tap report]
-    R --> HTML[report.html]
-    R --> JSON[report.json]
+flowchart TD
+    subgraph commands["Commands (sequential)"]
+        scan["blue-tap scan"]
+        recon["blue-tap recon sdp"]
+        vuln["blue-tap vulnscan"]
+        dos["blue-tap dos"]
+        exploit["blue-tap exploit"]
+    end
+
+    subgraph write_pipeline["Atomic Write Pipeline"]
+        log["log_command(envelope)"]
+        tmp["write → NNN_cmd.json.tmp"]
+        fsync["os.fsync()"]
+        replace["os.replace() → NNN_cmd.json"]
+    end
+
+    subgraph session_dir["sessions/my-assessment/"]
+        meta["session.json<br/>(metadata, command log)"]
+        f1["001_scan_classic.json"]
+        f2["002_recon_sdp.json"]
+        f3["003_vulnscan.json"]
+        f4["004_dos_runner.json"]
+        f5["005_exploit.json"]
+        artifacts["fuzz/ pbap/ map/ audio/"]
+    end
+
+    subgraph report_gen["Report Generation"]
+        collect["collect all *.json envelopes"]
+        match["match → ReportAdapters"]
+        render["render → HTML / JSON"]
+    end
+
+    scan & recon & vuln & dos & exploit --> log
+    log --> tmp --> fsync --> replace
+    replace --> f1 & f2 & f3 & f4 & f5
+    meta ~~~ f1
+    f1 & f2 & f3 & f4 & f5 --> collect --> match --> render
+
+    style commands fill:#5c3a1a,stroke:#b97029,color:#fff
+    style write_pipeline fill:#2d5016,stroke:#4a8c2a,color:#fff
+    style session_dir fill:#1a3a5c,stroke:#2980b9,color:#fff
+    style report_gen fill:#3a1a5c,stroke:#7029b9,color:#fff
 ```
+
+---
+
+## DarkFirmware Architecture
+
+DarkFirmware is custom firmware for the RTL8761B (TP-Link UB500) that extends Blue-Tap below the HCI boundary. Stock Bluetooth stacks only see HCI-level traffic; DarkFirmware installs four hooks in the controller's MIPS16e firmware to intercept, log, and modify packets at the Link Controller and LMP layers.
+
+```mermaid
+flowchart TD
+    subgraph host["Host (Linux)"]
+        bt["Blue-Tap<br/>modules"]
+        hci_vsc["hci_vsc.py<br/>(VSC sender)"]
+        firmware_py["firmware.py<br/>(detection,<br/>BDADDR patch)"]
+    end
+
+    subgraph hci_boundary["HCI Boundary"]
+        cmd["HCI Commands"]
+        evt["HCI Events"]
+        acl_hci["ACL Data"]
+    end
+
+    subgraph controller["RTL8761B Controller (MIPS16e)"]
+        subgraph hooks["DarkFirmware Hooks"]
+            h1["Hook 1: HCI CMD<br/>Intercepts VSC 0xFE22<br/>→ LMP injection"]
+            h2["Hook 2: LMP RX<br/>Logs incoming LMP<br/>+ modification modes 0-5"]
+            h3["Hook 3: tLC_TX<br/>Logs outgoing<br/>LMP + ACL"]
+            h4["Hook 4: tLC_RX<br/>Logs all incoming<br/>LC packets"]
+        end
+        baseband["Baseband<br/>Processing"]
+    end
+
+    subgraph air["Over-the-Air"]
+        target["Remote<br/>Target"]
+    end
+
+    bt --> hci_vsc --> cmd
+    firmware_py --> cmd
+    cmd --> h1
+    evt --> bt
+    h1 -->|"inject LMP<br/>(VSC 0xFE22)"| baseband
+    h2 -->|"log + modify"| baseband
+    h3 -->|"log outgoing"| baseband
+    h4 -->|"log incoming"| baseband
+    baseband <-->|"LMP / ACL / SCO"| target
+    h2 & h3 & h4 -->|"HCI Event 0xFF<br/>(vendor feedback)"| evt
+
+    style host fill:#1a3a5c,stroke:#2980b9,color:#fff
+    style hci_boundary fill:#2d5016,stroke:#4a8c2a,color:#fff
+    style controller fill:#3a1a5c,stroke:#7029b9,color:#fff
+    style hooks fill:#4a2a6c,stroke:#9040d0,color:#fff
+    style air fill:#5c3a1a,stroke:#b97029,color:#fff
+```
+
+### VSC Command Reference
+
+| VSC | Purpose | Direction |
+|---|---|---|
+| `0xFE22` | LMP packet injection (payload sent as raw LMP over the air) | Host → Controller |
+| `0xFC61` | Controller memory read (inspect hook state, backup addresses) | Host → Controller |
+| `0xFC62` | Controller memory write (install hooks, set modification mode) | Host → Controller |
+| `0xFF` (event) | Vendor event carrying hook output (logged LMP/ACL packets) | Controller → Host |
+
+### Hook Modification Modes (Hook 2)
+
+Hook 2 supports six modes controlled by writing to `MOD_FLAG_ADDR` (0x80133FF0):
+
+| Mode | Name | Behavior |
+|---|---|---|
+| 0 | Passthrough | Log only, no modification |
+| 1 | Modify | Overwrite one byte in packet (one-shot, auto-clears) |
+| 2 | Drop | Drop next incoming LMP packet entirely (one-shot) |
+| 3 | Opcode Drop | Drop packets matching a target opcode (persistent) |
+| 4 | Persistent Modify | Same as Modify but does not auto-clear |
+| 5 | Auto Respond | Send pre-loaded response when trigger opcode seen |

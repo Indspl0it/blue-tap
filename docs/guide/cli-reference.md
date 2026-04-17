@@ -15,6 +15,9 @@ Blue-Tap follows an **assessment workflow** that mirrors a real-world Bluetooth 
 discover  -->  recon  -->  vulnscan  -->  exploit  -->  dos  -->  extract  -->  fuzz  -->  report
   Find         Enumerate     Scan for       Attack      Stress      Pull data    Protocol    Generate
   targets      services      vulns                      test                     fuzzing     findings
+
+auto  (runs: SDP recon → vulnscan → KNOB exploit → PBAP extract → report — a 4-module shortcut)
+fleet (discovers all nearby devices, then assesses each)
 ```
 
 A typical engagement looks like this:
@@ -50,6 +53,9 @@ blue-tap report --format html             # 6. Generate assessment report
 
 ## Assessment Workflow
 
+!!! tip "Interactive Target Selection"
+    Most commands that accept a target address (`vulnscan`, `recon`, `exploit`, `extract`, `dos`) can be run without one. When omitted, Blue-Tap scans for nearby devices and presents an interactive picker --- select by number, rescan with `r`, or quit with `q`. Exceptions: `auto` and `fleet` require the target upfront since they run non-interactively.
+
 ### discover
 
 Scan for nearby Bluetooth devices. This is the starting point of any engagement --- find what is in radio range before targeting anything specific.
@@ -58,11 +64,18 @@ Scan for nearby Bluetooth devices. This is the starting point of any engagement 
 blue-tap discover [classic|ble|all]
 ```
 
+All sub-commands share:
+
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `-d, --duration` | int | `10` | Scan duration in seconds |
-| `-a, --adapter` | string | auto | HCI adapter (e.g., `hci0`) |
-| `-p, --passive` | flag | --- | Passive scan, BLE only (no `SCAN_REQ`) |
+| `-a, --hci` | string | auto | HCI adapter (e.g., `hci0`) |
+
+BLE-only:
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `-p, --passive` | flag | --- | Passive scan (no `SCAN_REQ`) |
 
 !!! example "Example: Find IVI systems in a parking lot"
     ```
@@ -87,8 +100,10 @@ For details on scan modes, output fields, and dual-mode correlation, see the [Di
 Deep reconnaissance against a specific target. Run this after discovery to enumerate what services, channels, and capabilities the target exposes.
 
 ```bash
-blue-tap recon TARGET [sdp|gatt|l2cap|rfcomm|fingerprint|capture|sniff|auto|capabilities|analyze|correlate|interpret]
+blue-tap recon [TARGET] [sdp|gatt|l2cap|rfcomm|fingerprint|capture|sniff|auto|capabilities|analyze|correlate|interpret] [--hci/-a ADAPTER]
 ```
+
+The `--hci/-a` option applies to all recon sub-commands.
 
 === "sdp"
     SDP service discovery. `--retries` for retry count.
@@ -155,14 +170,15 @@ For probe details, example output, and security implications, see the [Reconnais
 Vulnerability assessment against a target. Runs all registered checks (25 CVEs + 11 posture checks) and produces a unified report.
 
 ```bash
-blue-tap vulnscan TARGET
+blue-tap vulnscan [TARGET]
 ```
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `--cve` | string | --- | Run a single CVE check by ID |
-| `--active / --no-active` | flag | `--no-active` | Enable active (intrusive) checks |
-| `--phone` | string | --- | Phone address for relay attacks |
+| `-a, --hci` | string | auto | HCI adapter (e.g., `hci0`) |
+| `--cve` | string | --- | Run a single check by ID. Accepts CVE IDs (`CVE-2020-0022`) or posture check short names (`service_exposure`, `hidden_rfcomm`, `encryption_enforcement`, `writable_gatt`, `eatt_support`, `pairing_method`, `pin_lockout`, `device_class`, `lmp_features`, `authorization_model`, `automotive_diagnostics`). |
+| `--active / --no-active` | flag | --- | Include active (intrusive) checks |
+| `--phone` | string | --- | Phone address for impersonation checks |
 | `--yes` | flag | --- | Skip confirmation prompts |
 
 !!! example "Example: Scan a single CVE"
@@ -184,10 +200,10 @@ For the full CVE table, detection techniques, and how to read results, see the [
 Active exploitation of known vulnerabilities. Only use after `vulnscan` confirms the target is vulnerable.
 
 ```bash
-blue-tap exploit TARGET [knob|bias|bluffs|ctkd|enc-downgrade|ssp-downgrade|hijack|pin-brute]
+blue-tap exploit [TARGET] [knob|bias|bluffs|ctkd|enc-downgrade|ssp-downgrade|hijack|pin-brute] [--hci/-a ADAPTER] [--yes]
 ```
 
-Each sub-command has attack-specific options. See [Exploitation guide](exploitation.md) for prerequisites, expected output, and attack chain details.
+The `--hci/-a` and `--yes` options apply to all exploit sub-commands. Each sub-command has additional attack-specific options. See [Exploitation guide](exploitation.md) for prerequisites, expected output, and attack chain details.
 
 !!! danger "Intrusive"
     All exploitation commands modify target state. They require `--yes` or interactive confirmation. 5 of 8 attacks require DarkFirmware (RTL8761B).
@@ -197,13 +213,14 @@ Each sub-command has attack-specific options. See [Exploitation guide](exploitat
 Denial-of-service and resilience testing. Runs 30 checks across CVE-backed crash probes and protocol stress tests, with automatic recovery monitoring after each check.
 
 ```bash
-blue-tap dos TARGET
+blue-tap dos [TARGET]
 ```
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `--checks` | string | all | Comma-separated check IDs |
-| `--recovery-timeout` | int | 180 | Seconds to wait for device recovery |
+| `-a, --hci` | string | auto | HCI adapter (e.g., `hci0`) |
+| `-c, --checks` | string | all | Comma-separated check IDs |
+| `--recovery-timeout` | int | --- | Seconds to wait for device recovery |
 | `--yes` | flag | --- | Skip confirmation prompts |
 
 **CVE-backed crash probes (9):**
@@ -230,10 +247,10 @@ blue-tap dos TARGET
 Post-exploitation data extraction. Requires an established connection to the target (typically after a successful exploit or pairing).
 
 ```bash
-blue-tap extract TARGET [contacts|messages|audio|stream|media|push|snarf|at]
+blue-tap extract [TARGET] [contacts|messages|audio|stream|media|push|snarf|at] [--hci/-a ADAPTER]
 ```
 
-Each sub-command uses a different Bluetooth profile:
+The `--hci/-a` option applies to all extract sub-commands. Each sub-command uses a different Bluetooth profile:
 
 | Command | Profile | What it extracts |
 |---------|---------|-----------------|
@@ -257,8 +274,36 @@ blue-tap fuzz [campaign|sdp-deep|l2cap-sig|rfcomm-raw|ble-att|ble-smp|bnep|obex|
 | Sub-command group | Commands | Purpose |
 |-------------------|----------|---------|
 | **Protocols** | `campaign`, `sdp-deep`, `l2cap-sig`, `rfcomm-raw`, `ble-att`, `ble-smp`, `bnep`, `obex`, `at-deep` | Run fuzzing against specific protocol layers |
-| **Analysis** | `crashes`, `minimize`, `cve`, `replay` | Analyze crashes, minimize test cases, check CVE repros |
-| **Corpus** | `corpus` | Manage the seed corpus |
+| **Crash Analysis** | `crashes list`, `crashes show`, `crashes replay`, `crashes export` | List, inspect, replay, and export discovered crashes |
+| **Analysis** | `minimize`, `cve`, `replay` | Minimize test cases, reproduce known CVE patterns, replay captures |
+| **Corpus** | `corpus generate`, `corpus list`, `corpus minimize` | Generate, list, and minimize the seed corpus |
+
+#### fuzz campaign
+
+```bash
+blue-tap fuzz campaign [ADDRESS] [--protocol/-p PROTO]... [--strategy/-s STRATEGY] [--duration/-d SPAN] [--resume]
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `-p, --protocol` | repeatable choice | `all` | One of `sdp`, `rfcomm`, `bnep`, `obex-pbap`, `obex-map`, `obex-opp`, `at-hfp`, `at-phonebook`, `at-sms`, `ble-att`, `ble-smp`, or `all`. Repeat the flag for multiple protocols. |
+| `-s, --strategy` | choice | `coverage_guided` | `coverage_guided`, `random`, `state_machine`, `targeted` |
+| `-d, --duration` | duration | `1h` | e.g. `30s`, `5m`, `1h`, `24h`, `7d` |
+| `-n, --iterations` | int | --- | Cap total test cases (overrides duration) |
+| `--delay` | float | `0.5` | Seconds between test cases |
+| `--capture / --no-capture` | flag | `--no-capture` | Record a btsnoop pcap during the run |
+| `--resume` | flag | --- | Resume the previous campaign from `session_dir/fuzz/campaign_state.json`. Resumes stats, corpus, crash DB, and coverage state. Falls back to a fresh run if the state file is missing or unreadable. |
+
+!!! tip "Protocol aliases"
+    Short names like `pbap`, `hfp`, `opp`, `att`, `smp` are accepted whenever protocols are passed as option strings (module `PROTOCOLS=`), and are normalized to canonical keys (`obex-pbap`, `at-hfp`, `obex-opp`, `ble-att`, `ble-smp`). The `fuzz campaign --protocol` flag itself uses strict Click choices — pass the canonical name there.
+
+#### fuzz crashes replay
+
+```bash
+blue-tap fuzz crashes replay CRASH_ID [--session/-s NAME] [--capture/--no-capture]
+```
+
+Replays a stored crash against the target. Multi-packet crashes (where `packet_sequence_json` was saved at discovery time) are replayed in full packet order, so state-machine crashes that require a setup sequence are correctly reproduced. Single-packet legacy records fall back to replaying `payload_hex` alone.
 
 ### report
 
@@ -270,8 +315,8 @@ blue-tap report [DUMP_DIR]
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `--format` | choice | `html` | `html` or `json` |
-| `--output` | string | --- | Output file path |
+| `-f, --format` | choice | `html` | `html` or `json` |
+| `-o, --output` | string | --- | Output file path |
 
 !!! tip "Report Generation"
     When called without arguments, `report` uses the most recent session. To generate a report from a specific session, pass the session's dump directory. HTML reports include color-coded severity, sortable tables, and executive summary sections.
@@ -287,20 +332,31 @@ blue-tap report [DUMP_DIR]
 
 ### auto
 
-Automated full-chain assessment. Runs discovery, recon, vulnscan, and optionally exploitation in sequence against a single target. This is the "push one button" mode for a complete assessment.
+Four-phase assessment shortcut against a single target:
+
+1. `recon` → `reconnaissance.sdp` (SDP service enumeration only)
+2. `vulnscan` → `assessment.vuln_scanner` (all CVE + posture checks)
+3. `exploit` → `exploitation.knob` (KNOB key negotiation attack)
+4. `extract` → `post_exploitation.pbap` (phonebook pull)
+
+This is **not** a full pentest — just a fixed 4-module pipeline plus report generation. For wider coverage use the individual commands (`recon`, `vulnscan`, `exploit`, `extract`) or a playbook via `run-playbook`.
 
 ```bash
 blue-tap auto TARGET
 ```
 
+!!! warning "Target Required"
+    Unlike interactive commands, `auto` requires the target address upfront — it runs non-interactively and does not launch the device picker.
+
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `--skip` | string | --- | Phases to skip (comma-separated) |
+| `-a, --hci` | string | auto | HCI adapter (e.g., `hci0`) |
+| `--skip` | string (repeatable) | --- | Phase to skip: `recon`, `vulnscan`, `exploit`, `extract` |
 | `--yes` | flag | --- | Skip all confirmation prompts |
 
-!!! example "Example: Full auto-assessment, skip exploitation"
+!!! example "Example: Skip exploitation and extraction, run only recon + vulnscan"
     ```bash
-    sudo blue-tap auto 4C:4F:EE:17:3A:89 --skip exploit
+    sudo blue-tap auto 4C:4F:EE:17:3A:89 --skip exploit --skip extract
     ```
 
 ### fleet
@@ -313,7 +369,8 @@ blue-tap fleet
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `--duration` | int | --- | Scan duration |
+| `-a, --hci` | string | auto | HCI adapter (e.g., `hci0`) |
+| `-d, --duration` | int | `10` | Discovery scan duration in seconds |
 | `--class` | string | --- | Filter by device class (e.g., `ivi`, `phone`, `headset`) |
 
 !!! example "Example: Scan all IVI systems in range"
@@ -327,18 +384,55 @@ blue-tap fleet
 
 ### adapter
 
-Manage Bluetooth adapters. List available adapters, bring them up/down, reset, or change properties.
+Manage Bluetooth adapters, DarkFirmware, and connection state.
 
 ```bash
-blue-tap adapter [list|info|up|down|reset|set-name|set-class]
+blue-tap adapter [list|info|up|down|reset|set-name|set-class|firmware-status|firmware-install|firmware-init|firmware-spoof|firmware-set|firmware-dump|connections|connection-inspect]
 ```
+
+=== "Adapter Management"
+
+    | Command | Description |
+    |---------|-------------|
+    | `list` | Show all HCI adapters with chipset, features, spoofing support |
+    | `info` | Detailed adapter info (auto-detects adapter, or `--hci`) |
+    | `up` | Bring adapter up (`--hci`) |
+    | `down` | Bring adapter down (`--hci`) |
+    | `reset` | Reset adapter (`--hci`) |
+    | `set-name NAME` | Set Bluetooth name for impersonation (`--hci`) |
+    | `set-class DEVICE_CLASS` | Set device class. Accepts a preset name or raw hex (`--hci`) |
+
+    `set-class` presets: `phone`, `laptop`, `headset`, `headphones`, `speaker`, `keyboard`, `mouse`, `gamepad`, `car`, `watch`, `tablet`, `printer`, `camera`.
+
+=== "DarkFirmware"
+
+    | Command | Description |
+    |---------|-------------|
+    | `firmware-status` | Check DarkFirmware status on RTL8761B |
+    | `firmware-install` | Install DarkFirmware (`--source`, `--restore`) |
+    | `firmware-init` | Initialize DarkFirmware hooks (activate Hooks 3+4) |
+    | `firmware-spoof [ADDRESS]` | Spoof BDADDR via firmware patch (`--restore`) |
+    | `firmware-set SETTING VALUE` | Configure firmware params: `lmp-size`, `lmp-slot` |
+    | `firmware-dump` | Dump controller memory (`--region`, `--start`/`--end`, `-o`) |
+
+=== "Connection Inspection"
+
+    | Command | Description |
+    |---------|-------------|
+    | `connections` | List firmware connection table (12 slots). `--dump` for hex |
+    | `connection-inspect` | Read live connection security state from controller RAM. `--watch` for continuous |
 
 !!! example "Common adapter operations"
     ```bash
-    blue-tap adapter list                    # Show all HCI adapters
-    blue-tap adapter info hci0               # Details for hci0
-    sudo blue-tap adapter reset hci0         # Reset adapter
-    sudo blue-tap adapter set-name hci0 "MyDevice"  # Change BT name
+    blue-tap adapter list                              # Show all HCI adapters
+    blue-tap adapter info --hci hci0                   # Details for hci0
+    sudo blue-tap adapter reset --hci hci0             # Reset adapter
+    sudo blue-tap adapter set-name "Galaxy S24"        # Change BT name
+    sudo blue-tap adapter set-class phone              # Impersonate a phone
+    sudo blue-tap adapter set-class 0x5a020c           # Raw hex device class
+    sudo blue-tap adapter firmware-install              # Install DarkFirmware
+    sudo blue-tap adapter firmware-spoof AA:BB:CC:DD:EE:FF  # Spoof BDADDR
+    sudo blue-tap adapter connection-inspect            # Scan all 12 connection slots
     ```
 
 ### session
@@ -388,7 +482,8 @@ blue-tap spoof NEW_MAC
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `--method` | choice | `auto` | `auto`, `bdaddr`, `spooftooph`, `btmgmt`, `rtl8761b` |
+| `-a, --hci` | string | auto | HCI adapter to spoof (e.g., `hci0`) |
+| `-m, --method` | choice | `auto` | `auto`, `bdaddr`, `spooftooph`, `btmgmt`, `rtl8761b` |
 
 !!! warning
     MAC spoofing changes persist until adapter reset. Always reset after testing.
@@ -423,12 +518,35 @@ blue-tap run-playbook [COMMANDS...]
 These commands do not appear in `--help` but are available for advanced use. They provide direct access to the module registry, which is useful for plugin development and scripting.
 
 ```bash
-blue-tap run MODULE_ID [KEY=VALUE...]    # Run any registered module directly
-blue-tap search QUERY                     # Search modules by keyword
-blue-tap info MODULE_ID                   # Show module metadata
-blue-tap show-options MODULE_ID           # Show module parameters
-blue-tap plugins                          # List loaded plugins
+blue-tap run MODULE_ID [KEY=VALUE...]         # Run any registered module directly
+blue-tap search TERM [--family F]             # Search modules by keyword
+blue-tap info MODULE_ID                       # Show module metadata
+blue-tap show-options MODULE_ID               # Show module parameters
+blue-tap plugins [list|info|refresh|doctor]   # Plugin management
 ```
+
+**`run` options:**
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `-r, --rhost` | string | Target Bluetooth address (alias for `RHOST`) |
+| `-a, --hci` | string | HCI adapter (alias for `HCI`) |
+| `-s, --session` | string | Session name |
+| `--yes` | flag | Bypass destructive confirmation |
+
+Options can also be passed as positional `KEY=VALUE` pairs after the module ID.
+
+!!! note "Exit Codes"
+    `run` exits with status **1** when the module execution fails (execution_status `failed`, `error`, or `timeout`), and **0** on success. This makes it safe to use in scripts and automation pipelines (e.g., `blue-tap run module && echo OK || echo FAILED`).
+
+**`search` options:**
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `-f, --family` | string | Filter by module family |
+| `--destructive` | flag | Show only destructive modules |
+| `--non-destructive` | flag | Show only non-destructive modules |
+| `--requires-pairing` | flag | Show only modules that require pairing |
 
 !!! example "Registry exploration"
     ```
@@ -446,7 +564,7 @@ blue-tap plugins                          # List loaded plugins
     Intrusive: No
     Pairing:     No
 
-    $ blue-tap run reconnaissance.l2cap_scan target=4C:4F:EE:17:3A:89 start_psm=1 end_psm=100
+    $ blue-tap run reconnaissance.l2cap_scan -r 4C:4F:EE:17:3A:89 START_PSM=1 END_PSM=100
     ```
 
 ---
@@ -492,8 +610,8 @@ blue-tap report --format html --output fleet-report.html
 ### Fuzzing Campaign
 
 ```bash
-sudo blue-tap fuzz campaign 4C:4F:EE:17:3A:89 --protocol l2cap --duration 3600
-blue-tap fuzz crashes --list
+sudo blue-tap fuzz campaign 4C:4F:EE:17:3A:89 -p sdp --duration 1h
+blue-tap fuzz crashes list
 blue-tap fuzz minimize CRASH_ID
 ```
 

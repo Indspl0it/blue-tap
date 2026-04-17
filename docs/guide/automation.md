@@ -26,19 +26,19 @@ blue-tap auto TARGET --hci hci0 --yes
 
 ### Phases
 
-Auto mode executes the following phases in order:
+Auto mode is a **four-module shortcut** — not a full pentest. It runs exactly these modules in order and then writes an HTML report:
 
-| Phase | Description |
-|-------|-------------|
-| 1. Discovery | Scan for the target and confirm reachability |
-| 2. Fingerprint | Identify device type, manufacturer, Bluetooth version |
-| 3. Recon | Deep service enumeration and profile discovery |
-| 4. Vulnscan | Run all applicable vulnerability checks |
-| 5. Pairing/Encryption | Attempt pairing and evaluate encryption configuration |
-| 6. Exploitation | Execute applicable exploits based on vulnscan findings |
-| 7. Fuzzing | Protocol fuzzing campaign on exposed services |
-| 8. DoS | Intrusive denial-of-service checks |
-| 9. Report | Generate HTML report with all findings |
+| Phase | Module | What it does |
+|-------|--------|--------------|
+| 1. Recon | `reconnaissance.sdp` | SDP service enumeration |
+| 2. Vulnscan | `assessment.vuln_scanner` | Full vulnerability scan (CVE + posture checks) |
+| 3. Exploit | `exploitation.knob` | KNOB key-negotiation attack (CVE-2019-9506) |
+| 4. Extract | `post_exploitation.pbap` | Phonebook extraction |
+| 5. Report | — | HTML report written to the session directory |
+
+Skip any phase with `--skip <name>` (repeatable): `recon`, `vulnscan`, `exploit`, `extract`.
+
+For broader workflows (dual-mode scanning, multiple exploits, DoS, fuzzing) use either the individual commands directly or a playbook via `run-playbook`.
 
 ### Example: Complete auto mode run
 
@@ -232,7 +232,7 @@ risk: high
 steps:
   - command: "discover classic -d 15"
     description: "Find nearby Classic Bluetooth devices"
-  - command: "recon auto {target}"
+  - command: "recon {target} auto"
     description: "Deep reconnaissance on target"
   - command: "vulnscan {target}"
     description: "Run vulnerability checks"
@@ -240,16 +240,21 @@ steps:
     description: "Extract all phonebooks via PBAP"
   - command: "extract {target} messages --folder inbox"
     description: "Extract SMS inbox via MAP"
-  - module: "exploitation.dos"
-    args:
-      target: "{target}"
-      checks: "l2ping_flood,pair_flood"
+  - command: "dos {target} --checks l2ping_flood,pair_flood --yes"
     description: "DoS resilience testing"
-  - command: "fuzz campaign {target} --protocols sdp,l2cap --duration 30m"
+  - command: "fuzz campaign {target} -p sdp -p rfcomm --duration 30m"
     description: "Protocol fuzzing campaign"
   - command: "report --format html"
     description: "Generate final report"
 ```
+
+!!! note "Placeholder substitution"
+    Playbook commands are rewritten before execution: every occurrence of
+    literal `TARGET` **or** `{target}` is replaced with the resolved target
+    address. Earlier builds also rewrote the lowercase word `target`, which
+    corrupted command strings that contained the literal word (e.g. a
+    description string or option value). If you have older playbooks that
+    relied on that behavior, switch to `{target}` or `TARGET`.
 
 ### What the playbook produces
 
@@ -296,7 +301,7 @@ $ blue-tap run-playbook --playbook ivi-full-assessment.yaml
 [14:35:10] Done. 1 SUCCESS, 1 RECOVERED.
 
 ─── Step 7/8: Protocol fuzzing campaign ─────────────────────
-  > fuzz campaign AA:BB:CC:DD:EE:FF --protocols sdp,l2cap
+  > fuzz campaign AA:BB:CC:DD:EE:FF -p sdp -p rfcomm
     --duration 30m
 [14:35:12] Starting fuzzing campaign...
 [15:05:13] Done. 2 crashes found.
@@ -322,7 +327,7 @@ discover classic -d 15
 recon auto TARGET
 vulnscan TARGET
 extract TARGET contacts --all
-fuzz campaign TARGET --protocols sdp --duration 15m
+fuzz campaign TARGET -p sdp --duration 15m
 report --format html
 ```
 
@@ -407,7 +412,7 @@ Add steps, adjust durations, and refine based on results. Common additions:
     description: "Extract contacts if paired"
 
 # Add targeted fuzzing
-  - command: "fuzz campaign {target} --protocols sdp --duration 15m --strategy coverage_guided"
+  - command: "fuzz campaign {target} -p sdp --duration 15m --strategy coverage_guided"
     description: "Fuzz SDP for 15 minutes"
 
 # Add specific DoS checks (intrusive)

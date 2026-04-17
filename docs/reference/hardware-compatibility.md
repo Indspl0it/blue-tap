@@ -15,7 +15,7 @@ Bluetooth adapter compatibility matrix and chipset-specific notes for Blue-Tap.
 | Intel AX210/211 | Intel | `8087:0032` / `8087:0033` | Yes | Yes | No | btmgmt (limited) | WiFi 6E combo |
 | Broadcom BCM20702 | Broadcom | `0A5C:21E8` | Yes | Yes | No | bdaddr / spooftooph | Good general-purpose |
 | Qualcomm AR3012 | Qualcomm | `0CF3:3004` | Yes | Yes | No | spooftooph | Older USB dongles |
-| Realtek RTL8821C | Realtek | `0BDA:C821` | Yes | Yes | No | spooftooph / btmgmt | Budget BLE dongle |
+| Realtek RTL8821C | Realtek | `0BDA:B00A` | Yes | Yes | No | spooftooph / btmgmt | Budget BLE dongle |
 
 ---
 

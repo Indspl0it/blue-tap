@@ -80,19 +80,19 @@ Impersonating a specific device type is essential for many Bluetooth attacks. Ca
 
 ```bash
 # Set friendly name (what the target sees during scanning)
-sudo blue-tap adapter set-name --hci hci0 "Galaxy S24"
+sudo blue-tap adapter set-name "Galaxy S24" --hci hci0
 
-# Set device class with preset
-sudo blue-tap adapter set-class --hci hci0 --preset phone
-sudo blue-tap adapter set-class --hci hci0 --preset laptop
-sudo blue-tap adapter set-class --hci hci0 --preset headset
-sudo blue-tap adapter set-class --hci hci0 --preset car
+# Set device class with a preset name
+sudo blue-tap adapter set-class phone --hci hci0
+sudo blue-tap adapter set-class laptop --hci hci0
+sudo blue-tap adapter set-class headset --hci hci0
+sudo blue-tap adapter set-class car --hci hci0
 
 # Set device class with raw hex (e.g., Audio/Video: Car Audio)
-sudo blue-tap adapter set-class --hci hci0 --raw 0x200408
+sudo blue-tap adapter set-class 0x200408 --hci hci0
 ```
 
-The `--preset` option covers common impersonation scenarios. Use `--raw` when you need to match a specific device class observed during reconnaissance -- for example, if SDP enumeration revealed the target expects a particular class code.
+Available presets: `phone`, `laptop`, `headset`, `headphones`, `speaker`, `keyboard`, `mouse`, `gamepad`, `car`, `watch`, `tablet`, `printer`, `camera`. Use raw hex when you need to match a specific device class observed during reconnaissance -- for example, if SDP enumeration revealed the target expects a particular class code.
 
 ### Adapter Selection Priority
 
@@ -125,7 +125,7 @@ The table below lists adapters that have been tested with Blue-Tap. Any Linux-co
 | Generic RTL8761B | RTL8761B | 0BDA:8771 | Yes | Yes | Yes | RAM patch |
 | CSR 8510 dongle | CSR 8510 A10 | 0A12:0001 | Yes | No | No | bdaddr |
 | Intel AX200 | Intel | 8087:0029 | Yes | Yes | No | btmgmt (limited) |
-| Intel AX201 | Intel | 8087:0025 | Yes | Yes | No | btmgmt (limited) |
+| Intel AX201 | Intel | 8087:0026 | Yes | Yes | No | btmgmt (limited) |
 | Intel AX210 | Intel | 8087:0032 | Yes | Yes | No | btmgmt (limited) |
 | Intel AX211 | Intel | 8087:0033 | Yes | Yes | No | btmgmt (limited) |
 | Broadcom BCM20702 | Broadcom | 0A5C:21E8 | Yes | Yes | No | bdaddr / spooftooph |
@@ -136,16 +136,22 @@ The table below lists adapters that have been tested with Blue-Tap. Any Linux-co
     Blue-Tap identifies chipsets by matching USB VID:PID against a built-in lookup table.
     Internal (non-USB) adapters are identified via `hciconfig -a` manufacturer strings.
 
-### Recommended Two-Adapter Setup
+### Recommended Adapter
 
-For serious automotive penetration testing, a two-adapter setup provides the best coverage. The only supported adapter for DarkFirmware operations is the **TP-Link UB500** (RTL8761B):
+The only adapter you need is the **TP-Link UB500** (RTL8761B). It is the only chipset Blue-Tap supports for DarkFirmware, and it handles all standard operations (discovery, reconnaissance, assessment, extraction, fuzzing) equally well.
 
-| Adapter | Role | Why |
-|---------|------|-----|
-| **TP-Link UB500** (RTL8761B) | DarkFirmware operations | LMP injection, link-layer monitoring, instant MAC spoofing, controller memory access |
-| **TP-Link UB500** (RTL8761B) | Standard operations | Discovery, reconnaissance, assessment, data extraction, fuzzing |
+| Adapter | Chipset | Price | DarkFirmware | Why |
+|---------|---------|-------|--------------|-----|
+| **TP-Link UB500** | RTL8761B | ~$13 USD / ₹599 INR | Yes | Enables all Blue-Tap capabilities -- host-level and below-HCI |
 
-Using two TP-Link UB500 adapters is ideal -- one dedicated to DarkFirmware operations and one for standard assessment work. This separation is valuable because DarkFirmware operations can crash or lock the controller -- having a second adapter means your scanning and assessment workflow is not interrupted. The DarkFirmwareWatchdog automatically recovers the DarkFirmware adapter in the background while you continue working on the other.
+### Optional Two-Adapter Setup
+
+For extended assessments where you need uninterrupted scanning while running DarkFirmware operations (which can crash or lock the controller), add a second adapter:
+
+- **Adapter 1 (TP-Link UB500):** DarkFirmware operations -- LMP injection, exploitation, controller memory access
+- **Adapter 2 (any Classic+BLE adapter):** Passive scanning and monitoring while adapter 1 is engaged
+
+The DarkFirmwareWatchdog automatically recovers the DarkFirmware adapter in the background while you continue working on the other.
 
 ```bash
 # Use first adapter for scanning
@@ -206,6 +212,19 @@ When `--method auto` (the default), Blue-Tap tries methods in this order and sto
     connections on other adapters are not disrupted, and the spoofed address takes
     effect immediately. All other methods require bringing the adapter down and back up.
 
+!!! info "RAM patch verifies before claiming success"
+    Blue-Tap reads the adapter's BDADDR after every RAM patch. If the RAM write succeeds
+    but the host stack still reports the old cached address, the tool logs the mismatch
+    and automatically falls back to the firmware-file method (persistent patch + USB
+    reset). `verified=true` in the result now always means the adapter reports the new
+    address at the HCI layer.
+
+!!! note "MAC backup file permissions"
+    The original MAC is persisted to `~/.blue_tap_original_mac.json` on the first spoof
+    attempt. If the file was created under `sudo` in an earlier run and is now
+    root-owned, spoofing logs a warning rather than crashing —
+    `chown $USER ~/.blue_tap_original_mac.json` to re-enable transparent restoration.
+
 ### Original MAC Backup
 
 Before any spoofing attempt, Blue-Tap saves the adapter's original MAC to `~/.blue_tap_original_mac.json`. This allows restoring the original address later:
@@ -221,11 +240,14 @@ The backup file is per-adapter (keyed by HCI name), so multiple adapters can be 
 
 ---
 
-## DarkFirmware (Below-HCI)
+## DarkFirmware (Recommended)
+
+!!! warning "Strongly Recommended"
+    The TP-Link UB500 (RTL8761B) with DarkFirmware is the **recommended adapter** for Blue-Tap. While basic discovery and reconnaissance work with any adapter, a significant portion of Blue-Tap's core capabilities -- CVE exploitation, vulnerability checks that require LMP-level probing, protocol fuzzing with crash detection, and all below-HCI operations -- depend on DarkFirmware. Without it, you lose access to approximately 40-45% of the Bluetooth attack surface.
 
 DarkFirmware is a custom firmware for the RTL8761B Bluetooth controller that extends Blue-Tap's capabilities below the HCI boundary. Standard Bluetooth security tools operate at the host level -- they send and receive HCI commands but cannot see or manipulate the Link Manager Protocol (LMP) and Link Controller (LC) traffic that flows between two Bluetooth controllers. DarkFirmware patches the RTL8761B's MIPS16e firmware to hook into these lower layers, enabling a class of attacks and inspections that are otherwise impossible without specialized hardware.
 
-This matters because approximately 40-45% of Bluetooth CVEs target the LMP or LC layers -- BrakTooth, KNOB key negotiation, and various LMP confusion attacks all operate below HCI. Without DarkFirmware, these vulnerabilities cannot be tested or exploited from a standard Linux host.
+Approximately 40-45% of Bluetooth CVEs target the LMP or LC layers -- BrakTooth, KNOB key negotiation, and various LMP confusion attacks all operate below HCI. Many of Blue-Tap's exploitation modules (KNOB, BIAS, BLUFFS, encryption downgrade), several vulnerability assessment checks, and the protocol fuzzer's crash detection and LMP-level fuzzing all require DarkFirmware to function. Without it, these capabilities are unavailable.
 
 ### What DarkFirmware Enables
 
@@ -399,10 +421,14 @@ These probes are non-destructive and take less than 100ms.
 |------------|---------------------|-------------------|
 | Device discovery | Yes | Yes |
 | Service enumeration (SDP, GATT) | Yes | Yes |
-| Vulnerability scanning | Yes | Yes |
+| Basic vulnerability scanning (host-level checks) | Yes | Yes |
 | Data extraction (PBAP, MAP, OPP) | Yes | Yes |
 | Audio streaming/capture | Yes | Yes |
+| DoS checks (L2CAP, SDP, RFCOMM, BNEP) | Yes | Yes |
 | MAC spoofing | bdaddr/spooftooph/btmgmt | RAM patch (instant) |
+| **CVE exploitation (KNOB, BIAS, BLUFFS, enc-downgrade)** | **No** | **Yes** |
+| **LMP-level vulnerability checks** | **No** | **Yes** |
+| **Protocol fuzzing with LMP crash detection** | **No** | **Yes** |
 | LMP packet injection | No | Yes |
 | LMP monitoring | No | Yes |
 | In-flight LMP modification | No | Yes |
@@ -411,7 +437,7 @@ These probes are non-destructive and take less than 100ms.
 | BrakTooth-style oversized LMP | No | Yes |
 | CVE PoC replay (LMP-level) | No | Yes |
 
-The key takeaway: everything above the line works with any adapter. Everything below the line requires DarkFirmware. For most assessment engagements, standard adapter capabilities cover the critical checks. DarkFirmware extends your reach for advanced research and LMP-layer CVE validation.
+The top section works with any adapter. The **bold rows** represent core pentest capabilities that require DarkFirmware -- not edge cases, but the exploitation and advanced assessment modules that distinguish Blue-Tap from basic scanning tools. The bottom section covers raw below-HCI operations for advanced research.
 
 ### DarkFirmwareWatchdog
 

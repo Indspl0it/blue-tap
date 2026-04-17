@@ -145,7 +145,7 @@ sudo python3 ble_gatt.py
 
 The IVI is now live. From the attacker machine:
 ```bash
-blue-tap scan classic
+blue-tap discover classic
 # Should show "SYNC" with device class Car Audio
 ```
 
@@ -340,12 +340,12 @@ Once the IVI is running, from the **attacker machine**:
 
 ### Discovery & Reconnaissance
 ```bash
-blue-tap scan classic                         # Find "SYNC" Car Audio device
-blue-tap recon sdp <IVI_MAC>                  # 8+ SDP service records
-blue-tap recon fingerprint <IVI_MAC>          # BT version, chipset, profiles
-blue-tap recon rfcomm-scan <IVI_MAC>          # Channels 1,2,9,10,15,16 open
-blue-tap recon l2cap-scan <IVI_MAC>           # PSMs 1,3,7,23,25 open
-blue-tap recon gatt <IVI_MAC>                 # BLE services (requires ble_gatt.py)
+blue-tap discover classic                         # Find "SYNC" Car Audio device
+blue-tap recon <IVI_MAC> sdp                  # 8+ SDP service records
+blue-tap recon <IVI_MAC> fingerprint          # BT version, chipset, profiles
+blue-tap recon <IVI_MAC> rfcomm               # Channels 1,2,9,10,15,16 open
+blue-tap recon <IVI_MAC> l2cap                # PSMs 1,3,7,23,25 open
+blue-tap recon <IVI_MAC> gatt                 # BLE services
 ```
 
 ### Data Extraction
@@ -396,7 +396,7 @@ sudo python3 ivi_daemon.py
 ### Attack (from attacker machine)
 ```bash
 # 1. Discover the IVI
-blue-tap scan classic
+blue-tap discover classic
 # → sees "SYNC" at XX:XX:XX:XX:XX:XX
 
 # 2. Spoof the pre-paired phone's MAC

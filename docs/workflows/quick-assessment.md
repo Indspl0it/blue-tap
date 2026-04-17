@@ -183,7 +183,7 @@ $ sudo blue-tap vulnscan AA:BB:CC:DD:EE:FF
 Produce an HTML report covering all results from this session:
 
 ```bash
-$ sudo blue-tap report --format html -o assessment.html
+$ sudo blue-tap report -f html -o assessment.html
 [*] Generating report for session bt-20260416-091523...
 [*] Aggregating: 1 discovery, 2 recon, 1 vulnscan
 [+] Report written to assessment.html (47 KB)

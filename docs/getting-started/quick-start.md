@@ -47,7 +47,10 @@ This performs a Classic Bluetooth inquiry scan (typically 10-15 seconds) and dis
     Found 3 devices in 12.4 seconds.
     ```
 
-**What to look for:** The MAC address of your target device. You will use it in all subsequent commands. The device class and name help confirm you have the right target -- car audio systems typically show class `0x200408` or similar Audio/Video classes.
+**What to look for:** The MAC address of your target device. The device class and name help confirm you have the right target -- car audio systems typically show class `0x200408` or similar Audio/Video classes.
+
+!!! tip "Don't have a MAC address yet?"
+    You can skip noting the address and run subsequent commands without a target --- e.g. `sudo blue-tap vulnscan` or `sudo blue-tap recon sdp`. Blue-Tap will scan for nearby devices and present an interactive picker.
 
 For BLE targets:
 

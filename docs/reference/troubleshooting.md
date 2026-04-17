@@ -147,7 +147,7 @@ If the chipset ignores the write, use a different adapter. RTL8761B and CSR 8510
 
 ### No devices found
 
-**Symptom:** `blue-tap scan` completes but reports 0 devices.
+**Symptom:** `blue-tap discover` completes but reports 0 devices.
 
 **Cause:** Scan duration too short, adapter not UP, or target not in discoverable mode.
 
@@ -155,14 +155,14 @@ If the chipset ignores the write, use a different adapter. RTL8761B and CSR 8510
 
 ```bash
 # Increase scan duration (default may be too short in noisy environments)
-blue-tap scan classic -d 20
+blue-tap discover classic -d 20
 
 # Verify adapter is UP
 hciconfig hci0
 
 # Try separate scans (combined scans can interfere on some adapters)
-blue-tap scan classic
-blue-tap scan ble
+blue-tap discover classic
+blue-tap discover ble
 ```
 
 ### BLE scan fails
@@ -197,7 +197,7 @@ sudo systemctl start bluetooth
 blue-tap adapter reset --hci hci0
 
 # Then retry
-blue-tap scan classic
+blue-tap discover classic
 ```
 
 ---
@@ -230,10 +230,10 @@ blue-tap exploit TARGET ssp-downgrade --method probe
 
 ```bash
 # Discover available channels via SDP
-blue-tap recon sdp TARGET
+blue-tap recon TARGET sdp
 
 # Scan for hidden RFCOMM channels (not in SDP)
-blue-tap recon rfcomm TARGET
+blue-tap recon TARGET rfcomm
 ```
 
 ### L2CAP connection timeout
@@ -485,7 +485,7 @@ blue-tap adapter firmware-install
 
 ```bash
 # Use the same session name for all commands
-blue-tap -s my-assessment scan classic
+blue-tap -s my-assessment discover classic
 blue-tap -s my-assessment vulnscan TARGET
 blue-tap -s my-assessment report
 

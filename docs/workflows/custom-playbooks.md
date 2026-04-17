@@ -300,7 +300,7 @@ $ sudo blue-tap playbook run quick-recon --target AA:BB:CC:DD:EE:FF
 | Flag | Description |
 |------|-------------|
 | `--target MAC` | Set the target device MAC |
-| `--adapter hciX` | Override the Bluetooth adapter |
+| `--hci hciX` | Override the Bluetooth adapter |
 | `--yes` | Skip confirmation prompts for intrusive steps |
 | `--dry-run` | Print commands without executing |
 | `--stop-on-error` | Halt playbook on first failure (default: continue) |
@@ -395,7 +395,7 @@ steps:
   - command: exploit {target} ssp-downgrade --method probe
     description: Check whether SSP is enforced or bypassable
 
-  - command: fuzz campaign {target} --protocols sdp,l2cap,rfcomm --duration 30m
+  - command: fuzz campaign {target} -p sdp -p rfcomm --duration 30m
     description: 30-minute fuzzing campaign across core protocols
 
   - command: dos {target} --recovery-timeout 30 --yes
@@ -432,7 +432,7 @@ $ sudo blue-tap playbook run --file ivi-full.yaml \
   Step 7/9: exploit AA:BB:CC:DD:EE:FF ssp-downgrade --method probe
   [+] SSP not enforced. Legacy PIN pairing accepted.
 
-  Step 8/9: fuzz campaign AA:BB:CC:DD:EE:FF --protocols sdp,l2cap,rfcomm --duration 30m
+  Step 8/9: fuzz campaign AA:BB:CC:DD:EE:FF -p sdp -p rfcomm --duration 30m
   [+] 30m campaign: 1 crash (MEDIUM).
 
   Step 9/9: dos AA:BB:CC:DD:EE:FF --recovery-timeout 30 --yes

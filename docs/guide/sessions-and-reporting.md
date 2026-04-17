@@ -12,31 +12,26 @@ Every command you run --- discovery, recon, vulnscan, extraction, fuzzing, DoS -
 
 ```
 sessions/
-  blue-tap_20260416_143022/
-    session.json              # Session metadata
-    001_scan_classic.json     # Discovery results
-    002_recon_auto.json       # Reconnaissance envelope
-    003_vulnscan.json         # Assessment results
-    004_dos.json              # DoS check results
-    005_fuzz_campaign.json    # Fuzzing campaign results
-    pbap/                     # Extracted contacts (vCards)
-      pb.vcf
-      ich.vcf
-      photos/
-    map/                      # Extracted messages
-      inbox/
-    audio/                    # Captured audio files
-      hfp_record_20260416_144510.wav
-    fuzz/                     # Fuzzing data
-      corpus/
+  my-assessment/
+    session.json              # Session metadata (name, targets, command log)
+    001_scan_classic.json     # Command output #1 (RunEnvelope wrapper)
+    002_recon_sdp.json        # Command output #2
+    003_vulnscan.json         # Command output #3
+    004_dos.json              # Command output #4
+    005_fuzz_ble-att.json     # Command output #5
+    fuzz/                     # Fuzzing artifacts
+      crashes.db              # Crash database (SQLite)
+      corpus/                 # Seed corpus by protocol
         sdp/
-        l2cap/
-      crashes/
-        crash_001_sdp.bin
-    at/                       # AT command extracts
+        ble-att/
+        bnep/
     report.html               # Generated report
     report.json               # JSON export
 ```
+
+Command output files follow the naming convention `{seq:03d}_{command}.json` -- a zero-padded sequence number followed by the command name (spaces and slashes replaced with underscores, max 40 characters). Subdirectories are created on demand by modules that produce artifacts (fuzzing corpus, crash databases, extracted data).
+
+Additional subdirectories may appear depending on which modules you run -- `pbap/` for extracted contacts, `map/` for messages, `audio/` for recordings. These are created via the session store's `save_raw()` method when the corresponding extraction or capture module writes data.
 
 ### session.json
 
@@ -44,42 +39,62 @@ The `session.json` file is the session's metadata record. It tracks what was don
 
 ```json
 {
-  "session_id": "blue-tap_20260416_143022",
-  "created_at": "2026-04-16T14:30:22Z",
-  "updated_at": "2026-04-16T16:45:10Z",
+  "name": "my-assessment",
+  "created": "2026-04-16T14:30:22.705014",
+  "last_updated": "2026-04-16T16:45:10.312847",
   "adapter": "hci0",
-  "targets": [
-    {
-      "address": "AA:BB:CC:DD:EE:FF",
-      "name": "MyCarAudio",
-      "type": "classic",
-      "first_seen": "2026-04-16T14:30:45Z"
-    }
-  ],
+  "targets": ["AA:BB:CC:DD:EE:FF"],
   "commands": [
     {
-      "index": 1,
-      "command": "scan classic -d 15",
-      "started_at": "2026-04-16T14:30:22Z",
-      "completed_at": "2026-04-16T14:30:37Z",
-      "envelope": "001_scan_classic.json"
+      "seq": 1,
+      "command": "scan_classic",
+      "category": "scan",
+      "target": "",
+      "timestamp": "2026-04-16T14:30:22.705014+00:00",
+      "file": "001_scan_classic.json"
     },
     {
-      "index": 2,
-      "command": "recon auto AA:BB:CC:DD:EE:FF",
-      "started_at": "2026-04-16T14:31:02Z",
-      "completed_at": "2026-04-16T14:33:45Z",
-      "envelope": "002_recon_auto.json"
+      "seq": 2,
+      "command": "recon_sdp",
+      "category": "recon",
+      "target": "AA:BB:CC:DD:EE:FF",
+      "timestamp": "2026-04-16T14:31:02.112340+00:00",
+      "file": "002_recon_sdp.json"
     },
     {
-      "index": 3,
-      "command": "vulnscan AA:BB:CC:DD:EE:FF",
-      "started_at": "2026-04-16T14:34:00Z",
-      "completed_at": "2026-04-16T14:38:22Z",
-      "envelope": "003_vulnscan.json"
+      "seq": 3,
+      "command": "vulnscan",
+      "category": "vuln",
+      "target": "AA:BB:CC:DD:EE:FF",
+      "timestamp": "2026-04-16T14:34:00.881523+00:00",
+      "file": "003_vulnscan.json"
     }
   ],
-  "notes": []
+  "files": [
+    {
+      "path": "fuzz/crashes.db",
+      "timestamp": "2026-04-16T15:12:30.445012+00:00",
+      "size": 8192,
+      "artifact_type": "fuzz"
+    }
+  ]
+}
+```
+
+Each command output file wraps the module's `RunEnvelope` with additional metadata:
+
+```json
+{
+  "command": "vulnscan",
+  "category": "vuln",
+  "target": "AA:BB:CC:DD:EE:FF",
+  "timestamp": "2026-04-16T14:34:00.881523+00:00",
+  "data": { /* RunEnvelope contents */ },
+  "validation": {
+    "checked_at_write_time": true,
+    "valid": true,
+    "errors": []
+  }
 }
 ```
 
@@ -94,6 +109,14 @@ Session directory is resolved in priority order:
 ### Atomic Writes
 
 All session file writes use atomic operations: write to a temporary file, `fsync`, then `os.replace` to the target path. This prevents corrupted session data if the process is interrupted.
+
+### Timestamps
+
+All session timestamps are written as **UTC ISO-8601** strings (e.g. `2026-04-16T14:30:22.705014+00:00`). Earlier builds used naive local time, which meant a session that started before DST and ended after it would sort out of order and compute negative durations. Report-time formatters render UTC timestamps in the operator's local timezone.
+
+### Adapter exit codes
+
+`blue-tap adapter up/down/reset/info/set-name` now raise `click.ClickException` on failure, producing exit code `1`. Prior versions printed an error and returned `0`, which silently broke shell pipelines and CI checks. Automation that relied on the old behavior should wrap those invocations in the appropriate error handling.
 
 ### Managing Sessions Across Multiple Days
 
@@ -143,32 +166,29 @@ blue-tap session show blue-tap_20260416_143022
 ```
 
 ```
-$ blue-tap session show blue-tap_20260416_143022
+$ blue-tap session show my-assessment
 
-  Session: blue-tap_20260416_143022
+  Session: my-assessment
   Created: 2026-04-16 14:30:22
   Updated: 2026-04-16 16:45:10
   Adapter: hci0
 
   Targets:
-    AA:BB:CC:DD:EE:FF  MyCarAudio  (Classic)
+    AA:BB:CC:DD:EE:FF
 
   Commands (8):
-    #  Time   Command                              Envelope
-    1  14:30  scan classic -d 15                    001_scan_classic.json
-    2  14:31  recon auto AA:BB:CC:DD:EE:FF          002_recon_auto.json
-    3  14:34  vulnscan AA:BB:CC:DD:EE:FF             003_vulnscan.json
-    4  14:39  extract AA:BB:CC:DD:EE:FF contacts     004_pbap.json
-    5  14:42  extract AA:BB:CC:DD:EE:FF messages     005_map.json
-    6  14:50  dos AA:BB:CC:DD:EE:FF                  006_dos.json
-    7  15:00  fuzz campaign AA:BB:CC:DD:EE:FF        007_fuzz.json
-    8  16:45  report --format html                   ---
+    #  Category  Command                  Target             File
+    1  scan      scan_classic             --                 001_scan_classic.json
+    2  recon     recon_sdp                AA:BB:CC:DD:EE:FF  002_recon_sdp.json
+    3  vuln      vulnscan                 AA:BB:CC:DD:EE:FF  003_vulnscan.json
+    4  extract   extract_contacts         AA:BB:CC:DD:EE:FF  004_extract_contacts.json
+    5  extract   extract_messages         AA:BB:CC:DD:EE:FF  005_extract_messages.json
+    6  dos       dos                      AA:BB:CC:DD:EE:FF  006_dos.json
+    7  fuzz      fuzz_ble-att             AA:BB:CC:DD:EE:FF  007_fuzz_ble-att.json
+    8  report    report                   --                 ---
 
-  Artifacts:
-    pbap/pb.vcf                          142 KB  847 contacts
-    map/inbox/                           89 KB   20 messages
-    audio/hfp_record_20260416_144510.wav 480 KB  30s recording
-    fuzz/crashes/crash_001_sdp.bin       48 B    CRITICAL
+  Files:
+    fuzz/crashes.db                      8 KB    fuzz
 ```
 
 ---

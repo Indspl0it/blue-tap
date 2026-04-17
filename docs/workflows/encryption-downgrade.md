@@ -287,38 +287,29 @@ Steps 3 and 4 require a DarkFirmware-patched RTL8761B adapter (e.g., TP-Link UB5
 
 ```bash
 # 1. Confirm adapter is RTL8761B
-$ sudo blue-tap adapter info
-[*] Adapter: hci0
-    Chipset:  Realtek RTL8761BUV
-    USB ID:   2357:0604
-    Firmware: rtl8761bu_fw (stock)
-    Status:   UP RUNNING
+$ sudo blue-tap adapter list
+HCI   Chipset          Manufacturer     BT Ver   Status       Features
+────  ───────────────  ───────────────  ───────  ───────────  ─────────────────────────
+hci1  RTL8761B         Realtek          5.0      UP RUNNING   Classic, BLE, EDR, SSP
 
-# 2. Load DarkFirmware patch
-$ sudo blue-tap firmware load --patch darkfirmware
-[*] Loading DarkFirmware patch for RTL8761B...
-[*] Stopping hci0...
-[*] Uploading patched firmware (128 KB)...
-[*] Restarting hci0...
+# 2. Install DarkFirmware
+$ sudo blue-tap adapter firmware-install
+[*] Installing DarkFirmware for RTL8761B on hci1...
 [+] DarkFirmware loaded successfully.
 
-# 3. Verify patch is active
-$ sudo blue-tap firmware status
-[*] Adapter: hci0
-    Chipset:  Realtek RTL8761BUV
-    Firmware: DarkFirmware v1.2.0
-    Capabilities:
-      - LMP packet injection      [active]
-      - LMP packet interception    [active]
-      - Address spoofing           [active]
-      - Key size manipulation      [active]
-    Status:   UP RUNNING PATCHED
+# 3. Verify DarkFirmware is active
+$ sudo blue-tap adapter firmware-status
+[*] DarkFirmware: ACTIVE on hci1
+    Hook 1 (HCI CMD): Installed
+    Hook 2 (tLC_RX_LMP): Installed
+    Hook 3 (tLC_TX): Installed
+    Hook 4 (tLC_RX): Installed
 ```
 
-**What happened:** DarkFirmware replaces the stock RTL8761B firmware with a patched version that exposes LMP-level packet injection and interception through vendor-specific HCI commands. This gives Blue-Tap access to the Link Manager Protocol layer, which is normally hidden behind the controller.
+**What happened:** DarkFirmware replaces the stock RTL8761B firmware with a patched version that exposes LMP-level packet injection and interception through vendor-specific HCI commands. This gives Blue-Tap access to the Link Manager Protocol layer, which is normally hidden behind the controller. See [Hardware Setup -- DarkFirmware](../getting-started/hardware-setup.md#darkfirmware-recommended) for the full installation walkthrough.
 
 !!! warning
-    DarkFirmware modifies the adapter's firmware in RAM. The adapter resets to stock firmware when unplugged or on system reboot. No permanent changes are made to the hardware.
+    DarkFirmware modifies the adapter's firmware. The original firmware is backed up and can be restored. On USB disconnect or reboot, the adapter reloads from disk.
 
 ---
 

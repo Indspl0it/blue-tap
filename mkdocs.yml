@@ -119,7 +119,7 @@ nav:
       - Writing a Module: developer/writing-a-module.md
       - Report Adapters: developer/report-adapters.md
       - Plugin Entry Points: developer/plugin-entry-points.md
-  - Reference:
+  - Technical Reference:
       - Troubleshooting: reference/troubleshooting.md
       - Hardware Compatibility: reference/hardware-compatibility.md
       - Platform Notes: reference/platform-notes.md

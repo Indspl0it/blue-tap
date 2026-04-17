@@ -252,11 +252,11 @@ $ blue-tap demo
 
 If demo mode completes and produces a report, your Python environment, dependencies, and framework are all working correctly. The next step is to connect real hardware.
 
-## DarkFirmware (Optional)
+## DarkFirmware (Recommended)
 
 If you have a TP-Link UB500 (RTL8761B) adapter and want below-HCI capabilities
 (LMP injection, controller memory access, in-flight packet modification), see
-[Hardware Setup -- DarkFirmware](hardware-setup.md#darkfirmware-below-hci). DarkFirmware is not required for the majority of Blue-Tap's capabilities -- discovery, reconnaissance, assessment, data extraction, and audio capture all work with any supported adapter.
+[Hardware Setup -- DarkFirmware](hardware-setup.md#darkfirmware-recommended). DarkFirmware is not required for the majority of Blue-Tap's capabilities -- discovery, reconnaissance, assessment, data extraction, and audio capture all work with any supported adapter.
 
 ---
 
