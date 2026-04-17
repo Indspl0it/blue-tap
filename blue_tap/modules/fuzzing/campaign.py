@@ -8,7 +8,9 @@ layer.
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 
 from blue_tap.framework.contracts.result_schema import (
     build_run_envelope,
@@ -81,6 +83,7 @@ class FuzzCampaignModule(Module):
         session_dir = ctx.options.get("SESSION_DIR", ".")
         cooldown = ctx.options.get("COOLDOWN", 0.5)
         hci = ctx.options.get("HCI", "")
+        resume_requested = bool(ctx.options.get("CONTINUE", False))
 
         protocols = [p.strip().lower() for p in protocols_str.split(",") if p.strip()]
         if not protocols:
@@ -92,17 +95,42 @@ class FuzzCampaignModule(Module):
 
         transport_overrides = {proto: {"hci": hci} for proto in protocols}
 
-        campaign = FuzzCampaign(
-            target=target,
-            protocols=protocols,
-            strategy=strategy,
-            duration=duration if duration > 0 else None,
-            max_iterations=max_iterations if max_iterations > 0 else None,
-            session_dir=session_dir,
-            cooldown=cooldown,
-            run_id=ctx.run_id,
-            transport_overrides=transport_overrides,
-        )
+        campaign: FuzzCampaign | None = None
+        if resume_requested:
+            state_file = os.path.join(session_dir, "fuzz", "campaign_state.json")
+            if os.path.exists(state_file):
+                try:
+                    campaign = FuzzCampaign.resume(session_dir)
+                    # Rebuild transport_overrides using the RESUMED protocol
+                    # list (saved state may differ from CLI PROTOCOLS option).
+                    campaign.transport_overrides = {
+                        proto: {"hci": hci} for proto in campaign.protocols
+                    }
+                    logger.info(
+                        "Resumed campaign from %s (iteration=%d, crashes=%d)",
+                        state_file, campaign.stats.iterations, campaign.stats.crashes,
+                    )
+                except (FileNotFoundError, json.JSONDecodeError) as exc:
+                    logger.warning(
+                        "CONTINUE requested but campaign_state.json is unusable (%s); starting fresh",
+                        exc,
+                    )
+                    campaign = None
+            else:
+                logger.info("CONTINUE requested but no saved state in %s; starting fresh", state_file)
+
+        if campaign is None:
+            campaign = FuzzCampaign(
+                target=target,
+                protocols=protocols,
+                strategy=strategy,
+                duration=duration if duration > 0 else None,
+                max_iterations=max_iterations if max_iterations > 0 else None,
+                session_dir=session_dir,
+                cooldown=cooldown,
+                run_id=ctx.run_id,
+                transport_overrides=transport_overrides,
+            )
 
         interrupted = False
         error_text: str | None = None

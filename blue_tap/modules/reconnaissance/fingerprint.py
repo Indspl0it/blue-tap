@@ -487,7 +487,8 @@ class FingerprintModule(Module):
             error_msg = str(exc)
             result = {"error": error_msg}
 
-        vendor = (result.get("chipset") or {}).get("vendor", "") if isinstance(result.get("chipset"), dict) else result.get("chipset_vendor", "")
+        manufacturer = result.get("manufacturer", "")
+        vendor = manufacturer if manufacturer and manufacturer.lower() != "unknown" else ""
         bt_version = result.get("bt_version", "")
         profiles = result.get("profiles", []) or []
         has_signal = bool(vendor) or bool(bt_version) or bool(profiles)

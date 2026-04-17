@@ -76,7 +76,6 @@ class TargetHealthMonitor:
         self.target = target
         self.check_interval = check_interval
 
-        # Internal state
         self._last_status: HealthStatus = HealthStatus.ALIVE
         self._last_alive_time: float = time.time()
         self._reboot_count: int = 0
@@ -84,6 +83,7 @@ class TargetHealthMonitor:
         self._recent_fuzz_cases: collections.deque[bytes] = collections.deque(maxlen=10)
         self._events: list[HealthEvent] = []
         self._latency_trend: collections.deque[float] = collections.deque(maxlen=100)
+        self._protocol_consecutive_fails: dict[str, int] = {}
 
     # ------------------------------------------------------------------
     # Liveness probe
@@ -142,11 +142,24 @@ class TargetHealthMonitor:
     # Core update logic
     # ------------------------------------------------------------------
 
-    def update(self, iteration: int, latency_ms: float | None, response: Any) -> HealthStatus:
+    def update(
+        self,
+        iteration: int,
+        latency_ms: float | None,
+        response: Any,
+        protocol: str | None = None,
+    ) -> HealthStatus:
         """Process one iteration's health data and return the new status."""
-        # Track latency
         if latency_ms is not None:
             self._latency_trend.append(latency_ms)
+
+        if protocol:
+            if response:
+                self._protocol_consecutive_fails[protocol] = 0
+            else:
+                self._protocol_consecutive_fails[protocol] = (
+                    self._protocol_consecutive_fails.get(protocol, 0) + 1
+                )
 
         probe_status = self.check_alive(self.target)
 
@@ -196,7 +209,32 @@ class TargetHealthMonitor:
             self._last_status = HealthStatus.REBOOTED
             return HealthStatus.REBOOTED
 
-        # Check degradation
+        ZOMBIE_FAIL_THRESHOLD = 3
+        zombie_protocols = [
+            p for p, fails in self._protocol_consecutive_fails.items()
+            if fails >= ZOMBIE_FAIL_THRESHOLD
+        ]
+        if (
+            len(self._protocol_consecutive_fails) >= 2
+            and len(zombie_protocols) == len(self._protocol_consecutive_fails)
+        ):
+            if self._last_status != HealthStatus.ZOMBIE:
+                self._events.append(HealthEvent(
+                    timestamp=time.time(),
+                    status=HealthStatus.ZOMBIE,
+                    details=(
+                        f"Zombie state at iteration {iteration}: L2CAP alive but "
+                        f"protocols {zombie_protocols} have {ZOMBIE_FAIL_THRESHOLD}+ consecutive failures"
+                    ),
+                    iteration=iteration,
+                ))
+                warning(
+                    f"Target {self.target} entered ZOMBIE state — "
+                    f"all tracked protocols {zombie_protocols} unresponsive"
+                )
+            self._last_status = HealthStatus.ZOMBIE
+            return HealthStatus.ZOMBIE
+
         if self._check_degradation():
             if self._last_status != HealthStatus.DEGRADED:
                 self._events.append(HealthEvent(
@@ -256,18 +294,6 @@ class TargetHealthMonitor:
 
         slope = numerator / denominator
         return slope > 0.5
-
-    # ------------------------------------------------------------------
-    # Zombie detection
-    # ------------------------------------------------------------------
-
-    def _check_zombie(self, protocol_responses: dict[str, bool]) -> bool:
-        """L2CAP alive but every protocol request fails -> zombie."""
-        if not protocol_responses:
-            return False
-        if self.check_alive(self.target) != HealthStatus.ALIVE:
-            return False
-        return not any(protocol_responses.values())
 
     # ------------------------------------------------------------------
     # Accessors

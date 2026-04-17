@@ -87,6 +87,7 @@ def run_auto_recon(
             id="recon_capability_detection",
             title="Transport Capability Detection",
             module="reconnaissance",
+            module_id="reconnaissance.campaign",
             protocol="Bluetooth",
             execution_status=EXECUTION_COMPLETED,
             module_outcome=capability.get("classification", "undetermined"),
@@ -407,6 +408,7 @@ def _skip_execution(
         id=execution_id,
         title=title,
         module="reconnaissance",
+        module_id="reconnaissance.campaign",
         protocol=protocol,
         execution_status=EXECUTION_SKIPPED,
         module_outcome=outcome,
@@ -451,11 +453,13 @@ def _run_hci_capture_step(address: str, hci: str, duration: int, prerequisites: 
             artifacts=[artifact],
         )
         return execution, {"status": "completed", "output": artifact["path"], **metadata}, [artifact]
+    _cleanup_tmp_artifact(output)
     execution = make_execution(
         kind="collector",
         id="recon_hci_capture",
         title="HCI Capture",
         module="reconnaissance",
+        module_id="reconnaissance.campaign",
         protocol="HCI",
         execution_status=EXECUTION_FAILED,
         module_outcome="collector_unavailable",
@@ -493,11 +497,13 @@ def _run_nrf_capture_step(address: str, duration: int, prerequisites: dict[str, 
             artifacts=[artifact],
         )
         return execution, {"status": "completed", "result": result, **metadata}, [artifact]
+    _cleanup_tmp_artifact(output)
     execution = make_execution(
         kind="collector",
         id="recon_nrf_capture",
         title="nRF BLE Capture",
         module="reconnaissance",
+        module_id="reconnaissance.campaign",
         protocol="BLE",
         execution_status=EXECUTION_FAILED,
         module_outcome="no_relevant_traffic" if "error" not in result else "collector_unavailable",
@@ -536,11 +542,13 @@ def _run_lmp_capture_step(address: str, below_hci_hci: str, duration: int, prere
             artifacts=[artifact],
         )
         return execution, {"status": "completed", "result": result, **metadata}, [artifact]
+    _cleanup_tmp_artifact(output)
     execution = make_execution(
         kind="collector",
         id="recon_below_hci",
         title="Below-HCI Recon",
         module="reconnaissance",
+        module_id="reconnaissance.campaign",
         protocol="LMP",
         execution_status=EXECUTION_FAILED,
         module_outcome="collector_unavailable",
@@ -580,11 +588,13 @@ def _run_combined_capture_step(address: str, below_hci_hci: str, duration: int, 
             artifacts=[artifact],
         )
         return execution, {"status": "completed", "result": result, **metadata}, [artifact]
+    _cleanup_tmp_artifact(output)
     execution = make_execution(
         kind="collector",
         id="recon_combined_capture",
         title="Combined BLE and LMP Capture",
         module="reconnaissance",
+        module_id="reconnaissance.campaign",
         protocol="BLE/LMP",
         execution_status=EXECUTION_FAILED,
         module_outcome="collector_unavailable",
@@ -601,6 +611,16 @@ def _tmp_artifact_path(prefix: str, suffix: str) -> str:
     fd, path = tempfile.mkstemp(prefix=prefix, suffix=suffix)
     os.close(fd)
     return path
+
+
+def _cleanup_tmp_artifact(path: str | None) -> None:
+    """Unlink a tempfile, ignoring missing files. Used on failure paths."""
+    if not path:
+        return
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
 
 
 def _parse_hci_dev(hci: str) -> int:
@@ -750,7 +770,7 @@ class ReconCampaignModule(Module):
             logger.exception("Recon campaign failed for %s", target)
             return build_run_envelope(
                 schema=self.schema_prefix,
-                module="campaign",
+                module=self.module_id,
                 target=target,
                 adapter=hci,
                 started_at=ctx.started_at,
@@ -760,6 +780,7 @@ class ReconCampaignModule(Module):
                         kind="phase",
                         id="recon_campaign",
                         title="Recon Campaign",
+                        module_id=self.module_id,
                         execution_status="failed",
                         module_outcome="not_applicable",
                         evidence=make_evidence(

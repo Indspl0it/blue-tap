@@ -442,12 +442,14 @@ class HciCaptureModule(Module):
             else:
                 t0 = time.monotonic()
                 try:
-                    # Poll so the loop exits early if btmon dies
                     while time.monotonic() - t0 < duration:
                         if not capture.is_running():
                             error_msg = "btmon exited before duration elapsed"
                             break
-                        time.sleep(min(1.0, duration - (time.monotonic() - t0)))
+                        remaining = duration - (time.monotonic() - t0)
+                        if remaining <= 0:
+                            break
+                        time.sleep(min(1.0, remaining))
                 finally:
                     capture.stop()
                     duration_actual = int(time.monotonic() - t0)
@@ -480,7 +482,7 @@ class HciCaptureModule(Module):
 
         return build_run_envelope(
             schema=self.schema_prefix,
-            module="hci_capture",
+            module=self.module_id,
             target=target,
             adapter=hci,
             started_at=started_at,

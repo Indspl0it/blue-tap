@@ -364,11 +364,18 @@ def search_services_batch(address: str, uuids: list[str]) -> dict[str, list[dict
     if all_services:
         for uuid in uuids:
             uuid_lower = uuid.lower()
-            matched = [
-                s for s in all_services
-                if uuid_lower in " ".join(s.get("class_ids", [])).lower()
-                or uuid_lower in s.get("profile", "").lower()
-            ]
+            uuid_norm = uuid_lower.replace("0x", "").lstrip("0") or uuid_lower
+            matched = []
+            for s in all_services:
+                class_ids_text = " ".join(s.get("class_ids", [])).lower()
+                class_uuids = [c.lower() for c in s.get("class_id_uuids", [])]
+                profile_text = s.get("profile", "").lower()
+                if (
+                    uuid_lower in class_ids_text
+                    or uuid_lower in profile_text
+                    or any(uuid_lower in c or uuid_norm in c.replace("0x", "").lstrip("0") for c in class_uuids)
+                ):
+                    matched.append(s)
             results[uuid] = matched
     else:
         # Fallback: individual searches

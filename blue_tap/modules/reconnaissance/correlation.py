@@ -798,7 +798,7 @@ class CorrelationModule(Module):
 
         return build_run_envelope(
             schema=self.schema_prefix,
-            module="correlation",
+            module=self.module_id,
             target=target,
             adapter="",
             started_at=started_at,

@@ -592,7 +592,7 @@ class GattEnumModule(Module):
 
         return build_run_envelope(
             schema=self.schema_prefix,
-            module="gatt",
+            module=self.module_id,
             target=target,
             adapter=hci_opt or "",
             started_at=started_at,

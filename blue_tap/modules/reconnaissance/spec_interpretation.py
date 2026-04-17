@@ -403,7 +403,7 @@ class SpecInterpretationModule(Module):
 
         return build_run_envelope(
             schema=self.schema_prefix,
-            module="spec_interpretation",
+            module=self.module_id,
             target="",
             adapter="",
             started_at=started_at,

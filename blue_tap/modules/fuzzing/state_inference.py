@@ -352,9 +352,8 @@ def extract_state_at(response: bytes) -> StateID:
     # Informational response: +<INDICATOR>: ...
     info_match = re.match(r"\+([A-Z]+)", text, re.IGNORECASE)
     if info_match:
-        # Hash the indicator name into a stable integer for the extra field
         indicator = info_match.group(1).upper()
-        extra = hash(indicator) & 0xFFFF
+        extra = int.from_bytes(hashlib.md5(indicator.encode("ascii")).digest()[:2], "big")
         return StateID("at", 3, 0, extra)  # opcode 3 = informational
 
     # Unknown text response

@@ -569,24 +569,14 @@ def _check_bias_active(address: str, hci: str, ssp: bool | None,
 def _check_blueborne(address: str) -> list[dict]:
     findings: list[dict] = []
 
-    # Primary: try bluetoothd --version (more reliable than SDP strings)
-    btd_result = run_cmd(["bluetoothd", "--version"], timeout=5)
     bluez_version = None
     version_source = ""
-    if btd_result.returncode == 0:
-        ver_match = re.search(r"(\d+\.\d+)", btd_result.stdout)
-        if ver_match:
-            bluez_version = ver_match.group(1)
-            version_source = f"bluetoothd --version reported {bluez_version}"
-
-    # Fallback: parse SDP output for BlueZ version string
-    if bluez_version is None:
-        raw_sdp = get_raw_sdp(address)
-        if "BlueZ" in raw_sdp:
-            m = re.search(r"BlueZ\s+(\d+\.\d+)", raw_sdp)
-            if m:
-                bluez_version = m.group(1)
-                version_source = f"SDP contains BlueZ {bluez_version}"
+    raw_sdp = get_raw_sdp(address)
+    if "BlueZ" in raw_sdp:
+        m = re.search(r"BlueZ\s+(\d+\.\d+)", raw_sdp)
+        if m:
+            bluez_version = m.group(1)
+            version_source = f"SDP contains BlueZ {bluez_version}"
 
     if bluez_version:
         try:

@@ -151,6 +151,24 @@ PROTOCOL_TRANSPORT_MAP: dict[str, dict[str, Any]] = {
     "raw-acl":      {"type": "raw-acl", "hci_dev": 1},
 }
 
+#: Operator-friendly aliases → canonical transport keys.
+PROTOCOL_ALIASES: dict[str, str] = {
+    "pbap":      "obex-pbap",
+    "map":       "obex-map",
+    "opp":       "obex-opp",
+    "att":       "ble-att",
+    "smp":       "ble-smp",
+    "hfp":       "at-hfp",
+    "phonebook": "at-phonebook",
+    "sms":       "at-sms",
+}
+
+
+def canonical_protocol(name: str) -> str:
+    """Return the canonical PROTOCOL_TRANSPORT_MAP key for a user-supplied alias."""
+    key = name.strip().lower()
+    return PROTOCOL_ALIASES.get(key, key)
+
 #: Severity classification for crash types.
 CRASH_SEVERITY: dict[str, str] = {
     "connection_drop":     "HIGH",
@@ -362,6 +380,7 @@ class FuzzCampaign:
         transport_overrides: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         self.target = target
+        protocols = [canonical_protocol(p) for p in protocols]
         self.protocols = protocols
         self.strategy = strategy
         self.duration = duration
@@ -415,6 +434,10 @@ class FuzzCampaign:
         _known_strategies = ("random", "coverage_guided", "state_machine", "targeted")
         if self._strategy_obj is None and strategy not in _known_strategies:
             warning(f"Strategy '{strategy}' unavailable, falling back to byte-level mutation")
+            self.strategy = "byte_level_mutation"
+        elif self._strategy_obj is None and _HAS_STRATEGIES is False and strategy in _known_strategies:
+            warning(f"Strategy '{strategy}' module unavailable, running byte-level mutation")
+            self.strategy = "byte_level_mutation"
 
         # Response anomaly analyzer (learns baseline, detects deviations)
         self._analyzer: Any = ResponseAnalyzer() if _HAS_ANALYZER else None
@@ -550,6 +573,9 @@ class FuzzCampaign:
             seed = os.urandom(_rng.randint(8, 256))
 
         mutated = self._mutator.mutate(seed)
+        if not mutated:
+            import random as _rng
+            mutated = os.urandom(_rng.randint(4, 64))
         mutation_log = getattr(self._mutator, "last_mutations", ["mutated"])
         return mutated, mutation_log
 
@@ -1091,7 +1117,7 @@ class FuzzCampaign:
                         self._health_monitor.record_fuzz_case(fuzz_case)
                         if self._health_monitor.should_check(self.stats.iterations):
                             try:
-                                health = self._health_monitor.update(self.stats.iterations, latency_ms, response)
+                                health = self._health_monitor.update(self.stats.iterations, latency_ms, response, protocol=protocol)
                                 if health.value in ("rebooted", "zombie", "degraded", "unreachable"):
                                     emit_cli_event(
                                         event_type="recovery_wait_started",
@@ -1634,6 +1660,11 @@ class FuzzCampaign:
         if validation_errors:
             logger.warning("Campaign envelope validation errors: %s", validation_errors)
         log_command("fuzz_campaign", envelope, category="fuzz", target=self.target)
+
+        try:
+            self.crash_db.close()
+        except Exception:
+            logger.debug("Failed to close crash DB", exc_info=True)
 
     def _build_summary(self) -> dict:
         """Build a summary dict of the campaign for serialization."""

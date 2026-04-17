@@ -68,6 +68,22 @@ from blue_tap.utils.output import (
 logger = logging.getLogger(__name__)
 
 
+def _count_pcap_packets(pcap_path: str) -> int:
+    """Best-effort packet count for a pcap. Returns 0 if file missing or scapy unavailable."""
+    if not pcap_path or not os.path.exists(pcap_path):
+        return 0
+    try:
+        from scapy.utils import PcapReader
+        count = 0
+        with PcapReader(pcap_path) as reader:
+            for _ in reader:
+                count += 1
+        return count
+    except Exception:
+        logger.debug("Failed to count pcap packets at %s", pcap_path, exc_info=True)
+        return 0
+
+
 # ── nRF52840 BLE Sniffer ──────────────────────────────────────────────────
 
 class NRFBLESniffer:
@@ -335,11 +351,13 @@ class NRFBLESniffer:
         """Check if pcap output was produced and report results."""
         if os.path.exists(output_pcap):
             size = os.path.getsize(output_pcap)
-            success(f"Captured {size} bytes to {output_pcap}")
+            packets = _count_pcap_packets(output_pcap)
+            success(f"Captured {size} bytes ({packets} packets) to {output_pcap}")
             result = {
                 "success": True,
                 "pcap": output_pcap,
                 "size": size,
+                "packets": packets,
                 "duration": duration,
             }
             if target:
@@ -347,7 +365,7 @@ class NRFBLESniffer:
             return result
         else:
             warning("No pcap file produced (no BLE traffic captured?)")
-            return {"success": False, "error": "no output file"}
+            return {"success": False, "error": "no output file", "packets": 0}
 
     def stop(self):
         """Stop any running capture."""
@@ -520,6 +538,7 @@ class DarkFirmwareSniffer:
             self._vsc = None
 
             # Export in requested format
+            export_ok = True
             if output_format == "pcap":
                 export_ok = self.export_pcap(self._packets, output)
                 if not export_ok:
@@ -529,10 +548,13 @@ class DarkFirmwareSniffer:
                 with open(output, "w") as f:
                     json.dump(btides_data, f, indent=2)
 
-            result["success"] = True
+            result["success"] = export_ok
             result["packets"] = len(self._packets)
             result["duration"] = round(elapsed, 1)
-            success(f"Captured {len(self._packets)} LMP packets in {elapsed:.1f}s")
+            if export_ok:
+                success(f"Captured {len(self._packets)} LMP packets in {elapsed:.1f}s")
+            else:
+                warning(f"Captured {len(self._packets)} packets but export failed")
 
         except Exception as exc:
             error(f"LMP capture failed: {exc}")
@@ -1396,7 +1418,13 @@ class SnifferModule(Module):
             outcome = "not_applicable"
         else:
             execution_status = "completed"
-            outcome = "observed" if packet_count > 0 else "not_applicable"
+            capture_size = int(sniff_result.get("size", 0) or 0)
+            if packet_count > 0:
+                outcome = "observed"
+            elif capture_size > 0:
+                outcome = "artifact_collected"
+            else:
+                outcome = "not_applicable"
 
         summary_text = (
             f"Sniffer error: {error_msg}"
@@ -1406,7 +1434,7 @@ class SnifferModule(Module):
 
         return build_run_envelope(
             schema=self.schema_prefix,
-            module="sniffer",
+            module=self.module_id,
             target=target,
             adapter=f"hci{hci_dev}",
             started_at=started_at,

@@ -51,8 +51,23 @@ _HEADSET_NAME_KEYWORDS = [
     "wh-1000", "wf-1000", "jabra", "plantronics", "beats",
 ]
 
-# HFP Audio Gateway UUID indicates car kit / IVI
-_HFP_AG_UUID = "0x111f"
+# HFP Audio Gateway UUID indicates car kit / IVI.
+_HFP_AG_UUID_SHORT = "111f"
+_BT_BASE_UUID_SUFFIX = "-0000-1000-8000-00805f9b34fb"
+
+
+def _normalize_uuid_short(uuid: str) -> str:
+    """Return the lowercase short-form (no 0x) of a Bluetooth service UUID.
+
+    Accepts short hex ("0x111f", "111f") or the 128-bit form
+    ("0000111f-0000-1000-8000-00805f9b34fb").
+    """
+    u = str(uuid).strip().lower()
+    if u.startswith("0x"):
+        u = u[2:]
+    if u.endswith(_BT_BASE_UUID_SUFFIX):
+        u = u[: -len(_BT_BASE_UUID_SUFFIX)].lstrip("0") or "0"
+    return u
 
 
 # ============================================================================
@@ -69,7 +84,7 @@ class DeviceClassifier:
         # 1. Check service UUIDs first (strongest signal)
         service_uuids = device.get("service_uuids") or []
         for uuid in service_uuids:
-            if str(uuid).lower() == _HFP_AG_UUID:
+            if _normalize_uuid_short(uuid) == _HFP_AG_UUID_SHORT:
                 return "ivi"
 
         # 2. Check Bluetooth device class

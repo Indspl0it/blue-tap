@@ -804,17 +804,18 @@ class LMPTransport(BluetoothTransport):
     def _establish_acl(self) -> bool:
         """Try to establish ACL connection via L2CAP SDP probe."""
         info(f"Establishing ACL via SDP probe to {self.address}")
+        probe = socket.socket(
+            AF_BLUETOOTH, socket.SOCK_SEQPACKET, BTPROTO_L2CAP,
+        )
         try:
-            probe = socket.socket(
-                AF_BLUETOOTH, socket.SOCK_SEQPACKET, BTPROTO_L2CAP,
-            )
             probe.settimeout(5.0)
             probe.connect((self.address, 1))  # PSM 1 = SDP
-            probe.close()
             time.sleep(0.5)
             return True
         except OSError:
             return False
+        finally:
+            probe.close()
 
     def _on_lmp_received(self, lmp_log: dict) -> None:
         """Callback from LMP monitor thread -- push to receive queue."""
@@ -1054,15 +1055,16 @@ class RawACLTransport(BluetoothTransport):
 
     def _establish_acl(self) -> bool:
         """Quick L2CAP SDP probe to establish ACL link."""
+        s = socket.socket(AF_BLUETOOTH, socket.SOCK_SEQPACKET, BTPROTO_L2CAP)
         try:
-            s = socket.socket(AF_BLUETOOTH, socket.SOCK_SEQPACKET, BTPROTO_L2CAP)
             s.settimeout(5.0)
             s.connect((self.address, 1))  # SDP PSM
-            s.close()
             time.sleep(0.5)
             return True
         except OSError:
             return False
+        finally:
+            s.close()
 
     def send(self, data: bytes) -> int:
         """Send raw ACL data (L2CAP frame) via DarkFirmware.

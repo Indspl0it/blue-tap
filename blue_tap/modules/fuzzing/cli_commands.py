@@ -1312,17 +1312,25 @@ def _crash_commands(fuzz_group):
 
         payload_hex = crash.get("payload_hex", "")
         try:
-            payload = bytes.fromhex(payload_hex)
+            bytes.fromhex(payload_hex)
         except ValueError:
             error("Corrupt payload hex in crash record.")
             db.close()
             return
 
-        # Show payload preview
         preview = " ".join(payload_hex[i:i + 2] for i in range(0, min(len(payload_hex), 64), 2))
         if len(payload_hex) > 64:
             preview += "..."
         info(f"Payload hex: [bt.orange]{preview}[/bt.orange]")
+
+        packet_sequence_json = crash.get("packet_sequence_json")
+        if packet_sequence_json:
+            try:
+                seq_len = len(json.loads(packet_sequence_json))
+            except (ValueError, TypeError):
+                seq_len = 0
+            if seq_len > 1:
+                info(f"Multi-packet crash: will replay {seq_len} packets in order.")
 
         # Setup pcap capture
         hci_capture = None
@@ -1378,48 +1386,15 @@ def _crash_commands(fuzz_group):
             db.close()
             return
 
-        # Replay
         reproduced = False
-        info("Connecting to target...")
         try:
-            if not transport.connect():
-                error("Failed to connect to target.")
-                _cleanup_capture(hci_capture)
-                db.close()
-                return
-
-            info("Sending crash payload...")
-            transport.send(payload)
-            info("Waiting for response...")
-            response = transport.recv()
-
-            if response is None:
-                # Connection closed -- crash reproduced
-                success(f"Crash #{crash_id} [bold {GREEN}]REPRODUCED[/bold {GREEN}] -- connection closed by remote")
-                db.mark_reproduced(crash_id, True)
-                reproduced = True
-            elif response == b"":
-                warning(f"Crash #{crash_id} -- response timeout, checking target...")
-                if not _check_target_alive(target_addr):
-                    success(f"Crash #{crash_id} [bold {GREEN}]REPRODUCED[/bold {GREEN}] -- target unresponsive")
-                    db.mark_reproduced(crash_id, True)
-                    reproduced = True
-                else:
-                    info(f"Crash #{crash_id} NOT reproduced -- target still alive")
+            reproduced = db.reproduce_crash(crash_id, transport)
+            if reproduced:
+                success(f"Crash #{crash_id} [bold {GREEN}]REPRODUCED[/bold {GREEN}]")
             else:
-                info(f"Crash #{crash_id} NOT reproduced -- got {len(response)} byte response")
-
-        except (ConnectionResetError, BrokenPipeError, ConnectionError):
-            success(f"Crash #{crash_id} [bold {GREEN}]REPRODUCED[/bold {GREEN}] -- connection dropped")
-            db.mark_reproduced(crash_id, True)
-            reproduced = True
-        except OSError as exc:
-            if not _check_target_alive(target_addr):
-                success(f"Crash #{crash_id} [bold {GREEN}]REPRODUCED[/bold {GREEN}] -- device disappeared")
-                db.mark_reproduced(crash_id, True)
-                reproduced = True
-            else:
-                error(f"OSError during replay: {exc}")
+                info(f"Crash #{crash_id} NOT reproduced")
+        except Exception as exc:
+            error(f"Replay failed with unexpected error: {exc}")
         finally:
             try:
                 transport.close()

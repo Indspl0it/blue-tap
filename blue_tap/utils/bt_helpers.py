@@ -240,8 +240,10 @@ def get_adapter_state(hci: str | None = None) -> dict:
         flags_m = re.search(r"<(.+?)>", output)
         state["raw_status"] = flags_m.group(1) if flags_m else "UNKNOWN"
 
-    # Check if adapter is currently scanning (hcitool processes running)
-    scan_check = run_cmd(["pgrep", "-af", f"hcitool.*{hci}.*(scan|inq)"], timeout=3)
+    # Check if adapter is currently scanning (hcitool processes running).
+    scan_check = run_cmd(
+        ["pgrep", "-af", rf"hcitool.*{re.escape(hci)}.*(scan|inq)"], timeout=3,
+    )
     if scan_check.returncode == 0 and scan_check.stdout.strip():
         state["scanning"] = True
 

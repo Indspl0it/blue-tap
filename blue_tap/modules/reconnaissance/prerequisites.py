@@ -34,26 +34,33 @@ def evaluate_recon_prerequisites(
     nrf_available = NRFBLESniffer.is_available()
     darkfirmware_available = DarkFirmwareSniffer(hci_dev=_normalize_hci_index(below_hci_adapter)).is_available()
 
+    nrf_applicable = target_capability in {"ble_only", "dual_mode"}
+    dark_applicable = target_capability in {"classic_only", "dual_mode"}
     checks = {
         "classic_adapter_ready": {
             "available": classic_ready,
+            "applicable": True,
             "reason": "" if classic_ready else f"{classic_adapter} not ready",
         },
         "hci_capture": {
             "available": hci_capture_available,
+            "applicable": True,
             "reason": "" if hci_capture_available else "btmon not installed",
         },
         "nrf_ble_sniffer": {
-            "available": nrf_available and target_capability in {"ble_only", "dual_mode"},
+            "available": nrf_available and nrf_applicable,
+            "applicable": nrf_applicable,
             "reason": _nrf_reason(nrf_available, target_capability),
         },
         "darkfirmware_lmp": {
-            "available": darkfirmware_available and target_capability in {"classic_only", "dual_mode"},
+            "available": darkfirmware_available and dark_applicable,
+            "applicable": dark_applicable,
             "reason": _darkfirmware_reason(darkfirmware_available, target_capability, below_hci_adapter),
         },
     }
     checks["combined_capture"] = {
         "available": checks["nrf_ble_sniffer"]["available"] and checks["darkfirmware_lmp"]["available"],
+        "applicable": nrf_applicable and dark_applicable,
         "reason": _combined_reason(checks),
     }
     return checks
@@ -155,7 +162,9 @@ class PrerequisitesModule(Module):
 
         missing = [
             name for name, item in checks.items()
-            if isinstance(item, dict) and not item.get("available", False)
+            if isinstance(item, dict)
+            and item.get("applicable", True)
+            and not item.get("available", False)
         ]
         all_present = bool(checks) and not missing
 
@@ -181,7 +190,7 @@ class PrerequisitesModule(Module):
 
         return build_run_envelope(
             schema=self.schema_prefix,
-            module="prerequisites",
+            module=self.module_id,
             target="",
             adapter=classic_hci,
             started_at=started_at,

@@ -7,10 +7,9 @@ from blue_tap.utils.output import (
 )
 
 
-# Cache last scan results so we don't re-scan within the same session.
-# Thread-safety: NOT thread-safe. CLI is single-threaded; revisit if a web
-# interface or concurrent session handling is added in the future.
-_cached_devices: list[dict] = []
+# Cache last scan results per (hci, include_ble) pair.
+# Thread-safety: NOT thread-safe. CLI is single-threaded.
+_cached_devices: dict[tuple[str, bool], list[dict]] = {}
 
 
 def _scan_devices(scan_duration: int = 8, hci: str | None = None,
@@ -21,7 +20,6 @@ def _scan_devices(scan_duration: int = 8, hci: str | None = None,
         from blue_tap.hardware.adapter import resolve_active_hci
 
         hci = resolve_active_hci()
-    global _cached_devices
 
     section("Device Discovery", style="bt.cyan")
 
@@ -35,7 +33,7 @@ def _scan_devices(scan_duration: int = 8, hci: str | None = None,
         devices = scan_classic(scan_duration, hci)
 
     if devices:
-        _cached_devices = devices
+        _cached_devices[(hci, include_ble)] = devices
         success(f"Found {len(devices)} device(s)")
     else:
         warning("No devices found — check adapter is up and nearby devices are discoverable")
@@ -59,7 +57,8 @@ def pick_device(
         from blue_tap.hardware.adapter import resolve_active_hci
 
         hci = resolve_active_hci()
-    devices = _cached_devices if (_cached_devices and not rescan) else _scan_devices(scan_duration, hci)
+    cached = _cached_devices.get((hci, False)) or _cached_devices.get((hci, True))
+    devices = cached if (cached and not rescan) else _scan_devices(scan_duration, hci)
 
     if not devices:
         return None

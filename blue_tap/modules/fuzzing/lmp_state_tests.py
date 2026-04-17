@@ -44,7 +44,10 @@ STATE_CONFUSION_TESTS = [
     {
         "name": "key_size_after_start_enc",
         "desc": "Key size negotiation after encryption started",
-        "packets": [bytes([0x11]) + os.urandom(16), bytes([0x10, 0x01])],
+        "packets": [
+            bytes([0x11]) + bytes.fromhex("0123456789abcdef0123456789abcdef"),
+            bytes([0x10, 0x01]),
+        ],
         "severity": "high",
     },
     {

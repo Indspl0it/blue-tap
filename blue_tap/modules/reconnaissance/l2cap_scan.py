@@ -410,7 +410,7 @@ class L2capScanModule(Module):
 
         return build_run_envelope(
             schema=self.schema_prefix,
-            module="l2cap_scan",
+            module=self.module_id,
             target=target,
             adapter=hci,
             started_at=started_at,
