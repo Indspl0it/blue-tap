@@ -540,13 +540,21 @@ def _check_rtl_dongle() -> None:
 
     info("Resetting USB dongle to load new firmware…")
     try:
-        fw.usb_reset()
+        new_hci = fw.usb_reset_and_wait()
     except Exception as exc:
         warning(f"USB reset failed ({exc}). Unplug and re-plug the dongle to activate DarkFirmware.")
         console.print()
         return
 
-    info(f"[bold green]DarkFirmware installed and active on {dongle_hci}.[/bold green]")
+    if new_hci is None:
+        warning(
+            f"Firmware installed, but adapter did not re-enumerate cleanly. "
+            f"Unplug and re-plug the dongle to activate DarkFirmware."
+        )
+        console.print()
+        return
+
+    info(f"[bold green]DarkFirmware installed and active on {new_hci}.[/bold green]")
     console.print()
 
 

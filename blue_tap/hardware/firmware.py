@@ -558,19 +558,18 @@ class DarkFirmwareManager:
             error(f"Failed to patch firmware: {exc}")
             return False
 
-        # USB reset to reload firmware
-        if not self.usb_reset():
-            warning("USB reset failed — firmware may not reload until manual replug")
+        # USB reset to reload firmware — wait for the adapter to re-enumerate
+        # because the kernel may assign a new hciX index after the reset.
+        info("Waiting for firmware reload after USB reset...")
+        new_hci = self.usb_reset_and_wait()
+        if new_hci is None:
+            warning("USB reset or re-enumeration failed — firmware may not reload until manual replug")
             return False
 
-        # Wait for firmware to reload
-        info("Waiting for firmware reload after USB reset...")
-        time.sleep(2.5)
-
-        # Verify the address changed
-        new_addr = self.get_current_bdaddr(hci)
+        # Verify the address changed on whatever hci the adapter came back as.
+        new_addr = self.get_current_bdaddr(new_hci)
         if new_addr and new_addr.upper() == target_mac.upper():
-            success(f"BDADDR verified: {hci} = {new_addr}")
+            success(f"BDADDR verified: {new_hci} = {new_addr}")
             return True
         else:
             warning(f"BDADDR after reset: {new_addr} (expected {target_mac})")
@@ -878,6 +877,48 @@ class DarkFirmwareManager:
         else:
             warning(f"usbreset failed (rc={result.returncode}): {result.stderr.strip()}")
             return False
+
+    def usb_reset_and_wait(
+        self,
+        timeout: float = 8.0,
+        initial_delay: float = 1.5,
+        poll_interval: float = 0.5,
+    ) -> str | None:
+        """Reset the USB device and wait for the adapter to re-enumerate.
+
+        The kernel may assign a different ``hciX`` index after a USB reset, so
+        callers that verify post-reset state (firmware loaded, BDADDR changed)
+        must use the re-enumerated name. This method performs ``usb_reset()``
+        then polls ``find_rtl8761b_hci()`` until the RTL8761B reappears.
+
+        Args:
+            timeout: Maximum seconds to wait for the adapter to reappear.
+            initial_delay: Seconds to wait before the first discovery attempt
+                (allows the kernel to tear down the old hci node).
+            poll_interval: Seconds between discovery attempts.
+
+        Returns:
+            The new hci name (possibly different from the pre-reset name), or
+            ``None`` if the USB reset failed or the adapter did not reappear
+            within ``timeout``.
+        """
+        if not self.usb_reset():
+            return None
+
+        time.sleep(initial_delay)
+        deadline = time.monotonic() + max(0.0, timeout - initial_delay)
+        while True:
+            hci = self.find_rtl8761b_hci()
+            if hci is not None:
+                success(f"Adapter re-enumerated as {hci}")
+                return hci
+            if time.monotonic() >= deadline:
+                warning(
+                    f"Adapter did not re-enumerate within {timeout:.1f}s — "
+                    f"manual replug may be required"
+                )
+                return None
+            time.sleep(poll_interval)
 
     # ------------------------------------------------------------------
     # Runtime firmware patching (write_memory to modify running firmware)

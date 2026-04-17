@@ -509,10 +509,10 @@ def adapter_firmware_install(source, restore, hci):
     if restore:
         if fw.restore_firmware():
             info("Resetting adapter to load original firmware...")
-            fw.usb_reset()
-            import time
-            time.sleep(2.5)
-            success("Original Realtek firmware restored")
+            new_hci = fw.usb_reset_and_wait()
+            if new_hci is not None:
+                hci = new_hci
+            success(f"Original Realtek firmware restored on {hci}")
             ok = True
         else:
             error("Failed to restore firmware")
@@ -520,7 +520,7 @@ def adapter_firmware_install(source, restore, hci):
             adapter=hci, operation=operation,
             title="Firmware Restore",
             success=ok,
-            observations=["Original Realtek firmware restored" if ok else "Restore failed"],
+            observations=[f"Original Realtek firmware restored on {hci}" if ok else "Restore failed"],
             module_data={"source": source, "restore": restore},
             started_at=started_at, run_id=run_id,
         )
@@ -555,12 +555,12 @@ def adapter_firmware_install(source, restore, hci):
     verified = False
     if fw.install_firmware(source):
         info("Resetting adapter to load DarkFirmware...")
-        fw.usb_reset()
-        import time
-        time.sleep(2.5)
+        new_hci = fw.usb_reset_and_wait()
+        if new_hci is not None:
+            hci = new_hci
 
         if fw.is_darkfirmware_loaded(hci):
-            success("DarkFirmware installed and verified!")
+            success(f"DarkFirmware installed and verified on {hci}!")
             ok = True
             verified = True
         else:
