@@ -4,17 +4,26 @@ from __future__ import annotations
 
 import rich_click as click
 
-from blue_tap.interfaces.cli._module_runner import invoke
+from blue_tap.interfaces.cli._module_runner import invoke_or_exit, resolve_target
 from blue_tap.interfaces.cli.shared import LoggedCommand, LoggedGroup
 
 
 @click.group(cls=LoggedGroup)
-@click.argument("target")
+@click.argument("target", required=False, default=None)
 @click.option("--hci", "-a", default=None, help="HCI adapter (e.g. hci0)")
 @click.pass_context
 def extract(ctx, target, hci):
-    """Pull data from a target device."""
+    """Pull data from a target device.
+
+    \b
+    Examples:
+      blue-tap extract AA:BB:CC:DD:EE:FF contacts        # Extract from specific target
+      blue-tap extract contacts                           # Interactive device picker
+    """
     ctx.ensure_object(dict)
+    target = resolve_target(target, hci=hci, prompt="Select target for data extraction")
+    if not target:
+        raise SystemExit(1)
     ctx.obj["target"] = target
     ctx.obj["hci"] = hci
 
@@ -42,7 +51,7 @@ def extract_contacts(ctx, phonebook, all_books, channel):
         opts["ALL"] = "true"
     if channel is not None:
         opts["CHANNEL"] = str(channel)
-    invoke("post_exploitation.pbap", opts)
+    invoke_or_exit("post_exploitation.pbap", opts)
 
 
 @extract.command("messages", cls=LoggedCommand)
@@ -59,7 +68,7 @@ def extract_messages(ctx, folder, max_count, channel):
         opts["MAX_COUNT"] = str(max_count)
     if channel is not None:
         opts["CHANNEL"] = str(channel)
-    invoke("post_exploitation.map", opts)
+    invoke_or_exit("post_exploitation.map", opts)
 
 
 @extract.command("audio", cls=LoggedCommand)
@@ -80,7 +89,7 @@ def extract_audio(ctx, action, number, duration, channel):
         opts["DURATION"] = str(duration)
     if channel is not None:
         opts["CHANNEL"] = str(channel)
-    invoke("post_exploitation.hfp", opts)
+    invoke_or_exit("post_exploitation.hfp", opts)
 
 
 @extract.command("media", cls=LoggedCommand)
@@ -95,7 +104,7 @@ def extract_media(ctx, action, volume):
         opts["ACTION"] = action
     if volume is not None:
         opts["VOLUME"] = str(volume)
-    invoke("post_exploitation.avrcp", opts)
+    invoke_or_exit("post_exploitation.avrcp", opts)
 
 
 @extract.command("stream", cls=LoggedCommand)
@@ -117,7 +126,7 @@ def extract_stream(ctx, action, duration, audio_file, output):
         opts["FILE"] = audio_file
     if output:
         opts["OUTPUT"] = output
-    invoke("post_exploitation.a2dp", opts)
+    invoke_or_exit("post_exploitation.a2dp", opts)
 
 
 @extract.command("push", cls=LoggedCommand)
@@ -130,7 +139,7 @@ def extract_push(ctx, file, channel):
     opts["FILE"] = file
     if channel is not None:
         opts["CHANNEL"] = str(channel)
-    invoke("post_exploitation.opp", opts)
+    invoke_or_exit("post_exploitation.opp", opts)
 
 
 @extract.command("snarf", cls=LoggedCommand)
@@ -141,7 +150,7 @@ def extract_snarf(ctx, channel):
     opts = _base_opts(ctx)
     if channel is not None:
         opts["CHANNEL"] = str(channel)
-    invoke("post_exploitation.bluesnarfer", opts)
+    invoke_or_exit("post_exploitation.bluesnarfer", opts)
 
 
 @extract.command("at", cls=LoggedCommand)
@@ -156,4 +165,4 @@ def extract_at(ctx, at_command, channel):
         opts["COMMAND"] = at_command
     if channel is not None:
         opts["CHANNEL"] = str(channel)
-    invoke("post_exploitation.bluesnarfer", opts)
+    invoke_or_exit("post_exploitation.bluesnarfer", opts)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import rich_click as click
 
-from blue_tap.interfaces.cli._module_runner import invoke
+from blue_tap.interfaces.cli._module_runner import invoke_or_exit
 from blue_tap.interfaces.cli.shared import LoggedCommand, LoggedGroup
 
 
@@ -21,7 +21,7 @@ def discover_classic(duration, hci):
     opts = {"MODE": "classic", "DURATION": str(duration)}
     if hci:
         opts["HCI"] = hci
-    invoke("discovery.scanner", opts)
+    invoke_or_exit("discovery.scanner", opts)
 
 
 @discover.command("ble", cls=LoggedCommand)
@@ -35,7 +35,7 @@ def discover_ble(duration, passive, hci):
         opts["PASSIVE"] = "true"
     if hci:
         opts["HCI"] = hci
-    invoke("discovery.scanner", opts)
+    invoke_or_exit("discovery.scanner", opts)
 
 
 @discover.command("all", cls=LoggedCommand)
@@ -46,4 +46,4 @@ def discover_all(duration, hci):
     opts = {"MODE": "all", "DURATION": str(duration)}
     if hci:
         opts["HCI"] = hci
-    invoke("discovery.scanner", opts)
+    invoke_or_exit("discovery.scanner", opts)

@@ -462,7 +462,7 @@ class ReportGenerator:
         return self._fuzz_adapter_state().get("corpus_stats", {})
 
     def _ingest_standardized_envelope(self, envelope: dict) -> bool:
-        for adapter in REPORT_ADAPTERS:
+        for adapter in get_report_adapters():
             if adapter.accepts(envelope):
                 adapter.ingest(envelope, self._module_report_state.setdefault(adapter.module, {}))
                 return True

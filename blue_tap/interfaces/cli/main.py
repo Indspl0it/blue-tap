@@ -143,7 +143,7 @@ def cli(verbose, session_name):
 
     _NO_SESSION_COMMANDS = {
         "session", "report", "adapter", "plugins", "doctor",
-        "run", "search", "info", "show-options",
+        "run", "run-playbook", "search", "info", "show-options",
     }
     if not session_name and invoked in _NO_SESSION_COMMANDS:
         return
@@ -223,13 +223,53 @@ cli.add_command(spoof)
 # that just prints usage guidance pointing to the real command path.
 
 
+_COMMAND_GROUP_ALIASES: dict[str, str] = {
+    "vuln": "vulnscan",
+}
+
+_SUBCOMMAND_ALIASES: dict[tuple[str, str], str] = {
+    ("recon", "hci-capture"): "capture",
+    ("recon", "sniffer"): "sniff",
+}
+
+# Maps vuln-* proxy names to the assessment module short name that
+# vulnscan --cve maps to ``assessment.<short_name>``. Only listed where
+# the proxy name differs from the module short name.
+_VULN_CHECK_ALIASES: dict[str, str] = {
+    "encryption": "encryption_enforcement",
+    "eatt": "eatt_support",
+    "obex-auth": "authorization_model",
+    "automotive-diag": "automotive_diagnostics",
+}
+
+
 def _make_proxy(parent_name: str, sub_name: str, help_text: str):
     """Create a proxy command that shows usage for a sub-command."""
+    real_parent = _COMMAND_GROUP_ALIASES.get(parent_name, parent_name)
+    real_sub = _SUBCOMMAND_ALIASES.get((parent_name, sub_name), sub_name)
 
     @click.command(f"{parent_name}-{sub_name}", cls=LoggedCommand, help=help_text)
     def _proxy():
-        click.echo(f"Usage: blue-tap {parent_name} {'TARGET ' if parent_name not in ('discover', 'fuzz') else ''}{sub_name} [OPTIONS]")
-        click.echo(f"\nRun: blue-tap {parent_name} {sub_name} --help")
+        if parent_name == "dos":
+            click.echo(f"Usage: blue-tap dos TARGET --checks {real_sub} [OPTIONS]")
+            click.echo("\nThe dos command takes CVE/check names via --checks (comma-separated):")
+            click.echo(f"  blue-tap dos TARGET --checks {real_sub}")
+            click.echo("\nRun: blue-tap dos --help")
+        elif parent_name == "vuln":
+            if sub_name.startswith("cve-"):
+                cve_id = sub_name.upper()
+                click.echo(f"Usage: blue-tap vulnscan TARGET --cve {cve_id} [OPTIONS]")
+                click.echo(f"\nRun: blue-tap vulnscan TARGET --cve {cve_id} --help")
+            else:
+                check_name = _VULN_CHECK_ALIASES.get(sub_name, sub_name.replace("-", "_"))
+                click.echo(f"Usage: blue-tap vulnscan TARGET --cve {check_name} [OPTIONS]")
+                click.echo("\nRun: blue-tap vulnscan --help")
+        elif parent_name in ("discover", "fuzz"):
+            click.echo(f"Usage: blue-tap {real_parent} {real_sub} [OPTIONS]")
+            click.echo(f"\nRun: blue-tap {real_parent} {real_sub} --help")
+        else:
+            click.echo(f"Usage: blue-tap {real_parent} TARGET {real_sub} [OPTIONS]")
+            click.echo(f"\nRun: blue-tap {real_parent} TARGET {real_sub} --help")
 
     return _proxy
 
@@ -360,6 +400,7 @@ for _n, _h in [
     ("at-deep", "AT command injection fuzzing"),
     ("crashes", "List and analyze discovered crashes"),
     ("minimize", "Minimize a crash test case"),
+    ("cve", "Replay a known CVE fuzz pattern"),
     ("replay", "Replay a crash for reproduction"),
     ("corpus", "Manage the fuzzing corpus"),
 ]:

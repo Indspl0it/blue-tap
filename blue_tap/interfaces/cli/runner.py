@@ -86,8 +86,8 @@ def run_cmd(module_id: str, options: tuple[str, ...], rhost: str | None, hci: st
     descriptor = registry.try_get(module_id)
     if not descriptor:
         error(f"Module not found: {module_id}")
-        info("Run [bold]blue-tap list-modules[/bold] to see available modules.")
-        return
+        info("Run [bold]blue-tap search[/bold] to see available modules.")
+        raise SystemExit(1)
 
     # If the module needs a target and RHOST was not supplied, offer interactive picker
     if "RHOST" not in raw_options:
@@ -104,7 +104,7 @@ def run_cmd(module_id: str, options: tuple[str, ...], rhost: str | None, hci: st
     info(f"Running module: [bold cyan]{descriptor.name}[/bold cyan] ({module_id})")
     if descriptor.destructive and not confirm and raw_options.get("CONFIRM") != "yes":
         warning("[bt.red]Destructive module![/bt.red] Add CONFIRM=yes to proceed.")
-        return
+        raise SystemExit(1)
 
     # Invoke the module
     invoker = Invoker(safety_override=confirm)
@@ -118,11 +118,14 @@ def run_cmd(module_id: str, options: tuple[str, ...], rhost: str | None, hci: st
 
     except ModuleNotFound as e:
         error(str(e))
-        info("Run [bold]blue-tap list-modules[/bold] to see available modules.")
+        info("Run [bold]blue-tap search[/bold] to see available modules.")
+        raise SystemExit(1)
     except DestructiveConfirmationRequired as e:
         error(str(e))
+        raise SystemExit(1)
     except (EntryPointResolutionError, NotAModule) as e:
         error(f"Module error: {e}")
+        raise SystemExit(1)
     except Exception as e:
         from blue_tap.framework.module.options import OptionError
         if isinstance(e, OptionError):
@@ -131,6 +134,7 @@ def run_cmd(module_id: str, options: tuple[str, ...], rhost: str | None, hci: st
         else:
             error(f"Module execution failed: {e}")
             logger.exception("Module execution error")
+        raise SystemExit(1)
 
 
 # ── show-options command ───────────────────────────────────────────────────────
@@ -333,7 +337,7 @@ def info_cmd(module_id: str) -> None:
 
     if not descriptor:
         error(f"Module not found: {module_id}")
-        info("Run [bold]blue-tap list-modules[/bold] to see available modules.")
+        info("Run [bold]blue-tap search[/bold] to see available modules.")
         return
 
     from blue_tap.utils.output import CYAN

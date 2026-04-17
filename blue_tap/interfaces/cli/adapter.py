@@ -81,8 +81,10 @@ def adapter_info(hci):
     """Show detailed adapter info: chipset, features, capabilities."""
     from blue_tap.hardware.adapter import get_adapter_info, _adapter_exists
     hci = _resolve_df_hci(hci) or resolve_active_hci()
+    if not hci:
+        raise click.ClickException("No HCI adapter specified and none could be auto-detected")
     if not _adapter_exists(hci):
-        return
+        raise click.ClickException(f"Adapter {hci} not found")
     ext = get_adapter_info(hci)
 
     panel_data = {
@@ -143,6 +145,8 @@ def up(hci):
         echo=False,
     )
     log_command("adapter_up", envelope, category="general")
+    if not ok:
+        raise click.ClickException(result.get("error") or f"adapter up failed on {hci}")
 
 
 @adapter.command()
@@ -188,6 +192,8 @@ def down(hci):
         echo=False,
     )
     log_command("adapter_down", envelope, category="general")
+    if not ok:
+        raise click.ClickException(result.get("error") or f"adapter down failed on {hci}")
 
 
 @adapter.command()
@@ -233,6 +239,8 @@ def reset(hci):
         echo=False,
     )
     log_command("adapter_reset", envelope, category="general")
+    if not ok:
+        raise click.ClickException(result.get("error") or f"adapter reset failed on {hci}")
 
 
 @adapter.command("set-name")
@@ -254,14 +262,13 @@ def set_name(name, hci):
     try:
         result = set_device_name(hci, name)
     except ValueError as exc:
-        error(str(exc))
         emit_cli_event(
             event_type="run_error", module="general", run_id=run_id,
             adapter=hci, message=f"adapter set-name validation failed: {exc}",
             details={"error": str(exc)},
             echo=False,
         )
-        return
+        raise click.ClickException(str(exc))
     ok = result["success"]
     emit_cli_event(
         event_type="execution_result", module="general", run_id=run_id,
@@ -295,6 +302,8 @@ def set_name(name, hci):
         echo=False,
     )
     log_command("adapter_set_name", envelope, category="general")
+    if not ok:
+        raise click.ClickException(result.get("error") or f"adapter set-name failed on {hci}")
 
 
 _DEVICE_CLASS_PRESETS = {

@@ -19,7 +19,22 @@ logger = logging.getLogger(__name__)
               help="Skip phases: recon, vulnscan, exploit, extract")
 @click.option("--yes", "confirm", is_flag=True, help="Bypass destructive confirmation")
 def auto(target, hci, skip, confirm):
-    """Full automated assessment: recon → vulnscan → exploit → extract → report.
+    """Four-phase assessment shortcut: SDP recon → vuln_scanner → KNOB → PBAP → report.
+
+    Runs exactly four modules in sequence against TARGET and then writes an
+    HTML report to the active session directory. It is not a "full pentest"
+    — it's a fixed-pipeline shortcut. For broader coverage use individual
+    commands (``recon``, ``vulnscan``, ``exploit``, ``extract``) or a
+    playbook via ``blue-tap run-playbook``.
+
+    TARGET is required — auto runs non-interactively and needs a known address.
+
+    \b
+    Modules run:
+      recon    → reconnaissance.sdp
+      vulnscan → assessment.vuln_scanner
+      exploit  → exploitation.knob
+      extract  → post_exploitation.pbap
 
     \b
     Examples:
@@ -52,8 +67,31 @@ def auto(target, hci, skip, confirm):
     # Generate report
     info("[bold]Generating report...[/bold]")
     try:
-        from blue_tap.interfaces.reporting.generator import generate_report
-        generate_report()
-        success("Assessment complete — report generated.")
+        import os
+        from blue_tap.interfaces.reporting.generator import ReportGenerator
+        from blue_tap.framework.sessions.store import get_session
+
+        report = ReportGenerator()
+        session = get_session()
+        if not session:
+            error("No active session — cannot generate report.")
+            return
+
+        session_data = session.get_all_data()
+        for category_name, entries in session_data.items():
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                data = entry.get("data", {})
+                if isinstance(data, dict):
+                    report.add_run_envelope(data)
+
+        report.add_session_metadata(session.metadata)
+        out = os.path.join(session.dir, "report.html")
+        report.generate_html(out)
+        success(f"Assessment complete — report saved to {out}")
     except Exception as e:
         error(f"Report generation failed: {e}")
+        logger.exception("Report generation failed")

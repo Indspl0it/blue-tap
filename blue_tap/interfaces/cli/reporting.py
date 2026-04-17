@@ -311,7 +311,7 @@ def run_playbook_cmd(commands, playbook, list_playbooks_flag):
             return
 
     if not commands:
-        error("No commands specified. Usage: blue-tap run \"scan classic\" \"vulnscan TARGET\"")
+        error("No commands specified. Usage: blue-tap run-playbook \"scan classic\" \"vulnscan TARGET\"")
         return
 
     # Resolve TARGET / {target} / {hci} placeholders
@@ -363,12 +363,9 @@ def run_playbook_cmd(commands, playbook, list_playbooks_flag):
         # Force subcommands to use the current session instead of spawning auto sessions.
         session_prefix = ["-s", active_session.name]
     for i, cmd_str in enumerate(commands, 1):
-        # Replace TARGET / {target} placeholder
         if target_addr:
             cmd_str = re.sub(r'\bTARGET\b', target_addr, cmd_str)
-            cmd_str = re.sub(r'\btarget\b', target_addr, cmd_str)
             cmd_str = cmd_str.replace("{target}", target_addr)
-        # Replace {hci} placeholder
         cmd_str = cmd_str.replace("{hci}", hci_adapter)
 
         console.rule(f"[bold]Step {i}/{len(commands)}: {cmd_str}", style="dim")

@@ -4,17 +4,26 @@ from __future__ import annotations
 
 import rich_click as click
 
-from blue_tap.interfaces.cli._module_runner import invoke
+from blue_tap.interfaces.cli._module_runner import invoke_or_exit, resolve_target
 from blue_tap.interfaces.cli.shared import LoggedCommand, LoggedGroup
 
 
 @click.group(cls=LoggedGroup)
-@click.argument("target")
+@click.argument("target", required=False, default=None)
 @click.option("--hci", "-a", default=None, help="HCI adapter (e.g. hci0)")
 @click.pass_context
 def recon(ctx, target, hci):
-    """Enumerate services and fingerprint a target."""
+    """Enumerate services and fingerprint a target.
+
+    \b
+    Examples:
+      blue-tap recon AA:BB:CC:DD:EE:FF sdp              # Scan specific target
+      blue-tap recon sdp                                 # Interactive device picker
+    """
     ctx.ensure_object(dict)
+    target = resolve_target(target, hci=hci, prompt="Select target for reconnaissance")
+    if not target:
+        raise SystemExit(1)
     ctx.obj["target"] = target
     ctx.obj["hci"] = hci
 
@@ -34,14 +43,14 @@ def recon_sdp(ctx, retries):
     opts = _base_opts(ctx)
     if retries is not None:
         opts["RETRIES"] = str(retries)
-    invoke("reconnaissance.sdp", opts)
+    invoke_or_exit("reconnaissance.sdp", opts)
 
 
 @recon.command("gatt", cls=LoggedCommand)
 @click.pass_context
 def recon_gatt(ctx):
     """BLE GATT attribute discovery — services, characteristics, descriptors."""
-    invoke("reconnaissance.gatt", _base_opts(ctx))
+    invoke_or_exit("reconnaissance.gatt", _base_opts(ctx))
 
 
 @recon.command("l2cap", cls=LoggedCommand)
@@ -58,7 +67,7 @@ def recon_l2cap(ctx, start_psm, end_psm, timeout):
         opts["END_PSM"] = str(end_psm)
     if timeout is not None:
         opts["TIMEOUT_MS"] = str(timeout)
-    invoke("reconnaissance.l2cap_scan", opts)
+    invoke_or_exit("reconnaissance.l2cap_scan", opts)
 
 
 @recon.command("rfcomm", cls=LoggedCommand)
@@ -75,14 +84,14 @@ def recon_rfcomm(ctx, start_channel, end_channel, timeout):
         opts["END_CHANNEL"] = str(end_channel)
     if timeout is not None:
         opts["TIMEOUT_MS"] = str(timeout)
-    invoke("reconnaissance.rfcomm_scan", opts)
+    invoke_or_exit("reconnaissance.rfcomm_scan", opts)
 
 
 @recon.command("fingerprint", cls=LoggedCommand)
 @click.pass_context
 def recon_fingerprint(ctx):
     """Device fingerprinting — OS detection, chipset, firmware version."""
-    invoke("reconnaissance.fingerprint", _base_opts(ctx))
+    invoke_or_exit("reconnaissance.fingerprint", _base_opts(ctx))
 
 
 @recon.command("capture", cls=LoggedCommand)
@@ -96,7 +105,7 @@ def recon_capture(ctx, duration, output):
         opts["DURATION"] = str(duration)
     if output:
         opts["OUTPUT"] = output
-    invoke("reconnaissance.hci_capture", opts)
+    invoke_or_exit("reconnaissance.hci_capture", opts)
 
 
 @recon.command("sniff", cls=LoggedCommand)
@@ -115,21 +124,21 @@ def recon_sniff(ctx, mode, duration, output):
         opts["DURATION"] = str(duration)
     if output:
         opts["OUTPUT"] = output
-    invoke("reconnaissance.sniffer", opts)
+    invoke_or_exit("reconnaissance.sniffer", opts)
 
 
 @recon.command("auto", cls=LoggedCommand)
 @click.pass_context
 def recon_auto(ctx):
     """Run all reconnaissance collectors against the target."""
-    invoke("reconnaissance.campaign", _base_opts(ctx))
+    invoke_or_exit("reconnaissance.campaign", _base_opts(ctx))
 
 
 @recon.command("capabilities", cls=LoggedCommand)
 @click.pass_context
 def recon_capabilities(ctx):
     """Detect target capabilities — supported profiles, transports, features."""
-    invoke("reconnaissance.capability_detector", _base_opts(ctx))
+    invoke_or_exit("reconnaissance.capability_detector", _base_opts(ctx))
 
 
 @recon.command("analyze", cls=LoggedCommand)
@@ -141,18 +150,18 @@ def recon_analyze(ctx, pcap):
     opts = _base_opts(ctx)
     if pcap:
         opts["PCAP"] = pcap
-    invoke("reconnaissance.capture_analysis", opts)
+    invoke_or_exit("reconnaissance.capture_analysis", opts)
 
 
 @recon.command("correlate", cls=LoggedCommand)
 @click.pass_context
 def recon_correlate(ctx):
     """Correlate findings from multiple collectors into a unified profile."""
-    invoke("reconnaissance.correlation", _base_opts(ctx))
+    invoke_or_exit("reconnaissance.correlation", _base_opts(ctx))
 
 
 @recon.command("interpret", cls=LoggedCommand)
 @click.pass_context
 def recon_interpret(ctx):
     """Interpret Bluetooth spec data — feature flags, version strings, class codes."""
-    invoke("reconnaissance.spec_interpretation", _base_opts(ctx))
+    invoke_or_exit("reconnaissance.spec_interpretation", _base_opts(ctx))

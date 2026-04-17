@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import logging
+import re
 
 logger = logging.getLogger(__name__)
+
+_MAC_ADDRESS_RE = re.compile(r"^[0-9A-Fa-f]{2}([:-][0-9A-Fa-f]{2}){5}$")
 
 
 def invoke(
@@ -81,14 +84,33 @@ def invoke(
     return None
 
 
+def invoke_or_exit(
+    module_id: str,
+    options: dict[str, str],
+    *,
+    confirm_destructive: bool = False,
+) -> dict:
+    """Invoke a module; raise SystemExit(1) if it fails.
+
+    Use this in CLI facade commands (vulnscan, dos, exploit, etc.) where
+    a failed module run should result in a non-zero exit code.  The
+    ``auto`` command uses plain ``invoke()`` instead because it handles
+    partial failures across multiple phases.
+    """
+    result = invoke(module_id, options, confirm_destructive=confirm_destructive)
+    if result is None:
+        raise SystemExit(1)
+    return result
+
+
 def resolve_target(
     target: str | None,
     *,
     hci: str | None = None,
     prompt: str = "Select target",
 ) -> str | None:
-    """Resolve a target address, offering interactive picker if None."""
-    if target:
+    """Resolve a target address, offering interactive picker if None or not a MAC."""
+    if target and _MAC_ADDRESS_RE.match(target):
         return target
     from blue_tap.utils.interactive import resolve_address
     from blue_tap.hardware.adapter import resolve_active_hci

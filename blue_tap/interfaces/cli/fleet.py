@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import rich_click as click
 
-from blue_tap.interfaces.cli._module_runner import invoke
+from blue_tap.interfaces.cli._module_runner import invoke_or_exit
 from blue_tap.interfaces.cli.shared import LoggedCommand
 
 
@@ -20,4 +20,4 @@ def fleet(hci, duration, device_class):
         opts["HCI"] = hci
     if device_class:
         opts["CLASS"] = device_class
-    invoke("assessment.fleet", opts)
+    invoke_or_exit("assessment.fleet", opts)
