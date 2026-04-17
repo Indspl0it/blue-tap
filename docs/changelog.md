@@ -751,6 +751,7 @@ This release extends Blue-Tap below the HCI boundary with a custom firmware plat
 - 4 fuzzing strategies, crash database, minimization
 - Session management, HTML/JSON reports, auto pentest, playbooks
 
+[2.6.1]: https://github.com/Indspl0it/blue-tap/compare/v2.6.0...v2.6.1
 [2.6.0]: https://github.com/Indspl0it/blue-tap/compare/v2.5.0...v2.6.0
 [2.5.0]: https://github.com/Indspl0it/blue-tap/compare/v2.3.2...v2.5.0
 [2.3.2]: https://github.com/Indspl0it/blue-tap/compare/v2.3.1...v2.3.2
