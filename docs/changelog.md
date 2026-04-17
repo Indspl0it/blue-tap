@@ -5,6 +5,108 @@ All notable changes to Blue-Tap are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.1] - 2026-04-17
+
+### Summary
+
+Blue-Tap 2.6.1 is a **stability, ergonomics, and correctness** release on top of 2.6.0. The CLI now supports interactive target selection across every target-taking command (omit the address to get a device picker); the hardware layer picks up a second RTL8761B dongle variant and hardens the DarkFirmware watchdog against concurrent HCI access; several modules that silently "succeeded" while producing wrong results now return honest envelopes; and the module loader can actually unregister + re-import plugin classes instead of leaking descriptors on reload.
+
+### Added — CLI Ergonomics
+
+- **Interactive target picker** — `vulnscan`, `recon`, `exploit`, `extract`, `dos`, `fleet`, `adapter info` now accept `TARGET` as optional. When omitted (or when the argument doesn't match a MAC), a device scan runs and presents a numbered picker
+- **`invoke_or_exit()`** (`interfaces/cli/_module_runner.py`) — new helper used by all facade commands; failed module runs now exit with status `1` instead of `0`, so `blue-tap` works correctly in shell pipelines and CI
+- **Command-name-aware proxy usage hints** — `dos-<check>`, `vuln-cve-*`, `vuln-<check>`, `recon-hci-capture`, `recon-sniffer` proxy commands now print the exact real-command invocation (e.g. `blue-tap dos TARGET --checks bluefrag` or `blue-tap vulnscan TARGET --cve CVE-2020-0022`) instead of a generic "`<group> <subcommand>`" template
+- **`fuzz cve`** — registered proxy command for replaying a known CVE fuzz pattern
+- **`run-playbook`** added to no-session command allow-list so `blue-tap run-playbook --list` works without an active session
+- **`auto`** — docstring rewritten to state explicitly that this is a 4-module shortcut (SDP recon → vuln_scanner → KNOB exploit → PBAP extract → report), not a "full pentest"; report generation now uses the active session's data correctly and writes `report.html` into the session directory
+
+### Added — Framework
+
+- **`ReportAdapter.priority`** — adapters now carry an integer priority (lower = runs first). Plugin adapters default to `50`; the built-in `vulnscan` fallback adapter is pinned to `200` so third-party adapters are always tried first
+- **`get_report_adapters()`** — returns adapters sorted by priority, unifying built-in + plugin-registered adapters; `interfaces/reporting/generator.py` now iterates through this function instead of the static `REPORT_ADAPTERS` tuple (plugin adapters were previously ignored during report generation)
+- **`ModuleRegistry.unregister(module_id)`** — returns `True` if the descriptor was present; used by the loader to clean up on `reload=True`
+- **`ModuleLoader.load_plugins(reload=True)`** — now unregisters previously-loaded descriptors and evicts cached modules from `sys.modules` before re-importing, so plugin upgrades no longer leak stale classes
+- **`function_module()` decorator** — the generated `_FunctionModule` class is now injected into the calling module's namespace so its `entry_point` string resolves at import time; this previously failed silently for any module defined via `@function_module`
+- **Recon outcome taxonomy** — `VALID_OUTCOMES_BY_FAMILY["reconnaissance"]` extended with `undetermined`, `partial_observation`, `auth_required`, `not_found`, `not_connectable`, `timeout`, `no_results` to cover the actual envelopes recon modules were already emitting
+- **`build_recon_execution(module_id=...)`** — new optional argument so recon executions can record their fully-qualified module ID (e.g. `reconnaissance.campaign`) instead of just `reconnaissance`
+- **Session timestamps in UTC** — `framework/sessions/store.py` now uses `datetime.now(timezone.utc).isoformat()` via a single `_now_iso_utc()` helper; prevents naïve-local timestamps from drifting across hosts
+- **`OptPath.validate()`** — returns `None` for optional paths with no default instead of raising `OptionError`, letting modules distinguish "path was given" from "path was not set"
+- **Plugin discovery diagnostics** — `ModuleRegistry.load_entry_points()` now logs a warning with traceback when discovery fails instead of swallowing the exception silently
+
+### Added — Hardware
+
+- **Second RTL8761B dongle variant** — `firmware.py` now detects both `2357:0604` (TP-Link UB500) and `0bda:8771` (generic Realtek) via a new `RTL8761B_VID_PIDS` tuple; `is_darkfirmware_loaded()` and USB presence checks iterate both VID:PIDs
+- **DarkFirmware watchdog thread safety** — `DarkFirmwareWatchdog` now uses a `threading.Lock` around `_reinit_count`, `_last_reinit`, and a new `_reinit_in_progress` flag; prevents double-reinit races when a USB event fires during an in-flight reinit
+- **HCIVSCSocket.recv_event() concurrency guard** — raises `RuntimeError` if called from an external thread while the LMP monitor loop is running on the same socket; two concurrent readers were causing event-frame corruption
+- **`adapter_up`, `adapter_down`, `adapter_reset`** — now auto-resolve `hci=None` via `resolve_active_hci()` and return a structured error dict if no adapter can be discovered, instead of NPE-ing downstream
+- **L2CAP DoS socket binding** — `_l2cap_raw_socket()` now binds to the requested HCI's local address before connecting, so DoS traffic goes out the intended adapter in multi-dongle setups
+
+### Fixed — Hardware
+
+- **MAC spoofer fallback** — `spoof_rtl8761b()` now falls through from RAM patch to firmware-file patch when RAM patch reports success but the adapter still reports the wrong BDADDR (previously returned `verified=False` with `success=True`, confusing the caller)
+- **MAC spoofer file-write permission** — `save_original_mac()` now catches `PermissionError` and emits a user-facing warning pointing at the root-owned state file, instead of raising into the caller
+- **Firmware RAM-patch length check** — `patch_bdaddr_ram()` now requires exactly 4 bytes back from `vsc.read_memory()` before attempting the file-patch fallback, instead of accepting any byte count ≥4
+- **Firmware file-read leak** — `is_darkfirmware_loaded()` now uses `with open(...)` for modalias probes (previously leaked file descriptors in the multi-adapter loop)
+
+### Fixed — Modules
+
+- **`assessment.fleet`** — UUID matching now canonicalizes short form, `0x` prefix, and full 128-bit Base UUID; previously only matched exact `"0x111f"` literal, so IVIs advertising `"111f"`, `"0000111f-0000-1000-8000-00805f9b34fb"`, or uppercase variants were misclassified as generic headsets
+- **`assessment.vuln_scanner._check_blueborne`** — removed the `bluetoothd --version` probe (it reports the local stack version, not the target's); now relies on SDP-extracted `BlueZ X.Y` strings only. Removes a class of false-positive BlueBorne findings on assessments run from a Kali attacker
+- **`exploitation.encryption_downgrade`** — `results["success"]` now reflects whether at least one downgrade method actually worked; previously hardcoded `True` even when the target rejected every method
+- **`exploitation.hijack`** — bails out of the attack chain when recon fails; was previously entering SSP/pairing with no target data
+- **`reconnaissance.sdp.search_services_batch`** — UUID matching normalizes `0x`-prefixed hex and checks the full `class_id_uuids` list against candidate service records; previously missed services whose class IDs used a different textual form than the filter UUID
+- **`reconnaissance.fingerprint`** — `vendor` derivation now uses `manufacturer` (the actual output field) instead of a non-existent `chipset.vendor` nested key, so `has_signal` correctly flips on vendor-only fingerprints
+- **`reconnaissance.hci_capture`** — capture loop uses a clamped `remaining` time slice and exits cleanly when `remaining <= 0`, preventing a hang at the boundary of `duration`
+- **`reconnaissance.campaign`** — `_cleanup_tmp_artifact()` unlinks the tempfile on all four capture-step failure paths (was leaking empty PCAPs into the session dir)
+- **`reconnaissance.prerequisites`** — prerequisite `missing` list now filters by a new `applicable` flag per check, so a BLE-only target no longer reports DarkFirmware/LMP prerequisites as "missing"
+- **`post_exploitation.pbap`** — `extract_all` now deduplicates `PBAP_PATH_ALIASES` to 9 unique canonical paths instead of pulling the same phonebook 28 times (one for every alias key)
+- **`post_exploitation.map_client`** — all `self.sock.send()` calls go through a `_send()` helper that raises if not connected; adds `None` guards on `_setpath_root`, `_setpath_down`, `_recv_response`; message body `LENGTH:` header now reflects byte length of the UTF-8 encoded body, not character count
+- **`post_exploitation.bluesnarfer`** — auto-discovers the AT RFCOMM channel via SDP (tries `Dial-up Networking`, `Serial Port`, `DUN`, `SPP`) instead of raising `OptionError` when CHANNEL was not supplied; also preserves original case on raw AT commands (was uppercasing vendor-specific payloads and breaking them)
+- **`post_exploitation.a2dp`** — `record` action now uses `capture_a2dp()` (was calling an undefined `record_car_mic()`); `bytes` field in result reflects actual on-disk size after capture; `set_sink_volume()` failure is now a warning instead of an uncaught exception
+- **`post_exploitation.hfp`** — codec-negotiation response now distinguishes `ERROR` (rejected) from silent fallback; `dial`/`answer`/`hangup` success flags reflect `"ERROR" not in response` rather than truthy-ness alone; `silent_call()` guards on socket being connected before issuing ATD
+- **`fuzzing.engine`** — protocol names now run through `canonical_protocol()` which maps operator aliases (`pbap`, `map`, `opp`, `att`, `smp`, `hfp`, `phonebook`, `sms`) to canonical transport keys; mutator fallback generates fresh random bytes when the mutator returns an empty payload; strategy-unavailable path now updates `self.strategy` so the envelope records what actually ran; `CrashDB` is closed in a `finally` block in `_finalize()`
+- **`fuzzing.health_monitor`** — removed unused `_check_zombie(protocol_responses)` and replaced it with a per-protocol consecutive-failure tracker (`_protocol_consecutive_fails`); a target is declared `ZOMBIE` when ≥2 tracked protocols have ≥3 consecutive failures while L2CAP is still alive; `update()` now accepts `protocol=` to identify which protocol's response was observed
+- **`fuzzing.campaign`** — `CONTINUE=true` resumes an existing `fuzz/campaign_state.json` (falls back to a fresh campaign if the file is missing or corrupt); transport overrides are rebuilt from the resumed protocol list, not the CLI `PROTOCOLS` option
+- **`fuzzing.cli_commands` (replay)** — delegates to `CrashDB.reproduce_crash(transport)` instead of duplicating the recv/timeout logic inline; multi-packet crashes now report packet count before replay
+- **`fuzzing.state_inference`** — replaces non-deterministic `hash(indicator)` with `md5(...)[:2]` so AT state IDs are stable across Python interpreter runs (was breaking state-machine convergence on restart)
+- **`fuzzing.lmp_state_tests`** — the `key_size_after_start_enc` test now uses a fixed 16-byte hex seed instead of `os.urandom(16)` so the test is reproducible
+- **`fuzzing.transport`** — `LMPTransport._establish_acl()` closes the probe socket in a `finally` block instead of relying on successful-path cleanup
+- **`utils.bt_helpers.get_adapter_state`** — escapes `hci` before embedding it in the `pgrep` regex; previously vulnerable to weird adapter names injecting regex metacharacters
+
+### Fixed — CLI
+
+- **`blue-tap run <module>`** — missing / destructive / option-error conditions now exit with status `1` instead of falling through to status `0`; "see available modules" hint now points at `blue-tap search` (the real command) instead of the removed `list-modules`
+- **`blue-tap run-playbook`** — no longer replaces the lowercase literal `target` inside command strings (broke any module that had `target` as a legitimate substring in an argument); only the uppercase `TARGET` sentinel and the explicit `{target}` placeholder are substituted
+- **`adapter up/down/reset/set-name`** — raise `ClickException` on failure so exit status matches; `info` raises `ClickException` instead of silently returning when the adapter doesn't exist
+- **`_module_runner.resolve_target`** — validates the `TARGET` argument shape with a MAC regex; if the first positional token is a subcommand name (e.g. `blue-tap recon sdp`) the picker fires instead of treating the subcommand as an address
+
+### Fixed — Playbooks
+
+- **`full-assessment.yaml`** — updated to v2.6 CLI grammar: `recon {target} rfcomm` instead of `recon rfcomm-scan {target}`, `sniff -m lmp` instead of `lmp-sniff`, `-a` instead of `-i`
+- **`ivi-attack.yaml`** — exploit commands now use the `exploit {target} <sub>` form; `-a` instead of `-i`
+- **`lmp-fuzzing.yaml`** — removed the deprecated standalone `fuzz lmp` step; campaign uses the `-p <proto>` repeatable flag (matches current CLI) and `coverage_guided` (underscore form)
+- **`passive-recon.yaml`**, **`quick-recon.yaml`** — `scan classic/ble` replaced with `discover classic/ble`; recon subcommands reordered to `recon {target} <sub>` form
+
+### Fixed — Tests
+
+- `test_cli_facades` — `vulnscan` / `dos` "requires target" tests replaced with "interactive picker when no target" to reflect the new optional-target behavior
+- `test_userflow_dos`, `test_userflow_exploitation_bias`, `test_userflow_exploitation_knob` — expect exit code `1` for unknown modules and blocked destructive runs (previously accepted `0` due to the silent-failure bug)
+
+### Fixed — Docs
+
+- **CLI reference** — rewritten to show `[TARGET]` as optional across `vulnscan`, `recon`, `exploit`, `extract`, `dos`; options table updated (`-a, --hci` replaces the old `-a, --adapter` / `-i, --adapter` forms); added interactive-picker callout
+- **Navigation** — mkdocs sidebar renames "Reference" to "Technical Reference"
+- **Guide pages** — `reconnaissance`, `vulnerability-assessment`, `denial-of-service`, `fuzzing`, `post-exploitation`, `sessions-and-reporting`, `automation`, `exploitation` updated to match the v2.6 command grammar; `docs/developer/architecture.md` expanded with framework-layer details
+- **README** and **target/README** — all example invocations updated to `discover` / `recon {target} <sub>` / `-a` grammar; fuzz examples use `-p` repeatable and `fuzz crashes list`
+
+### Build
+
+- **Version** bumped to `2.6.1`
+- `pyproject.toml` — removed stray `asyncio_default_fixture_loop_scope` (no async tests in the suite)
+- `.gitignore` — adds `site/` (mkdocs build), `fuzz/` (corpus + crashes.db), `map_dump/`, `x/`, `hci_capture.pcap`, `tmp_dos_review.*` to avoid committing operator artifacts
+
+---
+
 ## [2.6.0] - 2026-04-16
 
 ### Summary

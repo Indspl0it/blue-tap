@@ -35,5 +35,15 @@ demo_output/
 AGENTS.md
 docs/cve-expansion-plan.md
 
-# repowise API keys (local)
-.repowise/.env
+# mkdocs build output
+site/
+
+# runtime/operator artifacts
+fuzz/
+map_dump/
+x/
+hci_capture.pcap
+tmp_dos_review.*
+
+# local AI tool scratch
+GEMINI.md
