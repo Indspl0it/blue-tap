@@ -5,10 +5,10 @@ from __future__ import annotations
 import rich_click as click
 
 from blue_tap.interfaces.cli._module_runner import invoke_or_exit, resolve_target
-from blue_tap.interfaces.cli.shared import LoggedCommand, LoggedGroup
+from blue_tap.interfaces.cli.shared import LoggedCommand, LoggedGroup, TargetSubcommandGroup
 
 
-@click.group(cls=LoggedGroup)
+@click.group(cls=TargetSubcommandGroup)
 @click.argument("target", required=False, default=None)
 @click.option("--hci", "-a", default=None, help="HCI adapter (e.g. hci0)")
 @click.pass_context
@@ -20,7 +20,15 @@ def recon(ctx, target, hci):
       blue-tap recon AA:BB:CC:DD:EE:FF sdp              # Scan specific target
       blue-tap recon sdp                                 # Interactive device picker
     """
+    import sys as _sys
+
     ctx.ensure_object(dict)
+    # If the user asked for help on a subcommand, don't run the interactive
+    # target picker — Click is about to print help text and exit.
+    if any(a in ("--help", "-h") for a in _sys.argv[1:]):
+        ctx.obj["target"] = target or ""
+        ctx.obj["hci"] = hci
+        return
     target = resolve_target(target, hci=hci, prompt="Select target for reconnaissance")
     if not target:
         raise SystemExit(1)

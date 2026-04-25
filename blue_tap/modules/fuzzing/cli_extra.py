@@ -459,6 +459,7 @@ def _show_fuzz_summary(protocol: str, address: str, result: dict, *, log_result:
         adapter = str(session.metadata.get("adapter", "") or "")
 
     envelope = build_fuzz_result(
+        module_id="fuzzing.engine",
         target=address,
         adapter=adapter,
         command=f"fuzz_{protocol}",
@@ -976,6 +977,7 @@ def register_extra_commands(fuzz_group):
                 from blue_tap.framework.envelopes.fuzz import build_fuzz_operation_result
 
                 envelope = build_fuzz_operation_result(
+                    module_id="fuzzing.engine",
                     target=address,
                     adapter=_current_adapter(),
                     operation="fuzz_at_deep",
@@ -1016,6 +1018,7 @@ def register_extra_commands(fuzz_group):
                 from blue_tap.framework.envelopes.fuzz import build_fuzz_operation_result
 
                 envelope = build_fuzz_operation_result(
+                    module_id="fuzzing.engine",
                     target=address,
                     adapter=_current_adapter(),
                     operation="fuzz_at_deep",
@@ -1354,6 +1357,7 @@ def register_extra_commands(fuzz_group):
         from blue_tap.framework.envelopes.fuzz import build_fuzz_operation_result
 
         envelope = build_fuzz_operation_result(
+            module_id="fuzzing.engine",
             target=target,
             adapter=_current_adapter(),
             operation="fuzz_replay",
@@ -1611,6 +1615,7 @@ def register_extra_commands(fuzz_group):
         from blue_tap.framework.envelopes.fuzz import build_fuzz_operation_result
 
         envelope = build_fuzz_operation_result(
+            module_id="fuzzing.engine",
             target=target,
             adapter=_current_adapter(),
             operation="fuzz_minimize",
@@ -1825,6 +1830,7 @@ def register_extra_commands(fuzz_group):
         from blue_tap.framework.envelopes.fuzz import build_fuzz_operation_result
 
         envelope = build_fuzz_operation_result(
+            module_id="fuzzing.engine",
             target="",
             adapter=_current_adapter(),
             operation="fuzz_corpus_generate",
@@ -2048,6 +2054,7 @@ def register_extra_commands(fuzz_group):
         from blue_tap.framework.envelopes.fuzz import build_fuzz_operation_result
 
         envelope = build_fuzz_operation_result(
+            module_id="fuzzing.engine",
             target="",
             adapter=_current_adapter(),
             operation="fuzz_corpus_minimize",

@@ -564,6 +564,7 @@ class SdpScannerModule(Module):
         return build_run_envelope(
             schema=self.schema_prefix,
             module=self.module_id,
+            module_id=self.module_id,
             target=target,
             adapter=hci,
             started_at=started_at,

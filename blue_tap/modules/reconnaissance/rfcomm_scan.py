@@ -420,11 +420,13 @@ class RfcommScanModule(Module):
         return build_run_envelope(
             schema=self.schema_prefix,
             module=self.module_id,
+            module_id=self.module_id,
             target=target,
             adapter=hci,
             started_at=started_at,
             executions=[
                 make_execution(
+                    module_id="reconnaissance.rfcomm_scan",
                     execution_id="rfcomm_scan",
                     kind="collector",
                     id="rfcomm_scan",

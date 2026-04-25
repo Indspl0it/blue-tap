@@ -230,8 +230,10 @@ class TestAtomicFileWrites(unittest.TestCase):
 
                 with mock_patch("blue_tap.hardware.firmware.os.replace",
                                 side_effect=tracking_replace):
-                    # Mock usb_reset and get_current_bdaddr so we don't need hardware
-                    with mock_patch.object(manager, "usb_reset", return_value=True):
+                    # Mock the entire USB-reset-and-wait flow so the test does
+                    # not block on real hardware re-enumeration.
+                    with mock_patch.object(manager, "usb_reset_and_wait",
+                                           return_value="hci0"):
                         with mock_patch.object(manager, "get_current_bdaddr",
                                                return_value="AA:BB:CC:DD:EE:FF"):
                             result = manager.patch_bdaddr(

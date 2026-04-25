@@ -5,7 +5,7 @@ This scanner emphasizes evidence-based classification:
 - inconclusive: check reached the target but the response was not definitive
 - pairing_required: the target must enter pairing/bonding mode to validate
 - not_applicable: wrong target role, transport, or prerequisites absent
-- potential/unverified: legacy heuristic checks retained elsewhere in the scanner
+(All check outcomes use the canonical assessment taxonomy.)
 
 It avoids declaring definitive CVE exploitation unless direct evidence exists.
 """
@@ -80,7 +80,7 @@ def _finding(
     cve: str = "N/A",
     impact: str = "",
     remediation: str = "",
-    status: str = "potential",
+    status: str = "inconclusive",
     confidence: str = "medium",
     evidence: str = "",
 ) -> dict:
@@ -196,7 +196,7 @@ def _check_knob(bt_version: float | None, raw_version: str | None,
                 remediation="Update firmware to enforce min 7-byte key size. "
                             "BT 5.3+ adds HCI_Set_Min_Encryption_Key_Size. "
                             "Verify with vendor if pre-5.3 firmware has backported fix.",
-                status="potential",
+                status="inconclusive",
                 confidence="low",
                 evidence="; ".join(evidence_parts),
             )
@@ -242,7 +242,7 @@ def _check_blurtooth(bt_version: float | None, raw_version: str | None,
                        "via weak BLE Just Works. CVSS 5.9.",
                 remediation="Update to BT 5.1+ which mandates key strength comparison "
                             "before CTKD overwrite. Disable CTKD if not needed.",
-                status="potential",
+                status="inconclusive",
                 confidence=confidence,
                 evidence="; ".join(evidence_parts),
             )
@@ -317,7 +317,7 @@ def _check_perfektblue(address: str, services: list[dict],
                    "Lateral movement to other vehicle systems possible.",
             remediation="Verify IVI firmware updated after Sept 2024. Contact vehicle "
                         "manufacturer for BlueSDK patch status.",
-            status="potential",
+            status="inconclusive",
             confidence=confidence,
             evidence="; ".join(evidence_parts),
         )
@@ -357,7 +357,7 @@ def _check_bluffs(bt_version: float | None, raw_version: str | None) -> list[dic
                        "future traffic if the attacker captures encrypted frames.",
                 remediation="Update to BT 5.4+ firmware or apply vendor patches "
                             "addressing CVE-2023-24023.",
-                status="potential",
+                status="inconclusive",
                 confidence="low",
                 evidence=f"LMP Version: {raw_version}",
             )
@@ -390,7 +390,7 @@ def _check_pin_pairing_bypass(bt_version: float | None, raw_version: str | None,
                 impact="Complete pairing bypass. Attacker can pair with IVI as any device.",
                 remediation="Enable SSP (Secure Simple Pairing). Legacy PIN pairing is "
                             "fundamentally broken and should not be used.",
-                status="confirmed" if ssp is False else "potential",
+                status="confirmed" if ssp is False else "inconclusive",
                 confidence="high" if ssp is False else "medium",
                 evidence=f"SSP={ssp}, LMP Version: {raw_version}",
             )
@@ -429,7 +429,7 @@ def _check_invalid_curve(bt_version: float | None, raw_version: str | None,
                        "CVSS 7.1.",
                 remediation="Update firmware to validate ECDH public key coordinates on curve. "
                             "Fixed in BT 5.1+ spec.",
-                status="potential",
+                status="inconclusive",
                 confidence="low",
                 evidence=f"LMP Version: {raw_version}, SSP={ssp_present}",
             )
@@ -449,7 +449,7 @@ def _check_bias(ssp: bool | None) -> list[dict]:
             "BIAS cannot be confirmed from passive metadata. Active role-switch/auth testing is required.",
             cve="CVE-2020-10135",
             remediation="Run active BIAS test tooling and verify vendor patch level.",
-            status="unverified",
+            status="inconclusive",
             confidence="low",
             evidence=f"SSP probe result: {ssp}",
         )
@@ -477,7 +477,7 @@ def _check_bias_active(address: str, hci: str, ssp: bool | None,
             "Device does not support SSP — BIAS attack targets SSP authentication. "
             "Legacy pairing has its own weaknesses (see PIN bypass check).",
             cve="CVE-2020-10135",
-            status="unverified",
+            status="inconclusive",
             confidence="high",
         ))
         return findings
@@ -489,7 +489,7 @@ def _check_bias_active(address: str, hci: str, ssp: bool | None,
             "auto-reconnection. Use --phone <MAC> or select interactively. "
             "SSP and version checks were still performed in the passive scan.",
             cve="CVE-2020-10135",
-            status="unverified",
+            status="inconclusive",
             confidence="low",
         ))
         return findings
@@ -527,7 +527,7 @@ def _check_bias_active(address: str, hci: str, ssp: bool | None,
                 cve="CVE-2020-10135",
                 impact="Authentication bypass possible via role-switch attack.",
                 remediation="Enable and enforce SSP on the target device.",
-                status="potential",
+                status="inconclusive",
                 confidence="medium",
                 evidence=f"SSP supported: {result.get('ssp_supported')}, "
                          f"BT version: {result.get('bt_version')}",
@@ -539,7 +539,7 @@ def _check_bias_active(address: str, hci: str, ssp: bool | None,
                 "Active BIAS probe completed but target did not auto-reconnect "
                 "within the test window. May still be vulnerable with different timing.",
                 cve="CVE-2020-10135",
-                status="potential",
+                status="inconclusive",
                 confidence="low",
                 evidence=f"No auto-reconnect in 15s. SSP: {result.get('ssp_supported')}, "
                          f"BT version: {result.get('bt_version')}",
@@ -549,7 +549,7 @@ def _check_bias_active(address: str, hci: str, ssp: bool | None,
             "info", "BIAS active probe unavailable",
             "Could not import BIAS attack module.",
             cve="CVE-2020-10135",
-            status="unverified",
+            status="inconclusive",
             confidence="low",
         ))
     except Exception as e:
@@ -559,7 +559,7 @@ def _check_bias_active(address: str, hci: str, ssp: bool | None,
             f"Active probe encountered an error: {e}. "
             "The device may still be vulnerable — try manual testing.",
             cve="CVE-2020-10135",
-            status="unverified",
+            status="inconclusive",
             confidence="low",
         ))
 
@@ -593,7 +593,7 @@ def _check_blueborne(address: str) -> list[dict]:
                     cve="CVE-2017-1000251",
                     impact="Potential legacy BlueBorne exposure if this BlueZ version is authoritative for the target stack.",
                     remediation="Verify actual stack version and backported patches; update vendor firmware.",
-                    status="potential",
+                    status="inconclusive",
                     confidence="medium",
                     evidence=version_source,
                 )
@@ -660,7 +660,7 @@ def _check_braktooth_chipset(address: str, hci: str) -> list[dict]:
                     impact="Potential firmware crash, deadlock, or RCE via crafted LMP PDUs. "
                            "Requires ESP32-based attack hardware or SDR, not testable via HCI.",
                     remediation="Check vendor firmware update status. BrakTooth patches are chipset-specific.",
-                    status="potential",
+                    status="inconclusive",
                     confidence="medium",
                     evidence=f"Manufacturer: {manufacturer}, matched chipset: {chipset_key}",
                 )
@@ -980,7 +980,7 @@ def run_vulnerability_scan(address: str, hci: str | None = None, active: bool = 
                 "Target did not advertise Secure Simple Pairing in SDP output.",
                 impact="May rely on legacy pairing workflows, depending on target implementation.",
                 remediation="Verify pairing policy and require SSP-capable pairing modes.",
-                status="potential",
+                status="inconclusive",
                 confidence="medium",
                 evidence="SDP browse output did not include SSP markers",
             )
@@ -1555,14 +1555,13 @@ def _print_findings(address: str, findings: list[dict]):
             "Target": address,
             "Total Findings": str(summary["displayed"]),
             "Confirmed": str(summary["confirmed"]),
-            "Potential": str(summary["potential"]),
-            "Unverified": str(summary["unverified"]),
+            "Not Detected": str(summary["not_detected"]),
             "Inconclusive": str(summary["inconclusive"]),
             "Pairing Required": str(summary["pairing_required"]),
             "Skipped (Not Applicable)": str(summary["not_applicable"]),
             "Critical/High Severity": str(summary["high_or_critical"]),
         },
-        style="red" if summary["high_or_critical"] > 0 else "yellow" if summary["potential"] > 0 else "green",
+        style="red" if summary["high_or_critical"] > 0 else "yellow" if summary["inconclusive"] > 0 else "green",
     )
 
 
@@ -1626,6 +1625,7 @@ class VulnScannerModule(Module):
             return build_run_envelope(
                 schema=self.schema_prefix,
                 module="assessment.vuln_scanner",
+                module_id="assessment.vuln_scanner",
                 target=address,
                 adapter=hci,
                 started_at=ctx.started_at,
@@ -1635,6 +1635,7 @@ class VulnScannerModule(Module):
                         kind="check",
                         id="vuln_scan",
                         title="Vulnerability Scan",
+                        module_id="assessment.vuln_scanner",
                         execution_status="error",
                         module_outcome="not_applicable",
                         evidence=make_evidence(summary=str(exc)),

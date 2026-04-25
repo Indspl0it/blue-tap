@@ -878,40 +878,73 @@ class DarkFirmwareManager:
             warning(f"usbreset failed (rc={result.returncode}): {result.stderr.strip()}")
             return False
 
+    def _wait_for_hci_ready(
+        self,
+        hci: str,
+        timeout: float,
+        poll_interval: float = 0.3,
+    ) -> bool:
+        """Poll ``hciconfig hciX`` until the adapter is UP RUNNING with a real BDADDR.
+
+        After a USB reset the sysfs entry can appear before the kernel finishes
+        loading the firmware blob (RTL load is 2-4s on some hubs). During that
+        window the adapter is enumerated but VSCs targeting it either bind to a
+        stock-firmware socket or fail. ``UP RUNNING`` plus a non-zero BD Address
+        is the cheapest portable signal that firmware load completed.
+        """
+        deadline = time.monotonic() + max(0.0, timeout)
+        zero_bd = "00:00:00:00:00:00"
+        while True:
+            result = run_cmd(["hciconfig", hci])
+            if result.returncode == 0:
+                stdout = result.stdout or ""
+                bd_match = re.search(r"BD Address:\s+([0-9A-Fa-f:]{17})", stdout)
+                bd = bd_match.group(1) if bd_match else ""
+                if "UP RUNNING" in stdout and bd and bd.upper() != zero_bd:
+                    return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(poll_interval)
+
     def usb_reset_and_wait(
         self,
         timeout: float = 8.0,
         initial_delay: float = 1.5,
         poll_interval: float = 0.5,
+        ready_timeout: float = 6.0,
     ) -> str | None:
-        """Reset the USB device and wait for the adapter to re-enumerate.
+        """Reset the USB device and wait for the adapter to be fully ready.
 
         The kernel may assign a different ``hciX`` index after a USB reset, so
         callers that verify post-reset state (firmware loaded, BDADDR changed)
-        must use the re-enumerated name. This method performs ``usb_reset()``
-        then polls ``find_rtl8761b_hci()`` until the RTL8761B reappears.
+        must use the re-enumerated name. This method performs ``usb_reset()``,
+        polls ``find_rtl8761b_hci()`` until the RTL8761B reappears, then waits
+        for the adapter to reach ``UP RUNNING`` with a valid BDADDR — i.e.
+        firmware load actually completed — before returning.
 
         Args:
-            timeout: Maximum seconds to wait for the adapter to reappear.
-            initial_delay: Seconds to wait before the first discovery attempt
-                (allows the kernel to tear down the old hci node).
+            timeout: Maximum seconds to wait for the sysfs entry to reappear.
+            initial_delay: Seconds before the first discovery attempt (lets the
+                kernel tear down the old hci node).
             poll_interval: Seconds between discovery attempts.
+            ready_timeout: Additional seconds to wait for firmware load to
+                complete after the sysfs entry exists.
 
         Returns:
             The new hci name (possibly different from the pre-reset name), or
-            ``None`` if the USB reset failed or the adapter did not reappear
-            within ``timeout``.
+            ``None`` if the USB reset failed, the adapter did not reappear, or
+            firmware did not finish loading within ``ready_timeout``.
         """
         if not self.usb_reset():
             return None
 
         time.sleep(initial_delay)
         deadline = time.monotonic() + max(0.0, timeout - initial_delay)
+        hci: str | None = None
         while True:
             hci = self.find_rtl8761b_hci()
             if hci is not None:
-                success(f"Adapter re-enumerated as {hci}")
-                return hci
+                break
             if time.monotonic() >= deadline:
                 warning(
                     f"Adapter did not re-enumerate within {timeout:.1f}s — "
@@ -919,6 +952,16 @@ class DarkFirmwareManager:
                 )
                 return None
             time.sleep(poll_interval)
+
+        if not self._wait_for_hci_ready(hci, ready_timeout):
+            warning(
+                f"Adapter re-enumerated as {hci} but firmware did not finish "
+                f"loading within {ready_timeout:.1f}s — VSCs may target stale state"
+            )
+            return None
+
+        success(f"Adapter re-enumerated as {hci} (firmware loaded)")
+        return hci
 
     # ------------------------------------------------------------------
     # Runtime firmware patching (write_memory to modify running firmware)

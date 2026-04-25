@@ -18,13 +18,13 @@ from click.testing import CliRunner
 from blue_tap.interfaces.cli.main import cli
 from blue_tap.framework.contracts.result_schema import (
     validate_run_envelope,
-    VALID_OUTCOMES_BY_FAMILY,
 )
+from blue_tap.framework.registry.families import FAMILY_OUTCOMES, ModuleFamily
 
 TARGET = "AA:BB:CC:DD:EE:FF"
 SESSION_NAME = "flow_fuzzing"
 
-VALID_FUZZING_OUTCOMES = VALID_OUTCOMES_BY_FAMILY["fuzzing"]
+VALID_FUZZING_OUTCOMES = FAMILY_OUTCOMES[ModuleFamily.FUZZING]
 
 
 def _make_runner(tmp_path: Path) -> CliRunner:

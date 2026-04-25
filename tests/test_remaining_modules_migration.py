@@ -34,6 +34,7 @@ from blue_tap.interfaces.reporting.generator import ReportGenerator
 
 def _spoof_envelope(success: bool = True) -> dict:
     return build_spoof_result(
+        module_id="hardware.spoof",
         target="AA:BB:CC:DD:EE:FF",
         adapter="hci0",
         operation="mac",
@@ -52,6 +53,7 @@ def _spoof_envelope(success: bool = True) -> dict:
 
 def _firmware_envelope() -> dict:
     return build_firmware_status_result(
+        module_id="hardware.firmware_status",
         adapter="hci1",
         status={"installed": True, "loaded": True, "hooks": {"h1": True, "h2": True}},
     )
@@ -59,13 +61,14 @@ def _firmware_envelope() -> dict:
 
 def _playbook_envelope() -> dict:
     execution = make_execution(
+        module_id="post_exploitation.playbook",
         kind="phase",
         id="step_1",
         title="scan classic",
         module="playbook",
         protocol="multi",
         execution_status="completed",
-        module_outcome="complete",
+        module_outcome="completed",
         evidence=make_evidence(
             summary="Step 1: scan classic — success",
             confidence="high",
@@ -77,6 +80,7 @@ def _playbook_envelope() -> dict:
         module_data={"step": 1, "command": "scan classic", "status": "success"},
     )
     return build_run_envelope(
+        module_id="post_exploitation.playbook",
         schema="blue_tap.playbook.result",
         module="playbook",
         target="",
@@ -193,6 +197,7 @@ class TestFirmwareAdapterRoundTrip:
         adapter = FirmwareReportAdapter()
         state: dict = {}
         env = build_connection_inspect_result(
+            module_id="hardware.connection_inspect",
             adapter="hci1",
             connections=[
                 {"active": True, "address": "AA:BB:CC:DD:EE:FF",

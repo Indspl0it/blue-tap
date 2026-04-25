@@ -487,6 +487,5 @@ For firmware analysis and debugging, the controller memory is organized as:
 ## What's Next?
 
 - **[Quick Start](quick-start.md)** -- run your first assessment with the hardware you just set up
-- **[IVI Simulator](ivi-simulator.md)** -- create a vulnerable practice target to test against
 - **[Encryption Downgrade Workflow](../workflows/encryption-downgrade.md)** -- a DarkFirmware-powered attack chain
 - **[Hardware Compatibility Reference](../reference/hardware-compatibility.md)** -- full compatibility matrix

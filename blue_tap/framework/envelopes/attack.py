@@ -21,6 +21,7 @@ def build_attack_result(
     operation: str,
     title: str,
     protocol: str,
+    module_id: str,
     module_data: dict[str, Any],
     summary_data: dict[str, Any] | None = None,
     observations: list[str] | None = None,
@@ -29,7 +30,7 @@ def build_attack_result(
     artifacts: list[dict[str, Any]] | None = None,
     started_at: str | None = None,
     completed_at: str | None = None,
-    module_outcome: str = "completed",
+    module_outcome: str = "success",
 ) -> dict[str, Any]:
     started = started_at or now_iso()
     finished = completed_at or now_iso()
@@ -46,6 +47,7 @@ def build_attack_result(
         id=operation,
         title=title,
         module="exploitation",
+        module_id=module_id,
         protocol=protocol,
         execution_status=EXECUTION_COMPLETED,
         module_outcome=module_outcome,
@@ -60,6 +62,7 @@ def build_attack_result(
     return build_run_envelope(
         schema="blue_tap.attack.result",
         module="exploitation",
+        module_id=module_id,
         target=target,
         adapter=adapter,
         operator_context={"operation": operation},

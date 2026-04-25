@@ -452,6 +452,7 @@ class FleetModule:
         return build_run_envelope(
             schema="blue_tap.fleet.result",
             module="assessment.fleet",
+            module_id="assessment.fleet",
             target="nearby",
             adapter=hci,
             operator_context={"device_class": device_class, "duration": duration},

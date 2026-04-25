@@ -193,6 +193,7 @@ class L2capOpenPsmModule:
         return build_run_envelope(
             schema="blue_tap.l2cap_open_psm.result",
             module="assessment",
+            module_id=module_id,
             target=target,
             adapter=adapter,
             summary={
@@ -303,6 +304,7 @@ class ExampleCheckModule:
         return build_run_envelope(
             schema="blue_tap.example_check.result",
             module="assessment",
+            module_id="assessment.example_check",
             target=target,
             adapter=adapter,
             summary={"vulnerable": is_vulnerable, "detail": detail},
@@ -464,7 +466,7 @@ _register_once(ModuleDescriptor(
 ```
 
 !!! note "Required field: `module_id` format"
-    The `module_id` must be `<family>.<name>` in snake_case, and must start with the family value. `"assessment.l2cap_open_psm"` is valid; `"l2cap_open_psm"` or `"Assessment.L2capOpenPsm"` will raise `ValueError`.
+    The `module_id` must match `^[a-z0-9_]+(\.[a-z0-9_]+)+$` (lowercase snake_case, dot-separated, at least one dot — dotted hierarchies like `assessment.cve.knob` are accepted). The first segment must be a registered `ModuleFamily` value. `"assessment.l2cap_open_psm"` is valid; `"l2cap_open_psm"` (no dot) and `"Assessment.L2capOpenPsm"` (uppercase) raise `ValueError` at descriptor construction. The first-segment family check is what `make_execution()` uses to pick the outcome taxonomy.
 
 ---
 
@@ -573,10 +575,10 @@ def l2cap_open_psm(ctx, address: str, hci: str, timeout: int):
     Every module must return a `RunEnvelope`-shaped dict built by `build_run_envelope()` or a family envelope builder. Hand-constructed dicts will miss required fields (`schema_version`, `run_id`, timestamps) and fail validation.
 
 !!! failure "Using the wrong `module_outcome` for the family"
-    Assessment modules must use outcomes from the assessment set (`confirmed`, `inconclusive`, `pairing_required`, `not_applicable`, `not_detected`). Using an exploitation outcome like `success` in an assessment module will fail validation at `make_execution()` time if you pass the `module_id` parameter.
+    Assessment modules must use outcomes from the assessment set (`confirmed`, `not_detected`, `inconclusive`, `pairing_required`, `not_applicable`). Using an exploitation outcome like `success` in an assessment module raises `ValueError` at `make_execution()` time — the family is derived from the `module_id` prefix and validated against `FAMILY_OUTCOMES` (single source of truth in `framework/registry/families.py`).
 
-!!! failure "Forgetting to pass `module_id` to `make_execution()`"
-    Without `module_id`, the outcome validation is skipped. Always pass it so that invalid outcomes are caught at construction time rather than at report time.
+!!! failure "Forgetting to pass `module_id` to `make_execution()` / `build_run_envelope()`"
+    `module_id` is **required** on both builders. Omitting it raises `ValueError` immediately, so this failure mode is now caught the first time the module runs in tests rather than silently shipping a malformed envelope.
 
 !!! failure "Catching exceptions silently"
     Never use bare `except: pass`. If a probe fails, log the error, create an `EXECUTION_ERROR` record with the error message, and continue to the next check. The error must be visible in both logs and the envelope.
@@ -590,7 +592,7 @@ def l2cap_open_psm(ctx, address: str, hci: str, timeout: int):
 
 - [ ] Implementation file at `modules/<family>/<name>.py`
 - [ ] Returns a valid `RunEnvelope` dict
-- [ ] Uses `make_execution()` with the correct `module_id` for outcome validation
+- [ ] Passes `module_id=...` to both `make_execution()` and `build_run_envelope()` (required — omitting raises `ValueError`)
 - [ ] Emits CLI events (`run_started`, `execution_result`, `run_completed`)
 - [ ] Registered via `ModuleDescriptor` in `modules/<family>/__init__.py`
 - [ ] `module_outcome` values are from the family's allowed set

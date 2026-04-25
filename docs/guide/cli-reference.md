@@ -2,8 +2,27 @@
 
 Entry point: `blue-tap = blue_tap.interfaces.cli.main:main`
 
-!!! warning "Root Required"
-    Most active commands require root privileges. Exceptions: `--help`, `doctor`, `demo`, `search`, `info`, `show-options`, `plugins`.
+!!! warning "Root + RTL8761B Required for Live Operations"
+    Most active commands require root privileges (raw HCI sockets) **and**
+    an RTL8761B-based USB dongle (the tool gates live commands behind
+    chipset detection — `No RTL8761B / TP-Link UB500 dongle detected`
+    otherwise). The startup root + chipset gate runs on every invocation
+    that isn't on the explicit skip list below; everything else needs
+    `sudo` and a dongle plugged in, even when the work is purely on-disk.
+
+    The skip list — neither root nor hardware required:
+
+    - `--help`, `--version`
+    - `doctor`
+    - `demo`
+    - `session list`, `session show <name>`
+    - `search`, `info`, `show-options`, `plugins`
+
+    The hardware gate is already loosened for `report <dump-dir>`,
+    `fuzz crashes list / show / export`, `fuzz corpus list / minimize`,
+    `fuzz minimize`, and `run-playbook --list` — but the *root* gate
+    still fires for them, so they currently still need `sudo`. Pruning
+    the root gate to match the hardware gate is on the v2.6.3 backlog.
 
 ---
 
@@ -42,11 +61,32 @@ blue-tap report --format html             # 6. Generate assessment report
 | `--version` | flag | --- | Show version and exit |
 
 !!! tip "Sessions"
-    Every command automatically logs to the active session. Use `-s mytest` to name a session for later reference, or let Blue-Tap auto-generate one. All session data is used by `report` to produce findings.
+    Every command that touches hardware automatically logs to the active
+    session. Inspection commands (`--help`, `doctor`, `demo`, `session
+    list/show`, `report`, `fuzz crashes/corpus/minimize`, `run-playbook
+    --list`, `search`, `info`, `show-options`, `plugins`) do **not**
+    create sessions, so help and inspection never pollute `~/.blue-tap`
+    even when invoked under `sudo` (which the root gate currently still
+    requires for several of them — see the warning above).
+
+    Use `-s mytest` to name a session for later reference, or let
+    Blue-Tap auto-generate one (`blue-tap_YYYYMMDD_HHMMSS`).
 
     ```
     $ sudo blue-tap -s ivi-audit vulnscan 4C:4F:EE:17:3A:89
-    Session: ivi-audit
+      ●  Session: ivi-audit
+    ```
+
+!!! tip "Subcommand --help when TARGET is a positional"
+    `recon`, `exploit`, and `extract` accept TARGET as a positional argument
+    *and* have subcommands. To get help for a specific subcommand without
+    passing TARGET, the dispatcher peeks for a known subcommand name and
+    skips target resolution:
+
+    ```
+    $ blue-tap exploit knob --help        # works — no TARGET, no scan, no banner
+    $ blue-tap recon sdp --help           # works — same shortcut
+    $ blue-tap extract contacts --help    # works — same shortcut
     ```
 
 ---
@@ -505,11 +545,19 @@ blue-tap run-playbook [COMMANDS...]
 | `--playbook` | string | --- | Path to playbook YAML file |
 | `--list` | flag | --- | List available playbooks |
 
-!!! example "Example: Run the IVI assessment playbook"
+!!! example "Example: Run a bundled playbook"
     ```bash
-    blue-tap run-playbook --list                     # See available playbooks
-    sudo blue-tap run-playbook --playbook ivi-full-audit.yaml
+    sudo blue-tap run-playbook --list                       # See available playbooks
+    sudo blue-tap run-playbook --playbook ivi-attack 4C:4F:EE:17:3A:89
     ```
+
+    Bundled playbook names (resolved without a path): `full-assessment`,
+    `ivi-attack`, `lmp-fuzzing`, `passive-recon`, `quick-recon`.
+
+    `--list` itself only walks the on-disk playbook directory (no hardware
+    work), but the startup root + RTL8761B gate still fires before that
+    code runs, so `sudo` and a dongle are required even for `--list` until
+    the v2.6.3 cleanup loosens the root gate.
 
 ---
 

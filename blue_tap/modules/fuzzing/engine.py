@@ -1220,6 +1220,7 @@ class FuzzCampaign:
                 "completed_at": completed_at,
             }
             envelope = build_fuzz_result(
+                module_id=f"fuzzing.{protocol.replace('-', '_')}",
                 target=self.target,
                 adapter="session",
                 command=f"fuzz_{protocol}",
@@ -1632,6 +1633,7 @@ class FuzzCampaign:
                     logger.debug("Field weight extraction failed for %s", proto, exc_info=True)
             protocol_executions.append(
                 build_fuzz_protocol_execution(
+                    module_id=f"fuzzing.{proto.replace('-', '_')}",
                     protocol=proto,
                     packets_sent=ps.packets_sent,
                     crashes=ps.crashes,
@@ -1647,6 +1649,7 @@ class FuzzCampaign:
                 )
             )
         envelope = build_fuzz_campaign_result(
+            module_id="fuzzing.engine",
             target=self.target,
             adapter="session",
             campaign_summary=campaign_summary,

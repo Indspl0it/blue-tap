@@ -118,6 +118,7 @@ def test_load_from_directory_prefers_standardized_session_entries(tmp_path):
 def test_session_log_validates_standardized_envelope_at_write_time(tmp_path):
     session = Session("validation_test", base_dir=str(tmp_path))
     envelope = build_run_envelope(
+        module_id="exploitation.knob",
         schema="blue_tap.attack.result",
         module="exploitation",
         target="AA:BB:CC:DD:EE:FF",
@@ -126,6 +127,7 @@ def test_session_log_validates_standardized_envelope_at_write_time(tmp_path):
         summary={"operation": "knob"},
         executions=[
             make_execution(
+                module_id="exploitation.knob",
                 kind="check",
                 id="knob_probe",
                 title="KNOB Probe",
@@ -150,6 +152,7 @@ def test_session_log_validates_standardized_envelope_at_write_time(tmp_path):
 def test_generate_json_keeps_top_level_fuzzing_for_single_protocol_runs(tmp_path):
     report = ReportGenerator()
     envelope = build_run_envelope(
+        module_id="discovery.scanner",
         schema="blue_tap.fuzz.result",
         module="fuzzing",
         target="AA:BB:CC:DD:EE:FF",

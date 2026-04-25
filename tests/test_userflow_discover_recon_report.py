@@ -23,12 +23,9 @@ from blue_tap.framework.contracts.result_schema import validate_run_envelope
 TARGET = "AA:BB:CC:DD:EE:FF"
 SESSION_NAME = "flow_discover_recon_report"
 
-_SCAN_RESULT = {
-    "status": "completed",
-    "devices": [
-        {"address": TARGET, "name": "Test Device", "type": "classic", "rssi": -60},
-    ],
-}
+_SCAN_RESULT = [
+    {"address": TARGET, "name": "Test Device", "type": "classic", "rssi": -60},
+]
 
 _SDP_RESULT = {
     "status": "completed",
@@ -67,7 +64,7 @@ def test_discover_recon_report_flow(tmp_path):
     runner = _make_runner(tmp_path)
 
     with (
-        patch("blue_tap.hardware.scanner.scan_all_result", return_value=_SCAN_RESULT),
+        patch("blue_tap.hardware.scanner.scan_all", return_value=_SCAN_RESULT),
         patch("blue_tap.modules.reconnaissance.sdp.browse_services_detailed", return_value=_SDP_RESULT),
         patch("blue_tap.modules.reconnaissance.gatt.enumerate_services_detailed_sync", return_value=_GATT_RESULT),
         patch("blue_tap.modules.reconnaissance.fingerprint.fingerprint_device", return_value=_FINGERPRINT_RESULT),

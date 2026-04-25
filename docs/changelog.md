@@ -5,6 +5,44 @@ All notable changes to Blue-Tap are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed — Framework contracts
+
+- **`module_id` is now mandatory on `make_execution()` and `build_run_envelope()`** — both builders validate the id against `^[a-z0-9_]+(\.[a-z0-9_]+)+$` and raise `ValueError` at construction if the id is missing, malformed, or has an unknown family prefix. The earlier "skip outcome validation when `module_id` isn't supplied" backward-compat path is gone, so misshapen envelopes can no longer reach disk.
+- **`FAMILY_OUTCOMES` is the single source of truth.** The redundant `VALID_OUTCOMES_BY_FAMILY` dict in `framework/contracts/result_schema.py` was removed; all outcome validation now goes through `framework/registry/families.py → FAMILY_OUTCOMES`. An unknown family string raises `ValueError` instead of silently no-opping.
+- **New `HARDWARE` outcome family** added to `ModuleFamily` for adapter and firmware envelopes (`hardware.adapter_up`, `hardware.firmware_status`, `hardware.firmware_operation`, etc.). Allowed outcomes: `completed`, `installed`, `hooks_active`, `hooks_partial`, `not_loaded`, `prerequisite_missing`, `spoofed`, `rejected`, `restored`, `method_unavailable`, `not_applicable`. Note: `hardware` is an envelope-only family — there is no `modules/hardware/` tree.
+- **Per-module `module_id` migration.** Every envelope builder in `framework/envelopes/` (attack/audio/data/firmware/fuzz/recon/scan/spoof) now requires `module_id` from its caller. CLI-side adapter operations migrated from the legacy `module="general"` to typed ids like `hardware.adapter_up`, `hardware.adapter_reset`, `hardware.adapter_set_name`, `hardware.firmware_status`, `hardware.firmware_operation`. The DoS framework's status-to-outcome mapping was refactored from two parallel dicts into a single `_dos_canonical_pair()` function.
+
+### Fixed — Hardware
+
+- **`usb_reset_and_wait()` now waits for firmware load to complete.** After USB reset the kernel can publish the new `hciX` sysfs entry several seconds before the RTL firmware blob finishes loading; VSCs issued in that window bind to stale state. The new `_wait_for_hci_ready()` polls `hciconfig` until the adapter is `UP RUNNING` with a non-zero BDADDR before returning. Default `ready_timeout=6.0s` on top of the existing re-enumeration timeout.
+- **`HCIVSCSocket.read_memory()` honours the requested `size`.** The RTL8761B firmware always returns a 4-byte word for VSC `0xFC61`; the wrapper now slices the response to the caller's requested 1–4 bytes (with a `ValueError` for out-of-range sizes) instead of always returning four. This keeps sub-word reads correct at addresses near the end of a memory range.
+
+### Fixed — Sessions
+
+- **Atomic write hardened against `SIGKILL` debris.** On Linux `Session.log_command()` now writes through an `O_TMPFILE` inode that the kernel reaps on process death — a `SIGKILL` mid-write leaves no orphan tempfile on disk. The unnamed inode is materialised via `link()` + `os.replace()` in a microsecond-scale window. Non-Linux platforms (and filesystems that refuse `O_TMPFILE`/`/proc` linkat — 9p, some FUSE, some NFS) fall back to a per-PID named tempfile (`<file>.tmp.<pid>`), so concurrent writers can't clobber each other's tempfiles. Parent-directory `fsync()` after rename guarantees the directory entry survives a power loss right after `os.replace()` returns.
+
+### Fixed — CLI usability
+
+- **Sub-help dispatcher** — `blue-tap recon sdp --help`, `blue-tap exploit knob --help`, and `blue-tap extract contacts --help` now show the subcommand's help instead of the parent's. The new `TargetSubcommandGroup` peeks at args before Click parses and injects an empty `TARGET` placeholder when a bare positional matches a registered subcommand name. Exit code 0 instead of 255.
+- **`--help` no longer creates sessions** — `~/.blue-tap/sessions/` (or `./sessions/`) used to accumulate one zero-command directory per `--help` invocation. Help / inspection commands are now session-free.
+- **Privilege + hardware gates moved into the Click callback** — Click now resolves the subcommand and validates required arguments *before* the root or RTL8761B gates fire, so `blue-tap garbage` returns Click's native `No such command 'garbage'` (exit 2) instead of the misleading "requires root" message.
+- **`session list / show` no longer requires root** — listing/inspecting on-disk sessions is pure file I/O. (Verified end-to-end without `sudo`.)
+- **RTL8761B (hardware) gate scope tightened** — `report <dump-dir>`, `fuzz crashes list / show / export`, `fuzz corpus list / minimize`, `fuzz minimize`, and `run-playbook --list` now skip the chipset check (they don't touch hardware). The *root* gate still fires for these paths in this release — they remain `sudo`-only — and pruning that root gate to match the hardware gate is tracked for v2.6.3. The session-only paths (`session list / show`) skip both gates today.
+- **`report` returns non-zero on error** — the no-session path was returning exit code 0 despite printing `✖ No session active and no dump directory specified`. Same fix applied to `session show <missing>` and the `run-playbook` error paths.
+- **`doctor` no longer says "Environment ready" when no adapter is present** — split verdicts: `Environment ready` (tools + adapter), `partially ready` (limitations reported), or `NOT ready` (no adapter).
+- **Banner suppressed for `--help` invocations** — was showing the ASCII banner and module-load count even on help-only calls.
+- **`run-playbook` listed in the top-level help** — was hidden, now visible under the *Automation* group.
+- **`scan classic` corrected to `discover classic`** in `run-playbook` help examples (the `scan` command was renamed during the CLI rework but the docs lagged).
+- **`-v / --verbose` no longer reports `INTEGER RANGE`** as its parameter type — clarified as a count flag.
+
+### Tests
+
+- Smoke matrix: 21 invocations covering version/help/doctor/session/report/fuzz/discover/exploit/auto/spoof — all pass with correct exit codes (0 for success, 1 for runtime failure, 2 for invalid command). Zero crashes across edge-case sweep.
+
+---
+
 ## [2.6.2] - 2026-04-17
 
 ### Summary

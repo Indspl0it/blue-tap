@@ -24,6 +24,7 @@ def _make_spoof_envelope(operation="mac", success=True):
         "error": "" if success else "hardware rejected",
     }
     return build_spoof_result(
+        module_id="hardware.spoof",
         target="AA:BB:CC:DD:EE:FF",
         adapter="hci0",
         operation=operation,
@@ -76,6 +77,7 @@ def test_spoof_restore_outcome():
         "error": "",
     }
     env = build_spoof_result(
+        module_id="hardware.spoof",
         target="11:22:33:44:55:66", adapter="hci0",
         operation="restore", result=result,
     )

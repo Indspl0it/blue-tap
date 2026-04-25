@@ -293,7 +293,7 @@ VULN_FINDINGS = [
     {
         "name": "HFP AT Command Injection",
         "severity": "MEDIUM",
-        "status": "probable",
+        "status": "inconclusive",
         "cve": None,
         "description": "Hands-Free Profile accepts long AT command strings without proper "
                        "length validation. May allow buffer overflow on embedded parser.",

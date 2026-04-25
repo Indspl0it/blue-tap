@@ -32,7 +32,7 @@ click.rich_click.COMMAND_GROUPS = {
         {"name": "Blue-Tap Workflow", "commands": [
             "discover", "recon", "vulnscan", "exploit", "dos", "extract", "fuzz", "report",
         ]},
-        {"name": "Automation", "commands": ["auto", "fleet"]},
+        {"name": "Automation", "commands": ["auto", "fleet", "run-playbook"]},
         {"name": "Utilities", "commands": ["adapter", "session", "doctor", "spoof"]},
     ],
     "blue-tap discover": [
@@ -68,12 +68,61 @@ click.rich_click.COMMAND_GROUPS = {
 }
 
 
+_NO_ROOT_INVOKED = {
+    "session", "doctor", "demo",
+    "search", "info", "show-options", "plugins",
+}
+
+# Subcommands of these groups that don't touch hardware.
+_NO_HW_SUBCOMMANDS = {
+    "fuzz": {"crashes", "corpus", "minimize"},
+}
+
+_NO_HW_INVOKED = {
+    "session", "doctor", "demo", "report",
+    "search", "info", "show-options", "plugins",
+}
+
+
+def _help_in_argv() -> bool:
+    return any(a in ("--help", "-h") for a in sys.argv[1:])
+
+
+def _subcommand_needs_hw(invoked: str) -> bool:
+    """Return False if the invoked subcommand path doesn't need Bluetooth hardware."""
+    if invoked in _NO_HW_INVOKED:
+        return False
+    if invoked == "run-playbook" and "--list" in sys.argv:
+        return False
+    sub_skip = _NO_HW_SUBCOMMANDS.get(invoked)
+    if sub_skip:
+        # Find the second positional after the group name (skipping global flags).
+        positional: list[str] = []
+        skip_next = False
+        global_value_flags = {"-s", "--session"}
+        for token in sys.argv[1:]:
+            if skip_next:
+                skip_next = False
+                continue
+            if token in global_value_flags:
+                skip_next = True
+                continue
+            if token.startswith("-"):
+                continue
+            positional.append(token)
+        if len(positional) >= 2 and positional[1] in sub_skip:
+            return False
+    return True
+
+
 @click.group(cls=LoggedGroup)
 @click.version_option(version=__version__)
-@click.option("-v", "--verbose", count=True, help="Verbosity: -v verbose, -vv debug")
+@click.option("-v", "--verbose", count=True, metavar="",
+              help="Increase verbosity: pass -v for verbose, -vv for debug.")
 @click.option("-s", "--session", "session_name", default=None,
               help="Session name (default: auto-generated). Use to resume a session.")
-def cli(verbose, session_name):
+@click.pass_context
+def cli(ctx, verbose, session_name):
     """Blue-Tap: Bluetooth Security Toolkit for Automotive & IoT.
 
     \b
@@ -94,11 +143,36 @@ def cli(verbose, session_name):
     from blue_tap.utils.output import set_verbosity
     set_verbosity(verbose)
 
-    # Skip session for read-only commands
-    ctx = click.get_current_context()
     invoked = ctx.invoked_subcommand or ""
-
     if not invoked:
+        return
+
+    # ``--help`` / ``-h`` anywhere on the line means the user wants help text,
+    # not to actually run anything — bypass privilege/hardware gates and let
+    # Click's help mechanism take over.
+    if _help_in_argv():
+        return
+
+    # Root + RTL gates run AFTER Click has resolved the subcommand, so an
+    # unknown command name or missing required argument surfaces with Click's
+    # native error before we ever reach a privilege/hardware check.
+    if invoked not in _NO_ROOT_INVOKED and not _check_privileges():
+        error(
+            "Blue-Tap requires root for Bluetooth operations.\n"
+            "\n"
+            "  Run with: [bold]sudo blue-tap[/bold] <command>\n"
+            "\n"
+            "  Or: sudo setcap cap_net_raw+eip $(which python3)\n"
+            "\n"
+            "  [dim]No root needed: --help, doctor, session, search, plugins[/dim]"
+        )
+        sys.exit(1)
+
+    if _subcommand_needs_hw(invoked):
+        _check_rtl_dongle()
+
+    # Session creation — skip for read-only and help-only invocations.
+    if _help_in_argv():
         return
 
     _NO_SESSION_COMMANDS = {
@@ -107,11 +181,13 @@ def cli(verbose, session_name):
     }
     if not session_name and invoked in _NO_SESSION_COMMANDS:
         return
-    # run-playbook --list doesn't run anything, no session needed
     if invoked == "run-playbook" and "--list" in sys.argv:
         return
+    # Read-only subcommands (e.g. ``fuzz crashes list``) don't need a session
+    # either — they only inspect prior on-disk artefacts.
+    if not session_name and not _subcommand_needs_hw(invoked):
+        return
 
-    # Create session for active commands
     from blue_tap.framework.sessions.store import Session, set_session
     from datetime import datetime
     if not session_name:
@@ -188,8 +264,9 @@ cli.add_command(show_options_cmd, "show-options")
 cli.add_command(plugins)
 cli.add_command(run_playbook_cmd)
 
-# Mark hidden
-for _name in ("run", "search", "info", "show-options", "plugins", "run-playbook"):
+# Mark hidden — power-user commands stay off the main help.
+# ``run-playbook`` is a real workflow command and is intentionally listed.
+for _name in ("run", "search", "info", "show-options", "plugins"):
     _cmd = cli.commands.get(_name)
     if _cmd:
         _cmd.hidden = True
@@ -210,12 +287,6 @@ def demo_cmd(output):
 def _check_privileges() -> bool:
     """Check if running with root/sudo."""
     return os.geteuid() == 0
-
-
-_NO_ROOT_COMMANDS = {
-    "--help", "-h", "--version", "demo", "doctor",
-    "search", "info", "show-options", "plugins",
-}
 
 
 def _check_rtl_dongle() -> None:
@@ -329,22 +400,30 @@ def _check_rtl_dongle() -> None:
 
 
 def main():
-    """Entry point — shows banner and loads modules."""
-    _first_arg = sys.argv[1] if len(sys.argv) > 1 else ""
+    """Entry point — shows banner, loads modules, and dispatches to Click.
+
+    Privilege/hardware gates have moved inside the :func:`cli` callback so
+    that Click's argument parsing (unknown command, missing required arg)
+    surfaces with its native error message before any of those gates fire.
+    """
     _SILENT_COMMANDS = {
         "search", "info", "show-options", "plugins",
         "adapter", "session", "report", "doctor",
     }
+    _first_arg = sys.argv[1] if len(sys.argv) > 1 else ""
+    _is_help_or_version = (
+        not sys.argv[1:] or
+        any(a in ("--help", "-h", "--version") for a in sys.argv[1:])
+    )
     _is_silent = (
+        _is_help_or_version or
         _first_arg in _SILENT_COMMANDS or
-        _first_arg in {"--version", "--help", "-h"} or
         (_first_arg == "run-playbook" and "--list" in sys.argv)
     )
 
     if not _is_silent:
         banner()
 
-    # Load modules
     try:
         from blue_tap.framework.module import autoload_builtin_modules
         from blue_tap.framework.module.loader import get_plugin_registry
@@ -369,41 +448,6 @@ def main():
 
     except Exception as e:
         warning(f"Module loading failed: {e}")
-
-    # Root check
-    args_lower = {a.lower().lstrip("-") for a in sys.argv[1:]}
-    raw_args = set(sys.argv[1:])
-
-    skip_root = (
-        not sys.argv[1:] or
-        raw_args & {"--help", "-h", "--version"} or
-        args_lower & {"help", "version", "demo", "doctor",
-                      "search", "info", "show-options", "plugins"}
-    )
-
-    if not skip_root and not _check_privileges():
-        error(
-            "Blue-Tap requires root for Bluetooth operations.\n"
-            "\n"
-            "  Run with: [bold]sudo blue-tap[/bold] <command>\n"
-            "\n"
-            "  Or: sudo setcap cap_net_raw+eip $(which python3)\n"
-            "\n"
-            "  [dim]No root needed: --help, doctor, search, plugins[/dim]"
-        )
-        sys.exit(1)
-
-    # RTL8761B dongle detection
-    _hw_skip_commands = {
-        "session", "report", "plugins", "doctor",
-        "search", "info", "show-options",
-    }
-    _skip_hw = (
-        _first_arg in _hw_skip_commands or
-        (_first_arg == "run-playbook" and "--list" in sys.argv)
-    )
-    if not skip_root and not _skip_hw:
-        _check_rtl_dongle()
 
     cli()
 

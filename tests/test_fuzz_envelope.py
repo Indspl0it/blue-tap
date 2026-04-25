@@ -69,6 +69,7 @@ def test_fuzz_run_id_is_unique():
 
 def test_single_protocol_envelope_v2():
     envelope = build_fuzz_result(
+        module_id="fuzzing.engine",
         target="AA:BB:CC:DD:EE:FF",
         adapter="hci0",
         command="fuzz_sdp",
@@ -82,6 +83,7 @@ def test_single_protocol_envelope_v2():
 
 def test_single_protocol_execution_record():
     envelope = build_fuzz_result(
+        module_id="fuzzing.engine",
         target="AA:BB:CC:DD:EE:FF",
         adapter="hci0",
         command="fuzz_sdp",
@@ -97,6 +99,7 @@ def test_single_protocol_execution_record():
 
 def test_single_protocol_no_crashes_outcome():
     envelope = build_fuzz_result(
+        module_id="fuzzing.engine",
         target="AA:BB:CC:DD:EE:FF",
         adapter="hci0",
         command="fuzz_att",
@@ -110,6 +113,7 @@ def test_single_protocol_no_crashes_outcome():
 def test_single_protocol_run_id_passed_through():
     rid = "fuzz-test-1234"
     envelope = build_fuzz_result(
+        module_id="fuzzing.engine",
         target="AA:BB:CC:DD:EE:FF",
         adapter="hci0",
         command="fuzz_sdp",
@@ -122,6 +126,7 @@ def test_single_protocol_run_id_passed_through():
 
 def test_single_protocol_validates():
     envelope = build_fuzz_result(
+        module_id="fuzzing.engine",
         target="AA:BB:CC:DD:EE:FF",
         adapter="hci0",
         command="fuzz_sdp",
@@ -138,6 +143,7 @@ def test_single_protocol_validates():
 
 def test_protocol_execution_has_required_fields():
     rec = build_fuzz_protocol_execution(
+        module_id="fuzzing.engine",
         protocol="sdp",
         packets_sent=1000,
         crashes=3,
@@ -155,6 +161,7 @@ def test_protocol_execution_has_required_fields():
 
 def test_protocol_execution_crash_outcome():
     rec = build_fuzz_protocol_execution(
+        module_id="fuzzing.engine",
         protocol="ble-att", packets_sent=500, crashes=1, errors=0,
     )
     assert rec["module_outcome"] == "crash_detected"
@@ -162,6 +169,7 @@ def test_protocol_execution_crash_outcome():
 
 def test_protocol_execution_completed_outcome():
     rec = build_fuzz_protocol_execution(
+        module_id="fuzzing.engine",
         protocol="rfcomm", packets_sent=500, crashes=0, errors=0,
     )
     assert rec["module_outcome"] == "completed"
@@ -169,6 +177,7 @@ def test_protocol_execution_completed_outcome():
 
 def test_protocol_execution_evidence_observations():
     rec = build_fuzz_protocol_execution(
+        module_id="fuzzing.engine",
         protocol="sdp",
         packets_sent=1000,
         crashes=2,
@@ -186,6 +195,7 @@ def test_protocol_execution_evidence_observations():
 def test_protocol_execution_module_outcome_in_registry():
     for crashes in (0, 3):
         rec = build_fuzz_protocol_execution(
+            module_id="fuzzing.engine",
             protocol="sdp", packets_sent=100, crashes=crashes, errors=0,
         )
         assert rec["module_outcome"] in FUZZ_MODULE_OUTCOMES
@@ -197,6 +207,7 @@ def test_protocol_execution_module_outcome_in_registry():
 
 def test_campaign_envelope_v2():
     envelope = build_fuzz_campaign_result(
+        module_id="fuzzing.campaign",
         target="AA:BB:CC:DD:EE:FF",
         adapter="session",
         campaign_summary={
@@ -217,10 +228,11 @@ def test_campaign_envelope_v2():
 
 def test_campaign_envelope_has_per_protocol_executions():
     proto_execs = [
-        build_fuzz_protocol_execution(protocol="sdp", packets_sent=3000, crashes=2, errors=0),
-        build_fuzz_protocol_execution(protocol="ble-att", packets_sent=2000, crashes=1, errors=0),
+        build_fuzz_protocol_execution(module_id="fuzzing.engine", protocol="sdp", packets_sent=3000, crashes=2, errors=0),
+        build_fuzz_protocol_execution(module_id="fuzzing.engine", protocol="ble-att", packets_sent=2000, crashes=1, errors=0),
     ]
     envelope = build_fuzz_campaign_result(
+        module_id="fuzzing.campaign",
         target="AA:BB:CC:DD:EE:FF",
         adapter="session",
         campaign_summary={
@@ -242,6 +254,7 @@ def test_campaign_envelope_has_per_protocol_executions():
 
 def test_campaign_envelope_validates():
     envelope = build_fuzz_campaign_result(
+        module_id="fuzzing.campaign",
         target="AA:BB:CC:DD:EE:FF",
         adapter="session",
         campaign_summary={
@@ -313,6 +326,7 @@ def test_single_protocol_transport_connect_failure_is_finalized(tmp_path, monkey
 
 def test_operation_envelope_v2():
     envelope = build_fuzz_operation_result(
+        module_id="fuzzing.operation",
         target="AA:BB:CC:DD:EE:FF",
         adapter="session",
         operation="corpus_generate",
@@ -325,6 +339,7 @@ def test_operation_envelope_v2():
 
 def test_operation_envelope_validates():
     envelope = build_fuzz_operation_result(
+        module_id="fuzzing.operation",
         target="AA:BB:CC:DD:EE:FF",
         adapter="session",
         operation="minimize",
@@ -341,15 +356,18 @@ def test_operation_envelope_validates():
 def test_all_envelopes_json_serializable():
     envelopes = [
         build_fuzz_result(
+            module_id="fuzzing.engine",
             target="AA:BB:CC:DD:EE:FF", adapter="hci0", command="fuzz_sdp",
             protocol="sdp", result={"sent": 10, "crashes": 0, "errors": 0, "elapsed": 1.0},
         ),
         build_fuzz_campaign_result(
+            module_id="fuzzing.campaign",
             target="AA:BB:CC:DD:EE:FF", adapter="session",
             campaign_summary={"protocols": ["sdp"], "packets_sent": 10, "crashes": 0, "runtime_seconds": 1.0},
             crashes=[], session_fuzz_dir="/tmp/fake",
         ),
         build_fuzz_operation_result(
+            module_id="fuzzing.operation",
             target="AA:BB:CC:DD:EE:FF", adapter="session",
             operation="test", title="Test operation",
         ),

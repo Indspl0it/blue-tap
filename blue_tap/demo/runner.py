@@ -480,6 +480,7 @@ def run_demo(output_dir: str = "demo_output"):
 
         report.add_run_envelope(
             build_attack_result(
+                module_id="exploitation.attack",
                 target=M.IVI_ADDRESS,
                 adapter=M.IVI_HCI,
                 operation="demo_attack_phases",
@@ -498,6 +499,7 @@ def run_demo(output_dir: str = "demo_output"):
 
         report.add_run_envelope(
             build_data_result(
+                module_id="post_exploitation.data",
                 target=M.IVI_ADDRESS,
                 adapter=M.IVI_HCI,
                 family="pbap",
@@ -514,6 +516,7 @@ def run_demo(output_dir: str = "demo_output"):
 
         report.add_run_envelope(
             build_data_result(
+                module_id="post_exploitation.data",
                 target=M.IVI_ADDRESS,
                 adapter=M.IVI_HCI,
                 family="map",

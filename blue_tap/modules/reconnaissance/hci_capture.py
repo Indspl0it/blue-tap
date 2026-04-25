@@ -483,11 +483,13 @@ class HciCaptureModule(Module):
         return build_run_envelope(
             schema=self.schema_prefix,
             module=self.module_id,
+            module_id=self.module_id,
             target=target,
             adapter=hci,
             started_at=started_at,
             executions=[
                 make_execution(
+                    module_id="reconnaissance.hci_capture",
                     execution_id="hci_capture",
                     kind="collector",
                     id="hci_capture",

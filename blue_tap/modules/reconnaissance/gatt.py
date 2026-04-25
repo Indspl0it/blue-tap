@@ -593,11 +593,13 @@ class GattEnumModule(Module):
         return build_run_envelope(
             schema=self.schema_prefix,
             module=self.module_id,
+            module_id=self.module_id,
             target=target,
             adapter=hci_opt or "",
             started_at=started_at,
             executions=[
                 make_execution(
+                    module_id="reconnaissance.gatt",
                     execution_id="gatt_enum",
                     kind="collector",
                     id="gatt_enum",

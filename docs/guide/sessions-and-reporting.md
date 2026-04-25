@@ -127,18 +127,23 @@ Real assessments often span multiple days. Blue-Tap creates a new session for ea
 **Generate a combined report.** The `report` command can aggregate multiple sessions:
 
 ```bash
-# Report from the current session (default)
-blue-tap report --format html
+# Report from the current session — only valid when a session is active
+# (e.g. when invoked from a playbook step). Without `-s`, plain
+# `blue-tap report` exits 1 with: ✖ No session active and no dump
+# directory specified.
+sudo blue-tap report --format html
 
 # Report from a specific named session — pass the session name to the
 # global -s flag, then call `report` (the report command itself has no
 # --session flag).
-blue-tap -s blue-tap_20260416_143022 report --format html
+sudo blue-tap -s blue-tap_20260416_143022 report --format html
 
 # Report from a directory of session artefacts (e.g. an exported
 # session bundle). The positional argument points the report at any
-# directory of run-envelope JSON files.
-blue-tap report ./sessions/blue-tap_20260416_143022 --format html
+# directory of run-envelope JSON files. The hardware (RTL8761B) gate
+# is skipped for this form, but the startup root gate still fires —
+# `sudo` is required even for offline regeneration.
+sudo blue-tap report ./sessions/blue-tap_20260416_143022 --format html
 ```
 
 !!! tip "Multi-Day Assessments"
@@ -154,15 +159,17 @@ blue-tap session list
 ```
 $ blue-tap session list
 
-  Sessions (./sessions/):
-  ──────────────────────────────────────────────────────────────
-  Session ID                   Created           Commands  Targets
-  ──────────────────────────────────────────────────────────────
-  blue-tap_20260416_143022     2026-04-16 14:30  8         1
-  blue-tap_20260415_091500     2026-04-15 09:15  12        3
-  blue-tap_20260414_160000     2026-04-14 16:00  5         1
-  ──────────────────────────────────────────────────────────────
+Sessions  3 total
+──────────────────────────────────────────────────────────────────────
+  blue-tap_20260416_143022     8 cmds  2026-04-16 14:30  AA:BB:CC:DD:EE:FF
+  blue-tap_20260415_091500    12 cmds  2026-04-15 09:15
+  blue-tap_20260414_160000     5 cmds  2026-04-14 16:00  AA:BB:CC:DD:EE:FF
 ```
+
+`blue-tap session list` does **not** require root — it's a directory walk
+against the sessions root. A session is identified by its directory name;
+the displayed columns are command count, ISO timestamp (truncated), and the
+first target seen during the session.
 
 ```bash
 # Show session details
@@ -170,29 +177,26 @@ blue-tap session show blue-tap_20260416_143022
 ```
 
 ```
-$ blue-tap session show my-assessment
+$ blue-tap session show blue-tap_20260425_191205
 
-  Session: my-assessment
-  Created: 2026-04-16 14:30:22
-  Updated: 2026-04-16 16:45:10
-  Adapter: hci0
+Session Details
+──────────────────────────────────────────────────
+  Name                blue-tap_20260425_191205
+  Created             2026-04-25T13:42:05.229784+00:00
+  Last Updated        2026-04-25T13:42:22.845143+00:00
+  Commands Run        5
+  Targets             AA:BB:CC:DD:EE:FF
+  Categories          fuzz
+  Files Saved         0
+  Directory           ./sessions/blue-tap_20260425_191205
 
-  Targets:
-    AA:BB:CC:DD:EE:FF
 
-  Commands (8):
-    #  Category  Command                  Target             File
-    1  scan      scan_classic             --                 001_scan_classic.json
-    2  recon     recon_sdp                AA:BB:CC:DD:EE:FF  002_recon_sdp.json
-    3  vuln      vulnscan                 AA:BB:CC:DD:EE:FF  003_vulnscan.json
-    4  extract   extract_contacts         AA:BB:CC:DD:EE:FF  004_extract_contacts.json
-    5  extract   extract_messages         AA:BB:CC:DD:EE:FF  005_extract_messages.json
-    6  dos       dos                      AA:BB:CC:DD:EE:FF  006_dos.json
-    7  fuzz      fuzz_ble-att             AA:BB:CC:DD:EE:FF  007_fuzz_ble-att.json
-    8  report    report                   --                 ---
-
-  Files:
-    fuzz/crashes.db                      8 KB    fuzz
+Command Log:
+  2026-04-25T13:42:20  fuzz_at_deep  (fuzz)  AA:BB:CC:DD:EE:FF
+  2026-04-25T13:42:20  fuzz_sdp  (fuzz)  AA:BB:CC:DD:EE:FF
+  2026-04-25T13:42:20  fuzz_sdp  (fuzz)  AA:BB:CC:DD:EE:FF
+  2026-04-25T13:42:22  fuzz_sdp  (fuzz)  AA:BB:CC:DD:EE:FF
+  2026-04-25T13:42:22  fuzz_l2cap-sig  (fuzz)  AA:BB:CC:DD:EE:FF
 ```
 
 ---

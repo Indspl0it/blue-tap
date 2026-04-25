@@ -53,6 +53,7 @@ def _collector_execution(
     adapter: str,
     passive: bool,
     metadata: dict[str, Any],
+    module_id: str,
 ) -> dict:
     evidence = make_evidence(
         summary=f"{device_count} device(s) observed by {title.lower()}",
@@ -65,6 +66,7 @@ def _collector_execution(
         id=collector_id,
         title=title,
         module="discovery",
+        module_id=module_id,
         protocol="Discovery",
         execution_status=EXECUTION_COMPLETED,
         module_outcome="observed",
@@ -85,6 +87,7 @@ def build_scan_result(
     devices: list[dict],
     collectors: list[dict],
     started_at: str,
+    module_id: str,
     completed_at: str | None = None,
     run_id: str | None = None,
 ) -> dict:
@@ -100,12 +103,14 @@ def build_scan_result(
             adapter=str(collector.get("metadata", {}).get("adapter", adapter)),
             passive=bool(collector.get("metadata", {}).get("passive", passive)),
             metadata=collector.get("metadata", {}),
+            module_id=module_id,
         )
         for collector in collectors
     ]
     return build_run_envelope(
         schema="blue_tap.scan.result",
         module="discovery",
+        module_id=module_id,
         target="range_scan" if scan_mode != "all" else "combined_range_scan",
         adapter=adapter,
         operator_context={

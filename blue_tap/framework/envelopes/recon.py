@@ -28,6 +28,7 @@ def build_recon_result(
     title: str,
     protocol: str,
     entries: list[dict],
+    module_id: str,
     fingerprint: dict[str, Any] | None = None,
     module_data_extra: dict[str, Any] | None = None,
     operator_context: dict[str, Any] | None = None,
@@ -70,6 +71,7 @@ def build_recon_result(
         title=title,
         protocol=protocol,
         entries=entries,
+        module_id=module_id,
         fingerprint=fingerprint,
         module_data_extra=extra,
         observations=observations,
@@ -86,6 +88,7 @@ def build_recon_result(
     return build_run_envelope(
         schema="blue_tap.recon.result",
         module="reconnaissance",
+        module_id=module_id,
         target=target,
         adapter=adapter,
         operator_context={"operation": operation, **dict(operator_context or {})},
@@ -113,6 +116,7 @@ def build_recon_execution(
     title: str,
     protocol: str,
     entries: list[dict],
+    module_id: str,
     fingerprint: dict[str, Any] | None = None,
     module_data_extra: dict[str, Any] | None = None,
     observations: list[str] | None = None,
@@ -125,7 +129,6 @@ def build_recon_execution(
     started_at: str,
     completed_at: str | None = None,
     execution_id: str | None = None,
-    module_id: str | None = None,
 ) -> dict[str, Any]:
     finished = completed_at or now_iso()
     extra = dict(module_data_extra or {})
@@ -145,7 +148,7 @@ def build_recon_execution(
         id=operation,
         title=title,
         module="reconnaissance",
-        module_id=module_id or f"reconnaissance.{operation}",
+        module_id=module_id,
         protocol=protocol,
         execution_status=execution_status,
         module_outcome=module_outcome,

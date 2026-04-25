@@ -363,7 +363,7 @@ When using the `module` key in YAML steps, the following mapping applies:
 | `assessment.vuln_scanner` | `vulnscan` |
 | `assessment.fleet` | `fleet` |
 | `reconnaissance.campaign` | `recon auto` |
-| `discovery.scanner` | `scan all` |
+| `discovery.scanner` | `discover all` |
 
 !!! info "Module vs Command Steps"
     Use `command` for standard CLI invocations. Use `module` when you need to pass structured arguments directly to a registered module, bypassing CLI argument parsing.

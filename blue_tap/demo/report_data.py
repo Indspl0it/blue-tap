@@ -21,6 +21,7 @@ def build_demo_scan_result(*, devices: list[dict], adapter: str, duration_reques
         }
     ]
     return build_scan_result(
+        module_id="discovery.scanner",
         scan_mode="all",
         adapter=adapter,
         duration_requested=duration_requested,
@@ -64,6 +65,7 @@ def build_demo_vuln_result(*, target: str, adapter: str, findings: list[dict]) -
 
 def build_demo_recon_result(*, target: str, adapter: str, entries: list[dict]) -> dict:
     return build_recon_result(
+        module_id="reconnaissance.demo_recon",
         target=target,
         adapter=adapter,
         operation="demo_recon_dataset",
@@ -79,6 +81,7 @@ def build_demo_recon_result(*, target: str, adapter: str, entries: list[dict]) -
 
 def build_demo_fingerprint_result(*, target: str, adapter: str, fingerprint: dict) -> dict:
     return build_recon_result(
+        module_id="reconnaissance.demo_fingerprint",
         target=target,
         adapter=adapter,
         operation="demo_fingerprint",
@@ -171,6 +174,7 @@ def build_demo_fuzz_result(*, target: str, adapter: str, fuzz_results: dict) -> 
             }
         )
     return build_fuzz_campaign_result(
+        module_id="fuzzing.engine",
         target=target,
         adapter=adapter,
         campaign_summary=campaign_summary,

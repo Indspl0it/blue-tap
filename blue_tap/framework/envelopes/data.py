@@ -21,6 +21,7 @@ def build_data_result(
     family: str,
     operation: str,
     title: str,
+    module_id: str,
     module_data: dict[str, Any],
     summary_data: dict[str, Any] | None = None,
     observations: list[str] | None = None,
@@ -45,6 +46,7 @@ def build_data_result(
         id=operation,
         title=title,
         module="data",
+        module_id=module_id,
         protocol=family.upper(),
         execution_status=EXECUTION_COMPLETED,
         module_outcome=module_outcome,
@@ -58,6 +60,7 @@ def build_data_result(
     return build_run_envelope(
         schema="blue_tap.data.result",
         module="data",
+        module_id=module_id,
         target=target,
         adapter=adapter,
         operator_context={"family": family, "operation": operation},

@@ -18,13 +18,13 @@ from click.testing import CliRunner
 from blue_tap.interfaces.cli.main import cli
 from blue_tap.framework.contracts.result_schema import (
     validate_run_envelope,
-    VALID_OUTCOMES_BY_FAMILY,
 )
+from blue_tap.framework.registry.families import FAMILY_OUTCOMES, ModuleFamily
 
 TARGET = "AA:BB:CC:DD:EE:FF"
 SESSION_NAME = "flow_dos"
 
-VALID_EXPLOITATION_OUTCOMES = VALID_OUTCOMES_BY_FAMILY["exploitation"]
+VALID_EXPLOITATION_OUTCOMES = FAMILY_OUTCOMES[ModuleFamily.EXPLOITATION]
 
 # The bluefrag check is destructive. Its module_id is exploitation.dos_cve_2020_0022_bluefrag
 BLUEFRAG_MODULE = "exploitation.dos_cve_2020_0022_bluefrag"

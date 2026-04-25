@@ -22,6 +22,7 @@ Session directory structure:
 import json
 import logging
 import os
+import sys
 from datetime import datetime, timezone
 from typing import Any
 
@@ -29,53 +30,106 @@ from blue_tap.framework.contracts.result_schema import looks_like_run_envelope, 
 
 _logger = logging.getLogger(__name__)
 
+_USE_O_TMPFILE = (
+    sys.platform == "linux"
+    and hasattr(os, "O_TMPFILE")
+    and os.path.exists("/proc/self/fd")
+)
+
 
 def _now_iso_utc() -> str:
     """Return the current time as a UTC ISO-8601 string."""
     return datetime.now(timezone.utc).isoformat()
 
 
-def _atomic_write_bytes_or_text(filepath: str, content: str | bytes) -> None:
-    """Write ``content`` to ``filepath`` atomically via tempfile + os.replace.
+def _fsync_dir(directory: str) -> None:
+    """Best-effort fsync of ``directory`` to commit metadata to disk."""
+    if not hasattr(os, "O_DIRECTORY"):
+        return
+    try:
+        dir_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    except OSError:
+        return
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
 
-    The temp file lives in the same directory as the target so the final
-    rename is atomic. After the rename we fsync the parent directory so the
-    rename itself reaches stable storage — without this a power loss between
-    ``os.replace`` returning and the directory entry being flushed can leave
-    the file invisible after reboot. On failure the temp file is best-effort
-    unlinked before the exception propagates, leaving no partial state
-    behind.
+
+def _atomic_write_bytes_or_text(filepath: str, content: str | bytes) -> None:
+    """Write ``content`` to ``filepath`` atomically with no SIGKILL debris.
+
+    On Linux the write goes to an unnamed ``O_TMPFILE`` inode that the kernel
+    reaps on process death, so a SIGKILL during the write phase leaves nothing
+    on disk. The inode is then ``link()``-ed into the directory under a
+    PID-suffixed name and ``os.replace()``-d into the target — that final
+    materialisation window is on the order of microseconds. The parent
+    directory is fsynced after the rename so the entry reaches stable
+    storage even if power is lost immediately after ``os.replace`` returns.
+
+    On non-Linux platforms (Windows, BSD without ``O_TMPFILE``) the fallback
+    path uses a uniquely named per-PID tempfile and the same rename + dir
+    fsync flow. The PID suffix prevents concurrent writers to the same target
+    from clobbering each other's temp files.
     """
     directory = os.path.dirname(filepath) or "."
     os.makedirs(directory, exist_ok=True)
-    tmp_path = f"{filepath}.tmp"
-    mode = "wb" if isinstance(content, bytes) else "w"
-    try:
-        with open(tmp_path, mode) as f:
-            f.write(content)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp_path, filepath)
-        # Durably commit the rename itself to the directory inode. Gated on
-        # O_DIRECTORY availability so platforms without POSIX directory-fd
-        # semantics fall through cleanly.
-        if hasattr(os, "O_DIRECTORY"):
+    body = content.encode() if isinstance(content, str) else content
+    tmp_path = f"{filepath}.tmp.{os.getpid()}"
+
+    if _USE_O_TMPFILE:
+        try:
+            fd = os.open(directory, os.O_TMPFILE | os.O_RDWR, 0o644)
+        except OSError:
+            # Filesystems without O_TMPFILE support (9p WSL mounts, some FUSE
+            # backends, certain NFS configs) raise EOPNOTSUPP/EISDIR/ENOTSUP
+            # at open. Fall through to the named-tmp path.
+            fd = -1
+        if fd >= 0:
             try:
-                dir_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
-            except OSError:
-                pass
-            else:
+                written = 0
+                while written < len(body):
+                    written += os.write(fd, body[written:])
+                os.fsync(fd)
                 try:
-                    os.fsync(dir_fd)
-                finally:
-                    os.close(dir_fd)
+                    os.link(f"/proc/self/fd/{fd}", tmp_path)
+                except OSError:
+                    # Some filesystems refuse the /proc-symlink linkat even
+                    # when O_TMPFILE itself worked. Fall through.
+                    pass
+                else:
+                    try:
+                        os.replace(tmp_path, filepath)
+                    except Exception:
+                        _cleanup_path(tmp_path)
+                        raise
+                    _fsync_dir(directory)
+                    return
+            finally:
+                os.close(fd)
+
+    try:
+        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+        try:
+            written = 0
+            while written < len(body):
+                written += os.write(fd, body[written:])
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp_path, filepath)
+        _fsync_dir(directory)
     except Exception:
-        if os.path.exists(tmp_path):
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
+        _cleanup_path(tmp_path)
         raise
+
+
+def _cleanup_path(path: str) -> None:
+    """Best-effort unlink; never raises."""
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
 
 
 def _atomic_write_json(filepath: str, payload: dict | list) -> None:

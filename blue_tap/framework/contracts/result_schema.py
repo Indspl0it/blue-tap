@@ -3,15 +3,35 @@
 Validation helpers in this module intentionally stay permissive: they verify
 container shape and required metadata without constraining target-derived
 payloads in ``module_evidence`` or other raw evidence fields.
+
+``module_id`` contract
+~~~~~~~~~~~~~~~~~~~~~~
+A ``module_id`` is a ``family.name`` identifier where ``family`` must be a
+valid :class:`ModuleFamily` value. ``make_execution`` and ``build_run_envelope``
+enforce two things at construction:
+
+1. The id matches ``^[a-z0-9_]+(\\.[a-z0-9_]+)+$`` (regex format).
+2. ``module_outcome`` is in ``FAMILY_OUTCOMES[family]`` (outcome belongs to
+   the family derived from the prefix).
+
+The id *should* refer to a registered :class:`ModuleDescriptor` when one
+exists (the runtime registry under ``framework/registry``), but this is not
+enforced at construction time. CLI-emitted envelopes for adapter/firmware
+operations and demo data may use descriptive ids that do not correspond to
+a registered Module class — those callers still observe the family +
+outcome rule.
 """
 
 from __future__ import annotations
 
+import re
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
+
+from blue_tap.framework.registry.families import FAMILY_OUTCOMES, ModuleFamily
 
 
 SCHEMA_VERSION = 2
@@ -23,97 +43,24 @@ EXECUTION_SKIPPED = "skipped"
 EXECUTION_TIMEOUT = "timeout"
 
 
-# Family-specific ``module_outcome`` taxonomies. Each entry lists the values
-# a Module in that family is allowed to report. Attempting to use any other
-# value via ``make_execution(module_id=..., module_outcome=...)`` is a
-# programmer error and raises ``ValueError`` at call time so the bug crashes
-# loudly in tests instead of silently shipping a malformed envelope.
-#
-# ``None`` = legacy path: if no ``module_id`` is supplied the check is skipped
-# for backward compatibility with the earliest Phase 1–5 call sites.
-#
-# The canonical outcomes are the first 4–5 values per family (matches the
-# architecture doc at `.claude/rules/blue-tap-architecture.md`); aliases follow
-# to accommodate legacy envelope builders and cross-phase checks (e.g., an
-# exploitation module's pre-check reporting ``confirmed`` before attempting
-# exploitation). A superset keeps validation loud for typos while still
-# permitting the granular outcomes Blue-Tap's envelopes have produced since
-# Phase 2.
-VALID_OUTCOMES_BY_FAMILY: dict[str, frozenset[str]] = {
-    "discovery": frozenset({
-        "observed", "merged", "correlated", "partial", "not_applicable",
-    }),
-    "reconnaissance": frozenset({
-        # canonical
-        "observed", "merged", "correlated", "partial", "not_applicable",
-        # legacy / specialised outcomes emitted by recon modules
-        "unsupported_transport", "collector_unavailable", "prerequisite_missing",
-        "artifact_collected",
-        "hidden_surface_detected",
-        "no_relevant_traffic",
-        "undetermined",
-        "partial_observation",
-        "auth_required",
-        "not_found",
-        "not_connectable",
-        "timeout",
-        "no_results",
-    }),
-    "assessment": frozenset({
-        "confirmed", "inconclusive", "pairing_required", "not_applicable",
-        # legacy negative case used by vuln_scanner
-        "not_detected",
-    }),
-    "exploitation": frozenset({
-        # canonical
-        "success", "unresponsive", "recovered", "not_applicable", "aborted",
-        # pre-check outcome emitted when a check confirms vulnerability before exploiting
-        "confirmed",
-    }),
-    "post_exploitation": frozenset({
-        "extracted", "connected", "streamed", "transferred", "not_applicable",
-        # "partial" = extracted some but not all (e.g., PBAP vcard subset)
-        "partial",
-        # completion/failure outcomes used by data/audio envelopes
-        "completed", "failed", "aborted",
-    }),
-    "fuzzing": frozenset({
-        # canonical (from the architecture rule)
-        "crash_found", "timeout", "corpus_grown", "no_findings",
-        # granular outcomes the fuzz envelope builders have emitted since Phase 2
-        "completed", "crash_detected", "degraded", "aborted",
-        "pairing_required", "not_applicable",
-        # minimizer / crash replay outcomes
-        "reproduced",
-    }),
-}
-
-
-def _infer_family_from_module_id(module_id: str) -> str | None:
-    """Return the family prefix of ``module_id``, or ``None`` if unknown.
-
-    Module IDs follow the ``<family>.<name>`` convention
-    (e.g. ``exploitation.bias``). Anything that doesn't match an entry in
-    :data:`VALID_OUTCOMES_BY_FAMILY` is treated as "unknown family" and
-    validation is skipped.
-    """
-    if not module_id or "." not in module_id:
-        return None
-    family = module_id.split(".", 1)[0]
-    return family if family in VALID_OUTCOMES_BY_FAMILY else None
+_MODULE_ID_RE = re.compile(r"^[a-z0-9_]+(\.[a-z0-9_]+)+$")
 
 
 def validate_module_outcome(family: str, outcome: str) -> None:
     """Raise ``ValueError`` if ``outcome`` is not in ``family``'s taxonomy.
 
-    Callers that already know the family can use this directly instead of
-    going through ``make_execution``. ``family="unknown"`` (or any family not
-    in :data:`VALID_OUTCOMES_BY_FAMILY`) is a no-op to preserve backward
-    compatibility.
+    ``family`` must be a value from :class:`ModuleFamily`. An unknown family
+    string raises ``ValueError`` instead of silently no-opping — strict
+    validation is the whole point of this contract.
     """
-    valid = VALID_OUTCOMES_BY_FAMILY.get(family)
-    if valid is None:
-        return
+    try:
+        family_enum = ModuleFamily(family)
+    except ValueError as exc:
+        raise ValueError(
+            f"unknown module family {family!r}; expected one of "
+            f"{sorted(f.value for f in ModuleFamily)}"
+        ) from exc
+    valid = FAMILY_OUTCOMES[family_enum]
     if outcome not in valid:
         valid_sorted = sorted(valid)
         raise ValueError(
@@ -215,6 +162,7 @@ def make_execution(
     kind: str,
     id: str,
     title: str,
+    module_id: str,
     module: str = "",
     protocol: str = "",
     execution_status: str,
@@ -230,21 +178,22 @@ def make_execution(
     artifacts: list[dict[str, Any]] | None = None,
     module_data: dict[str, Any] | None = None,
     execution_id: str | None = None,
-    module_id: str = "",
     error: str | None = None,
 ) -> dict[str, Any]:
-    # When ``module_id`` is supplied (e.g. ``exploitation.bias``) cross-check
-    # the outcome against the family taxonomy. Legacy callers that omit the
-    # id skip validation for backward compatibility.
-    family = _infer_family_from_module_id(module_id)
-    if family is not None:
-        validate_module_outcome(family, module_outcome)
+    if not _MODULE_ID_RE.match(module_id):
+        raise ValueError(
+            f"module_id={module_id!r} must match {_MODULE_ID_RE.pattern!r} "
+            f"(e.g. 'exploitation.bias')"
+        )
+    family = module_id.split(".", 1)[0]
+    validate_module_outcome(family, module_outcome)
     return {
         "execution_id": execution_id or str(uuid4()),
         "kind": kind,
         "id": id,
         "title": title,
         "module": module,
+        "module_id": module_id,
         "protocol": protocol,
         "execution_status": execution_status,
         "module_outcome": module_outcome,
@@ -266,6 +215,7 @@ def build_run_envelope(
     *,
     schema: str,
     module: str,
+    module_id: str,
     target: str,
     adapter: str,
     summary: dict[str, Any],
@@ -277,10 +227,16 @@ def build_run_envelope(
     completed_at: str | None = None,
     run_id: str | None = None,
 ) -> dict[str, Any]:
+    if not _MODULE_ID_RE.match(module_id):
+        raise ValueError(
+            f"module_id={module_id!r} must match {_MODULE_ID_RE.pattern!r} "
+            f"(e.g. 'exploitation.bias')"
+        )
     return {
         "schema": schema,
         "schema_version": SCHEMA_VERSION,
         "module": module,
+        "module_id": module_id,
         "run_id": run_id or make_run_id(module),
         "target": target,
         "adapter": adapter,
@@ -359,6 +315,7 @@ def validate_execution_record(execution: Any) -> list[str]:
         "id",
         "title",
         "module",
+        "module_id",
         "protocol",
         "execution_status",
         "module_outcome",
@@ -395,6 +352,7 @@ def validate_run_envelope(envelope: Any) -> list[str]:
         "schema",
         "schema_version",
         "module",
+        "module_id",
         "run_id",
         "target",
         "adapter",

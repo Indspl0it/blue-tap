@@ -51,6 +51,7 @@ def test_make_execution_without_module_or_protocol():
         kind="collector",
         id="test",
         title="Test",
+        module_id="discovery.scanner",
         execution_status="completed",
         module_outcome="observed",
         evidence=make_evidence(summary="test evidence"),
@@ -64,7 +65,8 @@ def test_make_execution_without_module_or_protocol():
 def test_build_run_envelope_without_operator_context():
     envelope = build_run_envelope(
         schema="blue_tap.test.result",
-        module="test",
+        module="discovery.scanner",
+        module_id="discovery.scanner",
         target="AA:BB:CC:DD:EE:FF",
         adapter="hci0",
         summary={"outcome": "observed"},

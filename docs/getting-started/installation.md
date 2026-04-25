@@ -10,6 +10,30 @@ Blue-Tap requires a Linux environment with Bluetooth support. It uses raw HCI so
 | OS | Any Linux with BlueZ | Kali Linux 2024+ |
 | BlueZ | 5.x | 5.66+ |
 | Privileges | root or sudo | root |
+| Adapter | RTL8761B-based USB dongle (TP-Link UB500) | TP-Link UB500 with DarkFirmware |
+
+!!! warning "RTL8761B dongle is required for live operations"
+    Blue-Tap currently checks for a Realtek RTL8761B chipset before running any
+    command that touches Bluetooth hardware. Stock firmware is sufficient for
+    discovery, recon, vulnscan, exploit, dos, extract, and fuzz; DarkFirmware
+    is only needed for below-HCI features (LMP injection, controller memory
+    R/W, in-flight modification). If no RTL8761B is present, hardware-using
+    commands exit with `No RTL8761B / TP-Link UB500 dongle detected`.
+
+    The following commands run without root and without any adapter:
+
+    - `blue-tap --version`, `blue-tap --help`
+    - `blue-tap doctor`
+    - `blue-tap demo`
+    - `blue-tap session list`, `blue-tap session show <name>`
+    - `blue-tap search`, `blue-tap info`, `blue-tap show-options`, `blue-tap plugins`
+
+    Everything else — including `report` (with or without a positional dump
+    directory), `fuzz crashes list/show/export`, `fuzz corpus list/minimize`,
+    `fuzz minimize`, and `run-playbook --list` — currently still hits the
+    root + RTL8761B gate at startup. Run them with `sudo` on a host that has
+    an RTL8761B dongle attached. Tightening that gate so the read-only
+    paths can run unprivileged is on the v2.6.3 backlog.
 
 !!! warning "Linux Only"
     Blue-Tap uses raw HCI sockets, D-Bus BlueZ APIs, and Linux-specific Bluetooth tooling.
@@ -151,60 +175,48 @@ If this command fails with `command not found`, ensure the pip install location 
 $ blue-tap doctor
 ```
 
-??? example "Full doctor output (everything healthy)"
+??? example "Sample doctor output (with adapter present)"
 
     ```
-    Blue-Tap Environment Check
-    ==========================
+    Environment Diagnostics
+    ────────────────────────────────────────
+      ✓  bluetoothctl
+      ✓  sdptool
+      ✓  hciconfig
+      ✓  pactl
+      ✓  parecord
+      ✓  paplay
+      ✓  aplay
+      14:32:07  ●  1 Bluetooth adapter(s) detected
 
-    System
-    ------
-      Python .............. 3.12.4 (/usr/bin/python3)
-      Platform ............ Linux 6.8.11-amd64 (Kali 2024.3)
-      BlueZ ............... 5.72
+      14:32:07  ✔  Environment ready for Bluetooth operations.
+    ```
 
-    Required Tools
-    --------------
-      bluetoothctl ........ /usr/bin/bluetoothctl (5.72)           [OK]
-      hciconfig ........... /usr/bin/hciconfig (5.72)              [OK]
-      btmgmt .............. /usr/bin/btmgmt                        [OK]
-      sdptool ............. /usr/bin/sdptool (5.72)                [OK]
-      btmon ............... /usr/bin/btmon (5.72)                  [OK]
+??? example "Sample doctor output (no adapter)"
 
-    Optional Tools
-    --------------
-      bdaddr .............. /usr/bin/bdaddr                        [OK]
-      spooftooph .......... /usr/bin/spooftooph (0.5.2)           [OK]
+    ```
+    Environment Diagnostics
+    ────────────────────────────────────────
+      ✓  bluetoothctl
+      ✓  sdptool
+      ✓  hciconfig
+      ✓  pactl
+      ✓  parecord
+      ✓  paplay
+      ✗  aplay
+      14:32:07  ⚠  No Bluetooth adapters found
 
-    Bluetooth Adapters
-    ------------------
-      hci0 ................ Intel AX201 (UP, RUNNING, BLE)        [OK]
-      hci1 ................ RTL8761B (UP, RUNNING, BLE)           [OK]
-
-    Audio Stack
-    -----------
-      PipeWire ............ running (PipeWire 1.0.5)              [OK]
-
-    OBEX Support
-    ------------
-      obexftp ............. /usr/bin/obexftp                      [OK]
-
-    DarkFirmware
-    ------------
-      RTL8761B ............ hci1 (TP-Link UB500)                  [DETECTED]
-      Firmware ............ DarkFirmware active (hooks installed)  [OK]
-
-    Summary: 13/13 checks passed, 0 warnings
+      14:32:07  ⚠  Environment NOT ready: no Bluetooth adapter present.
     ```
 
 The doctor checks for:
 
-- **Required tools** -- presence and version of `bluetoothctl`, `hciconfig`, `btmgmt`, `sdptool`, `btmon`
-- **Optional tools** -- `bdaddr`, `spooftooph` (warns if missing, does not fail)
-- **Bluetooth adapters** -- detects all HCI adapters, reports chipset, status, capabilities
-- **Audio stack** -- PulseAudio or PipeWire availability (needed for audio extraction modules)
-- **OBEX capability** -- checks for `obexftp` / OBEX push support (needed for data extraction)
-- **DarkFirmware** -- detects RTL8761B dongle and firmware state if present
+- **Bluetooth tooling** -- presence of `bluetoothctl`, `sdptool`, `hciconfig`
+- **Audio stack** -- `pactl` / `parecord` / `paplay` / `aplay` for audio extraction
+- **Adapters** -- enumerates HCI adapters detected by BlueZ
+- **Verdict** -- `Environment ready` only when both tools and at least one adapter are present; `Environment NOT ready` when no adapter is detected; `partially ready` when limitations are reported
+
+A missing `aplay` is reported as `✗` but is not fatal (it's only used for some audio playback paths).
 
 !!! note "Root Not Required for Doctor"
     `blue-tap doctor` deliberately avoids operations that need root so you can run it
@@ -226,37 +238,40 @@ $ blue-tap demo
 ??? example "Expected demo output (abbreviated)"
 
     ```
-    ╭─ Blue-Tap Demo Assessment ─────────────────────────────────╮
-    │                                                             │
-    │  Target: SYNC (DE:AD:BE:EF:CA:FE)                         │
-    │  Adapter: hci0 (simulated)                                  │
-    │  Session: demo-20260416-143022                              │
-    │                                                             │
-    ╰─────────────────────────────────────────────────────────────╯
+    ────────────────────── Demo Complete (9/9 phases, 31.2s) ───────────────────────
 
-    Phase 1/9: Discovery ......................................... OK
-    Phase 2/9: Fingerprinting .................................... OK
-    Phase 3/9: Service Enumeration ............................... OK
-    Phase 4/9: RFCOMM / L2CAP Scanning ........................... OK
-    Phase 5/9: Vulnerability Assessment .......................... OK
-    Phase 6/9: Exploitation Simulation ........................... OK
-    Phase 7/9: Data Extraction ................................... OK
-    Phase 8/9: DoS Testing ....................................... OK
-    Phase 9/9: Report Generation ................................. OK
+    ╭───────────────────────────── Assessment Summary ─────────────────────────────╮
+    │                                                                              │
+    │    Target: Harman-IVI-2024 (4C:87:5D:A1:3E:F0)                               │
+    │    Paired Phone: Galaxy S24 (B8:27:EB:6C:D4:22)                              │
+    │    Risk Rating: CRITICAL                                                     │
+    │    Vulnerabilities: 2 CRITICAL, 3 HIGH, 4 MEDIUM, 2 LOW                      │
+    │    Data Extracted: 156 contacts, 122 call logs, 436 messages                 │
+    │    Fuzzing: 14,827 packets, 2 crashes                                        │
+    │    DoS: 1 unresponsive, 2 degraded out of 5 tests                            │
+    │    Total Time: 31.2 seconds                                                  │
+    │    Reports: demo_output/report.html                                          │
+    │                                                                              │
+    ╰──────────────────────────────────────────────────────────────────────────────╯
 
-    Report written to: demo_output/report.html
-    JSON export:       demo_output/report.json
-
-    Demo complete. 9/9 phases finished successfully.
+      ●  DEMO MODE — All data above is simulated. No Bluetooth hardware was used.
+      ●  Open demo_output/report.html in a browser for the full report.
     ```
 
 If demo mode completes and produces a report, your Python environment, dependencies, and framework are all working correctly. The next step is to connect real hardware.
 
-## DarkFirmware (Recommended)
+## DarkFirmware (Optional, RTL8761B-only feature)
 
-If you have a TP-Link UB500 (RTL8761B) adapter and want below-HCI capabilities
-(LMP injection, controller memory access, in-flight packet modification), see
-[Hardware Setup -- DarkFirmware](hardware-setup.md#darkfirmware-recommended). DarkFirmware is not required for the majority of Blue-Tap's capabilities -- discovery, reconnaissance, assessment, data extraction, and audio capture all work with any supported adapter.
+DarkFirmware is the patched controller firmware that enables LMP injection,
+controller memory R/W, and in-flight packet modification on RTL8761B dongles.
+The base RTL8761B requirement (see the prerequisites table above) is enforced
+regardless — DarkFirmware just unlocks the extra below-HCI capabilities used
+by BIAS, BLUFFS, KNOB-active, CTKD, and LMP fuzzing.
+
+See [Hardware Setup -- DarkFirmware](hardware-setup.md#darkfirmware-recommended)
+for flashing instructions. The first time `blue-tap` detects a stock-firmware
+RTL8761B, it offers an interactive prompt to flash DarkFirmware (with the
+original blob backed up for restore via `blue-tap adapter firmware-install --restore`).
 
 ---
 
@@ -264,4 +279,3 @@ If you have a TP-Link UB500 (RTL8761B) adapter and want below-HCI capabilities
 
 - **[Hardware Setup](hardware-setup.md)** -- configure your Bluetooth adapter, set up MAC spoofing, and optionally install DarkFirmware
 - **[Quick Start](quick-start.md)** -- run your first assessment in five commands
-- **[IVI Simulator](ivi-simulator.md)** -- set up a deliberately vulnerable practice target

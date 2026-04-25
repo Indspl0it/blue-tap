@@ -5,16 +5,23 @@ discover nearby targets, enumerate services, scan for vulnerabilities, generate
 a report, and try demo mode. By the end, you will have completed a basic Bluetooth
 security assessment and produced a professional report.
 
-!!! warning "Root Required"
-    All Bluetooth operations require root privileges because Blue-Tap opens raw HCI
-    sockets and calls privileged BlueZ management APIs. Run commands with `sudo`
-    or from a root shell.
+!!! warning "Root + RTL8761B Required for Live Operations"
+    All Bluetooth operations require root privileges (raw HCI sockets / BlueZ
+    management APIs) **and** an RTL8761B-based USB dongle (Blue-Tap currently
+    refuses to run hardware-using commands without one — `No RTL8761B / TP-Link
+    UB500 dongle detected`). Run commands with `sudo`.
+
+    The following inspection paths skip both gates: `--help`, `--version`,
+    `doctor`, `demo`, `session list / show`, `search`, `info`, `show-options`,
+    `plugins`. Everything else — including `report`, `fuzz crashes/corpus`,
+    and `run-playbook --list` — currently still goes through the root +
+    RTL8761B check at startup (loosening that gate for read-only paths is
+    on the v2.6.3 backlog).
 
 !!! tip "No Hardware? Start with Demo Mode"
-    If you do not have a Bluetooth adapter or a target device yet, skip to
-    [Step 5: Demo Mode](#step-5-demo-mode) to explore the full assessment workflow
-    using simulated data. You can also set up the [IVI Simulator](ivi-simulator.md)
-    for a real-over-the-air practice target.
+    If you do not have an RTL8761B dongle or a target device yet, skip to
+    [Step 5: Demo Mode](#step-5-demo-mode) to exercise the full assessment
+    pipeline against simulated data with no Bluetooth required.
 
 ---
 
@@ -206,25 +213,25 @@ Generate an HTML and JSON report from the current session:
 sudo blue-tap report
 ```
 
-??? example "Example output"
+??? example "Actual report output"
 
     ```
-    Report Generation
-    =================
-
-    Session: default-20260416-143022
-    Modules with results: 3 (discovery, recon, vulnscan)
-
-    Generating HTML report... done
-    Generating JSON export... done
-
-    ╭─ Report Output ────────────────────────────────────────────╮
-    │                                                             │
-    │  HTML:  sessions/default-20260416-143022/report.html       │
-    │  JSON:  sessions/default-20260416-143022/report.json       │
-    │                                                             │
-    ╰─────────────────────────────────────────────────────────────╯
+      ●  Loaded standardized session data from sessions/blue-tap_20260425_191205
+      ✔  HTML report generated: sessions/blue-tap_20260425_191205/report.html
     ```
+
+    For JSON output use `-f json`:
+
+    ```
+    $ sudo blue-tap report -f json sessions/blue-tap_20260425_191205
+      ●  Loaded standardized session data from sessions/blue-tap_20260425_191205
+      ✔  JSON report generated: sessions/blue-tap_20260425_191205/report.json
+    ```
+
+    No session is created when `report` is invoked with a positional dump dir,
+    so the command is safe to re-run repeatedly without polluting `~/.blue-tap`.
+    The startup root + RTL8761B gate still fires though, so `sudo` and a
+    plugged-in dongle are required even for offline regeneration.
 
 This collects all results from the active session -- discovery, reconnaissance, vulnscan,
 any exploits or extractions you ran -- and produces a structured report. The HTML report
@@ -258,48 +265,27 @@ Run a full simulated pentest with mock data -- no Bluetooth hardware required:
 blue-tap demo
 ```
 
-??? example "Full demo output"
+??? example "Actual demo summary (truncated)"
 
     ```
-    ╭─ Blue-Tap Demo Assessment ─────────────────────────────────╮
-    │                                                             │
-    │  Target: SYNC (DE:AD:BE:EF:CA:FE)                         │
-    │  Adapter: hci0 (simulated)                                  │
-    │  Session: demo-20260416-143022                              │
-    │                                                             │
-    ╰─────────────────────────────────────────────────────────────╯
+    ────────────────────── Demo Complete (9/9 phases, 31.2s) ───────────────────────
 
-    Phase 1/9: Discovery ......................................... OK
-      Found 4 Classic devices, 2 BLE devices
+    ╭───────────────────────────── Assessment Summary ─────────────────────────────╮
+    │                                                                              │
+    │    Target: Harman-IVI-2024 (4C:87:5D:A1:3E:F0)                               │
+    │    Paired Phone: Galaxy S24 (B8:27:EB:6C:D4:22)                              │
+    │    Risk Rating: CRITICAL                                                     │
+    │    Vulnerabilities: 2 CRITICAL, 3 HIGH, 4 MEDIUM, 2 LOW                      │
+    │    Data Extracted: 156 contacts, 122 call logs, 436 messages                 │
+    │    Fuzzing: 14,827 packets, 2 crashes                                        │
+    │    DoS: 1 unresponsive, 2 degraded out of 5 tests                            │
+    │    Total Time: 31.2 seconds                                                  │
+    │    Reports: demo_output/report.html                                          │
+    │                                                                              │
+    ╰──────────────────────────────────────────────────────────────────────────────╯
 
-    Phase 2/9: Fingerprinting .................................... OK
-      Target: SYNC -- Car Audio, Bluetooth 5.0, Texas Instruments
-
-    Phase 3/9: Service Enumeration ............................... OK
-      8 SDP services, 3 GATT services, 1 hidden channel
-
-    Phase 4/9: RFCOMM / L2CAP Scanning ........................... OK
-      9 open channels across RFCOMM and L2CAP
-
-    Phase 5/9: Vulnerability Assessment .......................... OK
-      2 CRITICAL, 4 HIGH, 3 MEDIUM, 1 LOW
-
-    Phase 6/9: Exploitation Simulation ........................... OK
-      PIN brute: success (PIN=1234, 3 attempts)
-      Connection hijack: success
-
-    Phase 7/9: Data Extraction ................................... OK
-      50 contacts (PBAP), 20 messages (MAP), AT command access
-
-    Phase 8/9: DoS Testing ....................................... OK
-      3/5 DoS vectors caused target unresponsiveness
-
-    Phase 9/9: Report Generation ................................. OK
-
-    Report written to: demo_output/report.html
-    JSON export:       demo_output/report.json
-
-    Demo complete. 9/9 phases finished successfully.
+      ●  DEMO MODE — All data above is simulated. No Bluetooth hardware was used.
+      ●  Open demo_output/report.html in a browser for the full report.
     ```
 
 Demo mode runs a 9-phase simulated assessment cycle using hardcoded realistic data. It exercises the full Rich terminal UI and generates a real HTML + JSON report identical in structure to a live assessment. This is useful for:
@@ -352,7 +338,6 @@ This quick start covers the passive and assessment phases. Blue-Tap also support
 ## What's Next?
 
 - **[Hardware Setup](hardware-setup.md)** -- adapter management, MAC spoofing, DarkFirmware installation
-- **[IVI Simulator](ivi-simulator.md)** -- set up a vulnerable practice target with known weaknesses
 - **[Full Penetration Test Workflow](../workflows/full-pentest.md)** -- end-to-end assessment including exploitation and post-exploitation
 - **[Quick Assessment Workflow](../workflows/quick-assessment.md)** -- streamlined workflow for time-constrained engagements
 - **[Audio Eavesdropping Workflow](../workflows/audio-eavesdropping.md)** -- A2DP and HFP capture chains

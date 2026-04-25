@@ -34,6 +34,7 @@ def build_spoof_result(
     adapter: str,
     operation: str,
     result: dict[str, Any],
+    module_id: str = "hardware.spoof",
     operator_context: dict[str, Any] | None = None,
     started_at: str | None = None,
     completed_at: str | None = None,
@@ -92,6 +93,7 @@ def build_spoof_result(
         id=f"spoof_{operation}",
         title=f"Spoof: {operation}",
         module="spoof",
+        module_id=module_id,
         protocol="HCI",
         execution_status=execution_status,
         module_outcome=module_outcome,
@@ -105,6 +107,7 @@ def build_spoof_result(
     return build_run_envelope(
         schema="blue_tap.spoof.result",
         module="spoof",
+        module_id=module_id,
         target=target,
         adapter=adapter,
         operator_context={"operation": operation, **dict(operator_context or {})},

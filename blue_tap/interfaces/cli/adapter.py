@@ -127,7 +127,8 @@ def up(hci):
     )
     envelope = build_run_envelope(
         schema="blue_tap.general.result",
-        module="general",
+        module="hardware.adapter",
+        module_id="hardware.adapter_up",
         target=hci,
         adapter=hci,
         operator_context={"operation": "adapter_up"},
@@ -174,7 +175,8 @@ def down(hci):
     )
     envelope = build_run_envelope(
         schema="blue_tap.general.result",
-        module="general",
+        module="hardware.adapter",
+        module_id="hardware.adapter_down",
         target=hci,
         adapter=hci,
         operator_context={"operation": "adapter_down"},
@@ -221,7 +223,8 @@ def reset(hci):
     )
     envelope = build_run_envelope(
         schema="blue_tap.general.result",
-        module="general",
+        module="hardware.adapter",
+        module_id="hardware.adapter_reset",
         target=hci,
         adapter=hci,
         operator_context={"operation": "adapter_reset"},
@@ -278,7 +281,8 @@ def set_name(name, hci):
     )
     envelope = build_run_envelope(
         schema="blue_tap.general.result",
-        module="general",
+        module="hardware.adapter",
+        module_id="hardware.adapter_set_name",
         target=hci,
         adapter=hci,
         operator_context={"operation": "adapter_set_name", "name": name},
@@ -388,7 +392,8 @@ def set_class(device_class, hci):
     )
     envelope = build_run_envelope(
         schema="blue_tap.general.result",
-        module="general",
+        module="hardware.adapter",
+        module_id="hardware.adapter_set_class",
         target=hci,
         adapter=hci,
         operator_context={"operation": "adapter_set_class", "device_class": device_class},
@@ -445,7 +450,7 @@ def adapter_firmware_status(hci):
     if status.get("capabilities"):
         info(f"Capabilities: {', '.join(status['capabilities'])}")
 
-    envelope = build_firmware_status_result(adapter=hci, status=status, started_at=started_at, run_id=run_id)
+    envelope = build_firmware_status_result(module_id="hardware.firmware_status", adapter=hci, status=status, started_at=started_at, run_id=run_id)
     emit_cli_event(
         event_type="run_completed", module="firmware", run_id=run_id,
         adapter=hci, message="Firmware status complete",
@@ -517,6 +522,7 @@ def adapter_firmware_install(source, restore, hci):
         else:
             error("Failed to restore firmware")
         envelope = build_firmware_operation_result(
+            module_id="hardware.firmware_operation",
             adapter=hci, operation=operation,
             title="Firmware Restore",
             success=ok,
@@ -537,6 +543,7 @@ def adapter_firmware_install(source, restore, hci):
         error(f"No RTL8761B adapter detected on {hci}. "
               f"This command only works with TP-Link UB500 or compatible RTL8761B dongles.")
         envelope = build_firmware_operation_result(
+            module_id="hardware.firmware_operation",
             adapter=hci, operation=operation,
             title="DarkFirmware Install",
             success=False,
@@ -579,6 +586,7 @@ def adapter_firmware_install(source, restore, hci):
         observations.append("Firmware installation failed")
 
     envelope = build_firmware_operation_result(
+        module_id="hardware.firmware_operation",
         adapter=hci, operation=operation,
         title="DarkFirmware Install",
         success=ok,
@@ -632,6 +640,7 @@ def adapter_firmware_init(hci):
     if not fw.is_darkfirmware_loaded(hci):
         error(f"DarkFirmware not detected on {hci}")
         envelope = build_firmware_operation_result(
+            module_id="hardware.firmware_operation",
             adapter=hci, operation="init",
             title="DarkFirmware Hook Init",
             success=False,
@@ -660,6 +669,7 @@ def adapter_firmware_init(hci):
         for hook in ("hook1", "hook2", "hook3", "hook4")
     ]
     envelope = build_firmware_operation_result(
+        module_id="hardware.firmware_operation",
         adapter=hci, operation="init",
         title="DarkFirmware Hook Init",
         success=ok,
@@ -772,6 +782,7 @@ def adapter_connection_inspect(conn, watch, interval, hci):
             error(f"Connection inspect failed: {exc}")
 
         envelope = build_connection_inspect_result(
+            module_id="hardware.connection_inspect",
             adapter=hci, connections=connections,
             started_at=started_at, run_id=run_id,
         )
@@ -898,6 +909,7 @@ def adapter_firmware_spoof(address, restore, hci):
         echo=False,
     )
     envelope = build_firmware_operation_result(
+        module_id="hardware.firmware_operation",
         adapter=hci,
         operation="spoof",
         title=f"BDADDR spoof to {address}",
@@ -989,6 +1001,7 @@ def adapter_firmware_set(setting, value, hci):
         echo=False,
     )
     envelope = build_firmware_operation_result(
+        module_id="hardware.firmware_operation",
         adapter=hci,
         operation="set",
         title=f"Firmware set {setting}={value}",
@@ -1106,6 +1119,7 @@ def adapter_firmware_dump(start, end, region, output, hci):
         file_size = _os.path.getsize(output)
 
     envelope = build_firmware_dump_result(
+        module_id="hardware.firmware_dump",
         adapter=hci,
         start_addr=start_addr,
         end_addr=end_addr,

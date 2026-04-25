@@ -1099,6 +1099,7 @@ def _crash_commands(fuzz_group):
         print_table(table)
 
         envelope = build_fuzz_operation_result(
+            module_id="fuzzing.engine",
             target="",
             adapter="session",
             operation="fuzz_crashes_list",
@@ -1236,6 +1237,7 @@ def _crash_commands(fuzz_group):
             ))
 
         envelope = build_fuzz_operation_result(
+            module_id="fuzzing.engine",
             target=crash.get("target_addr", "") or "",
             adapter="session",
             operation="fuzz_crashes_show",
@@ -1435,6 +1437,7 @@ def _crash_commands(fuzz_group):
                 )
             )
         envelope = build_fuzz_operation_result(
+            module_id="fuzzing.engine",
             target=target_addr,
             adapter="session",
             operation="fuzz_crashes_replay",
@@ -1533,6 +1536,7 @@ def _crash_commands(fuzz_group):
                 details={"output": output, "crash_count": crash_count},
             )
             envelope = build_fuzz_operation_result(
+                module_id="fuzzing.engine",
                 target="",
                 adapter="session",
                 operation="fuzz_crashes_export",

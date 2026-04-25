@@ -1,14 +1,8 @@
 """Unit tests for the family-aware ``module_outcome`` validator.
 
-The validator lives in ``blue_tap.framework.contracts.result_schema`` and
-is wired into ``make_execution`` behind an optional ``module_id`` kwarg so
-that:
-
-* Module authors who pass ``module_id`` get loud failures at call time when
-  they use an invalid outcome (e.g. ``"failed"`` or ``"skipped"`` inside an
-  exploitation Module).
-* Legacy call sites that omit ``module_id`` stay unvalidated and keep
-  working exactly as before.
+Validation is strict: every call site must pass a ``module_id``, the family
+must match a :class:`ModuleFamily` enum value, and ``module_outcome`` must
+be in the canonical :data:`FAMILY_OUTCOMES` set for that family.
 """
 
 from __future__ import annotations
@@ -16,11 +10,11 @@ from __future__ import annotations
 import pytest
 
 from blue_tap.framework.contracts.result_schema import (
-    VALID_OUTCOMES_BY_FAMILY,
     make_evidence,
     make_execution,
     validate_module_outcome,
 )
+from blue_tap.framework.registry.families import FAMILY_OUTCOMES, ModuleFamily
 
 
 def _evidence() -> dict:
@@ -34,6 +28,7 @@ def _evidence() -> dict:
         ("discovery", "not_applicable"),
         ("reconnaissance", "correlated"),
         ("assessment", "confirmed"),
+        ("assessment", "not_detected"),
         ("assessment", "pairing_required"),
         ("exploitation", "success"),
         ("exploitation", "unresponsive"),
@@ -56,7 +51,6 @@ def test_validate_module_outcome_accepts_family_taxonomy(family, outcome):
     [
         ("exploitation", "failed"),
         ("exploitation", "skipped"),
-        ("exploitation", "completed"),
         ("assessment", "success"),
         ("post_exploitation", "confirmed"),
         ("fuzzing", "observed"),
@@ -69,22 +63,51 @@ def test_validate_module_outcome_rejects_foreign_outcomes(family, bad_outcome):
         validate_module_outcome(family, bad_outcome)
 
 
-def test_validate_module_outcome_unknown_family_is_noop():
-    """Unknown families silently skip validation for backward compatibility."""
-    validate_module_outcome("plugin_family_not_in_taxonomy", "whatever_value")
+def test_validate_module_outcome_unknown_family_raises():
+    """Unknown families now raise — strict validation, no silent no-op."""
+    with pytest.raises(ValueError, match="unknown module family"):
+        validate_module_outcome("plugin_family_not_in_taxonomy", "whatever_value")
 
 
-def test_make_execution_without_module_id_skips_validation():
-    """Legacy callers that omit ``module_id`` must not see new errors."""
-    execution = make_execution(
-        kind="attack",
-        id="legacy",
-        title="Legacy call site",
-        execution_status="completed",
-        module_outcome="failed",  # would be invalid under exploitation taxonomy
-        evidence=_evidence(),
-    )
-    assert execution["module_outcome"] == "failed"
+def test_make_execution_requires_module_id():
+    """``module_id`` is a required keyword argument; omitting it must raise."""
+    with pytest.raises(TypeError):
+        make_execution(  # type: ignore[call-arg]
+            kind="attack",
+            id="legacy",
+            title="Legacy call site",
+            execution_status="completed",
+            module_outcome="success",
+            evidence=_evidence(),
+        )
+
+
+def test_make_execution_rejects_malformed_module_id():
+    """``module_id`` must match ``family.name`` (lowercase, dotted)."""
+    with pytest.raises(ValueError, match="module_id"):
+        make_execution(
+            kind="attack",
+            id="bias",
+            title="BIAS",
+            execution_status="completed",
+            module_outcome="success",
+            evidence=_evidence(),
+            module_id="bias",  # missing family prefix
+        )
+
+
+def test_make_execution_rejects_unknown_family_in_module_id():
+    """A module_id whose family isn't a ``ModuleFamily`` enum value must raise."""
+    with pytest.raises(ValueError, match="unknown module family"):
+        make_execution(
+            kind="attack",
+            id="bias",
+            title="BIAS",
+            execution_status="completed",
+            module_outcome="success",
+            evidence=_evidence(),
+            module_id="madeup.bias",
+        )
 
 
 def test_make_execution_valid_module_id_accepts_correct_outcome():
@@ -142,6 +165,7 @@ def test_make_execution_rejects_post_exploitation_extracted_for_discovery():
 
 
 def test_taxonomy_constants_are_immutable_sets():
-    """``VALID_OUTCOMES_BY_FAMILY`` must be frozen so modules cannot mutate it."""
-    for family, outcomes in VALID_OUTCOMES_BY_FAMILY.items():
+    """``FAMILY_OUTCOMES`` must be frozen so modules cannot mutate it."""
+    for family, outcomes in FAMILY_OUTCOMES.items():
+        assert isinstance(family, ModuleFamily), f"{family} should be a ModuleFamily enum value"
         assert isinstance(outcomes, frozenset), f"{family} outcomes should be frozen"

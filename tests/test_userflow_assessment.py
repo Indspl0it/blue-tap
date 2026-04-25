@@ -15,23 +15,21 @@ from click.testing import CliRunner
 from blue_tap.interfaces.cli.main import cli
 from blue_tap.framework.contracts.result_schema import (
     validate_run_envelope,
-    VALID_OUTCOMES_BY_FAMILY,
 )
+from blue_tap.framework.registry.families import FAMILY_OUTCOMES, ModuleFamily
 
 TARGET = "AA:BB:CC:DD:EE:FF"
 SESSION_NAME = "flow_assessment"
 
-_SCAN_RESULT = {
-    "status": "completed",
-    "devices": [
-        {"address": TARGET, "name": "IVI Device", "type": "classic", "rssi": -55},
-    ],
-}
+_SCAN_RESULT = [
+    {"address": TARGET, "name": "IVI Device", "type": "classic", "rssi": -55},
+]
 
 _VULN_RESULT = {
     "schema": "blue_tap.vulnscan.result",
     "schema_version": 2,
     "module": "vulnscan",
+    "module_id": "assessment.vulnscan_meta",
     "run_id": "test-run-assessment",
     "target": TARGET,
     "adapter": "hci0",
@@ -52,6 +50,7 @@ _VULN_RESULT = {
             "id": "check_ssp",
             "title": "SSP Check",
             "module": "vulnscan",
+            "module_id": "assessment.check_ssp",
             "protocol": "Classic",
             "execution_status": "completed",
             "module_outcome": "inconclusive",
@@ -88,7 +87,7 @@ def test_assessment_flow(tmp_path):
     runner = _make_runner(tmp_path)
 
     with (
-        patch("blue_tap.hardware.scanner.scan_all_result", return_value=_SCAN_RESULT),
+        patch("blue_tap.hardware.scanner.scan_all", return_value=_SCAN_RESULT),
         patch(
             "blue_tap.modules.assessment.vuln_scanner.run_vulnerability_scan",
             return_value=_VULN_RESULT,
@@ -113,7 +112,7 @@ def test_assessment_flow(tmp_path):
     assert "scan" in categories or any("scan" in c for c in categories) or "recon" in categories or "general" in categories
 
     # Validate envelopes
-    valid_assessment_outcomes = VALID_OUTCOMES_BY_FAMILY["assessment"]
+    valid_assessment_outcomes = FAMILY_OUTCOMES[ModuleFamily.ASSESSMENT]
     for cmd_entry in commands:
         cmd_file = session_dir / cmd_entry["file"]
         cmd_data = json.loads(cmd_file.read_text())

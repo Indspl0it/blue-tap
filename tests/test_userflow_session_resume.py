@@ -22,12 +22,9 @@ from blue_tap.framework.contracts.result_schema import validate_run_envelope
 SESSION_NAME = "flow_resume"
 TARGET = "AA:BB:CC:DD:EE:FF"
 
-_SCAN_RESULT = {
-    "status": "completed",
-    "devices": [
-        {"address": TARGET, "name": "Resumable Device", "type": "classic", "rssi": -65},
-    ],
-}
+_SCAN_RESULT = [
+    {"address": TARGET, "name": "Resumable Device", "type": "classic", "rssi": -65},
+]
 
 _SDP_RESULT = {
     "status": "completed",
@@ -48,7 +45,7 @@ def test_session_resume_accumulates_commands(tmp_path):
     runner = _make_runner(tmp_path)
 
     # First invocation: discovery scan
-    with patch("blue_tap.hardware.scanner.scan_all_result", return_value=_SCAN_RESULT):
+    with patch("blue_tap.hardware.scanner.scan_all", return_value=_SCAN_RESULT):
         r1 = runner.invoke(
             cli,
             ["-s", SESSION_NAME, "run", "discovery.scanner", "MODE=all"],

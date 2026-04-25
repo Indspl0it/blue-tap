@@ -19,6 +19,7 @@ class ExamplePingAttack:
         from blue_tap.framework.envelopes.attack import build_attack_result
 
         return build_attack_result(
+            module_id="exploitation.attack",
             module="example_ping",
             target=self.target,
             adapter=self.hci,

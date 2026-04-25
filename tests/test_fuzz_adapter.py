@@ -16,6 +16,7 @@ def _make_campaign_envelope(num_protocols: int = 2, crashes: int = 0):
     protocols = ["sdp", "ble-att", "rfcomm", "bnep"][:num_protocols]
     proto_execs = [
         build_fuzz_protocol_execution(
+            module_id="fuzzing.engine",
             protocol=p,
             packets_sent=1000,
             crashes=crashes,
@@ -34,6 +35,7 @@ def _make_campaign_envelope(num_protocols: int = 2, crashes: int = 0):
         }
     ] * crashes
     return build_fuzz_campaign_result(
+        module_id="fuzzing.campaign",
         target="AA:BB:CC:DD:EE:FF",
         adapter="session",
         campaign_summary={
@@ -53,6 +55,7 @@ def _make_campaign_envelope(num_protocols: int = 2, crashes: int = 0):
 
 def _make_single_run_envelope():
     return build_fuzz_result(
+        module_id="fuzzing.engine",
         target="AA:BB:CC:DD:EE:FF",
         adapter="hci0",
         command="fuzz_sdp",
@@ -115,6 +118,7 @@ def test_ingest_operation():
     adapter = FuzzReportAdapter()
     state = {}
     envelope = build_fuzz_operation_result(
+        module_id="fuzzing.operation",
         target="AA:BB:CC:DD:EE:FF",
         adapter="session",
         operation="corpus_generate",

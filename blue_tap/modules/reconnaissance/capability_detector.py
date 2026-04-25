@@ -208,11 +208,13 @@ class CapabilityDetectorModule(Module):
         return build_run_envelope(
             schema=self.schema_prefix,
             module=self.module_id,
+            module_id=self.module_id,
             target=target,
             adapter=hci,
             started_at=started_at,
             executions=[
                 make_execution(
+                    module_id="reconnaissance.capability_detector",
                     execution_id="capability_detect",
                     kind="collector",
                     id="capability_detect",

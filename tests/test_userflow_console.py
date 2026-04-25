@@ -23,12 +23,9 @@ from blue_tap.framework.contracts.result_schema import validate_run_envelope
 
 SESSION_NAME = "flow_runner"
 
-_SCAN_RESULT = {
-    "status": "completed",
-    "devices": [
-        {"address": "AA:BB:CC:DD:EE:FF", "name": "Runner Test", "type": "classic", "rssi": -60},
-    ],
-}
+_SCAN_RESULT = [
+    {"address": "AA:BB:CC:DD:EE:FF", "name": "Runner Test", "type": "classic", "rssi": -60},
+]
 
 
 def _make_runner(tmp_path: Path) -> CliRunner:
@@ -40,7 +37,7 @@ def test_run_discovery_and_destructive_gate(tmp_path):
     runner = _make_runner(tmp_path)
 
     # Step 1: Run discovery scanner
-    with patch("blue_tap.hardware.scanner.scan_all_result", return_value=_SCAN_RESULT):
+    with patch("blue_tap.hardware.scanner.scan_all", return_value=_SCAN_RESULT):
         result = runner.invoke(
             cli,
             ["-s", SESSION_NAME, "run", "discovery.scanner", "HCI=hci0", "MODE=classic"],

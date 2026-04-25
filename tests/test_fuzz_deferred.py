@@ -172,6 +172,7 @@ def test_per_protocol_execution_state_coverage_in_module_evidence():
         "protocols": {"sdp": {"states": 5, "transitions": 12}},
     }
     rec = build_fuzz_protocol_execution(
+        module_id="fuzzing.engine",
         protocol="sdp",
         packets_sent=200,
         crashes=0,
@@ -193,6 +194,7 @@ def test_per_protocol_execution_field_weights_in_module_evidence():
     """build_fuzz_protocol_execution includes field_weights in evidence.module_evidence."""
     fw = {"pdu_type": 0.45, "length": 0.22}
     rec = build_fuzz_protocol_execution(
+        module_id="fuzzing.engine",
         protocol="sdp",
         packets_sent=500,
         crashes=0,
@@ -211,6 +213,7 @@ def test_per_protocol_execution_field_weights_in_module_evidence():
 def test_per_protocol_execution_anomaly_in_observations():
     """Anomaly count from build_fuzz_protocol_execution appears in evidence.observations."""
     rec = build_fuzz_protocol_execution(
+        module_id="fuzzing.engine",
         protocol="ble-att",
         packets_sent=300,
         crashes=0,
@@ -271,6 +274,7 @@ def test_obex_uses_run_via_engine(monkeypatch):
 def _make_envelope_with_intelligence():
     proto_execs = [
         build_fuzz_protocol_execution(
+            module_id="fuzzing.engine",
             protocol="sdp",
             packets_sent=1000,
             crashes=0,
@@ -282,6 +286,7 @@ def _make_envelope_with_intelligence():
         )
     ]
     return build_fuzz_campaign_result(
+        module_id="fuzzing.campaign",
         target="AA:BB:CC:DD:EE:FF",
         adapter="session",
         campaign_summary={
@@ -339,6 +344,7 @@ def test_fuzz_adapter_field_weights_in_json():
 def test_corpus_generate_operation_envelope_validates():
     """build_fuzz_operation_result for corpus_generate produces a valid RunEnvelope."""
     envelope = build_fuzz_operation_result(
+        module_id="fuzzing.operation",
         target="AA:BB:CC:DD:EE:FF",
         adapter="session",
         operation="corpus_generate",
@@ -366,6 +372,7 @@ def test_corpus_generate_operation_envelope_validates():
 def test_crash_export_operation_envelope_validates():
     """build_fuzz_operation_result for crash export produces a valid RunEnvelope."""
     envelope = build_fuzz_operation_result(
+        module_id="fuzzing.operation",
         target="AA:BB:CC:DD:EE:FF",
         adapter="session",
         operation="crashes_export",
@@ -389,6 +396,7 @@ def test_crash_export_operation_envelope_validates():
 def test_operation_envelope_schema_is_fuzz():
     """Operation envelope produced by build_fuzz_operation_result uses the fuzz schema."""
     envelope = build_fuzz_operation_result(
+        module_id="fuzzing.operation",
         target="AA:BB:CC:DD:EE:FF",
         adapter="session",
         operation="corpus_minimize",

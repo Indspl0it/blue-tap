@@ -310,6 +310,7 @@ The universal output container for every module run. Built by `build_run_envelop
 | `schema` | `str` | Module schema identifier, e.g. `"blue_tap.vulnscan.result"` |
 | `schema_version` | `int` | Always `2` (constant `SCHEMA_VERSION`) |
 | `module` | `str` | Module name |
+| `module_id` | `str` | **Required.** Family-prefixed id matching `^[a-z0-9_]+(\.[a-z0-9_]+)+$` (e.g. `assessment.vuln_scanner`). Determines which `FAMILY_OUTCOMES` set `module_outcome` is validated against |
 | `run_id` | `str` | Unique run identifier (UUID or `{module}-{uuid}`) |
 | `target` | `str` | Target address |
 | `adapter` | `str` | HCI adapter used |
@@ -332,6 +333,7 @@ One execution within a run. Built by `make_execution()`.
 | `id` | `str` | Stable machine identifier |
 | `title` | `str` | Human-readable title |
 | `module` | `str` | Module name |
+| `module_id` | `str` | **Required.** Family-prefixed id (same format as `RunEnvelope.module_id`); the family prefix selects the `FAMILY_OUTCOMES` set used to validate `module_outcome` |
 | `protocol` | `str` | Protocol used |
 | `execution_status` | `str` | Lifecycle status (see taxonomy below) |
 | `module_outcome` | `str` | Semantic result (family-specific, see below) |
@@ -384,13 +386,14 @@ Frozen dataclass referencing a saved artifact. Built by `make_artifact()`.
 | Family | Purpose | Allowed `module_outcome` values |
 |---|---|---|
 | **discovery** | Nearby target inventory | `observed`, `merged`, `correlated`, `partial`, `not_applicable` |
-| **reconnaissance** | Deep per-target analysis | `observed`, `merged`, `correlated`, `partial`, `not_applicable`, `unsupported_transport`, `collector_unavailable`, `prerequisite_missing`, `artifact_collected`, `hidden_surface_detected`, `no_relevant_traffic` |
-| **assessment** | Vulnerability checks | `confirmed`, `inconclusive`, `pairing_required`, `not_applicable`, `not_detected` |
-| **exploitation** | Active attacks | `success`, `unresponsive`, `recovered`, `not_applicable`, `aborted`, `confirmed` |
-| **post_exploitation** | Data extraction, media | `extracted`, `connected`, `streamed`, `transferred`, `not_applicable`, `partial`, `completed`, `failed`, `aborted` |
-| **fuzzing** | Protocol mutation/stress | `crash_found`, `timeout`, `corpus_grown`, `no_findings`, `completed`, `crash_detected`, `degraded`, `aborted`, `pairing_required`, `not_applicable`, `reproduced` |
+| **reconnaissance** | Deep per-target analysis | `observed`, `merged`, `correlated`, `partial`, `not_applicable`, `unsupported_transport`, `collector_unavailable`, `prerequisite_missing`, `artifact_collected`, `hidden_surface_detected`, `no_relevant_traffic`, `undetermined`, `partial_observation`, `auth_required`, `not_found`, `not_connectable`, `timeout`, `no_results` |
+| **assessment** | Vulnerability checks | `confirmed`, `not_detected`, `inconclusive`, `pairing_required`, `not_applicable` |
+| **exploitation** | Active attacks | `success`, `confirmed`, `unresponsive`, `recovered`, `aborted`, `not_applicable` |
+| **post_exploitation** | Data extraction, media | `extracted`, `connected`, `streamed`, `transferred`, `partial`, `completed`, `failed`, `aborted`, `not_applicable` |
+| **fuzzing** | Protocol mutation/stress | `crash_found`, `crash_detected`, `timeout`, `corpus_grown`, `no_findings`, `completed`, `degraded`, `aborted`, `pairing_required`, `reproduced`, `not_applicable` |
+| **hardware** | Adapter / firmware ops | `completed`, `installed`, `hooks_active`, `hooks_partial`, `not_loaded`, `prerequisite_missing`, `spoofed`, `rejected`, `restored`, `method_unavailable`, `not_applicable` |
 
-The canonical outcomes (first 4-5 per family) match the architecture rule in `.claude/rules/blue-tap-architecture.md`. The extended values accommodate legacy envelope builders and cross-phase checks.
+There is one source of truth: `FAMILY_OUTCOMES` in `blue_tap.framework.registry.families`. `make_execution()` raises `ValueError` for any value not listed for the call site's family.
 
 ---
 

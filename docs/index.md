@@ -76,11 +76,11 @@ Blue-Tap operates at two layers. At the **host level**, it uses standard BlueZ A
 
     Active attacks, encryption downgrades, audio eavesdropping (A2DP/HFP), contact extraction (PBAP/MAP), file transfer (OPP), and media control (AVRCP). Post-exploitation modules demonstrate real-world impact -- from silently recording phone calls to exfiltrating an entire phonebook.
 
--   :material-chip: **DarkFirmware (Recommended)**
+-   :material-chip: **DarkFirmware (RTL8761B)**
 
     ---
 
-    RTL8761B firmware patching for LMP injection, link-layer monitoring, and memory read/write -- reaching the 40-45% of CVEs invisible to host-level tools. Required for CVE exploitation (KNOB, BIAS, BLUFFS), LMP-level vulnerability checks, and protocol fuzzing with crash detection. The TP-Link UB500 (~$13) is the recommended adapter.
+    RTL8761B-based USB dongle (TP-Link UB500, ~$13) is currently **required** for any live operation. Stock firmware is fine for the bulk of the toolkit; DarkFirmware is the optional patched firmware that adds LMP injection, link-layer monitoring, and controller memory R/W — the 40-45% of CVEs invisible to host-level tools. DarkFirmware is required for KNOB-active, BIAS, BLUFFS, CTKD, and below-HCI fuzzing.
 
 -   :material-file-chart-outline: **Reporting & Sessions**
 
@@ -244,7 +244,6 @@ The fastest path to a working setup:
 1. **[Install Blue-Tap](getting-started/installation.md)** -- clone, pip install, verify with `blue-tap doctor`
 2. **[Set up hardware](getting-started/hardware-setup.md)** -- configure your TP-Link UB500 adapter and install DarkFirmware
 3. **[Run the quick start](getting-started/quick-start.md)** -- discover, recon, scan, and report in five commands
-4. **[Try the IVI Simulator](getting-started/ivi-simulator.md)** -- practice against a deliberately vulnerable target with no real vehicle needed
 
 ---
 

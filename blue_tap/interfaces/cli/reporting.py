@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 
 import rich_click as click
 from blue_tap.interfaces.cli.shared import LoggedCommand, LoggedGroup, _save_json
@@ -55,6 +56,7 @@ def _log_standardized_operation(
             if item is not None
         ]
         envelope = build_attack_result(
+            module_id="exploitation.attack",
             target=target,
             adapter=_current_adapter(),
             operation=command,
@@ -84,6 +86,7 @@ def _log_standardized_operation(
             if item is not None
         ]
         envelope = build_data_result(
+            module_id="post_exploitation.data",
             target=target,
             adapter=_current_adapter(),
             family=str((result or {}).get("family", protocol.lower() or "data")),
@@ -113,6 +116,7 @@ def _log_standardized_operation(
             if item is not None
         ]
         envelope = build_audio_result(
+            module_id="post_exploitation.audio",
             target=target,
             adapter=_current_adapter(),
             operation=command,
@@ -203,7 +207,7 @@ def report_cmd(dump_dir, fmt, output):
     else:
         error("No session active and no dump directory specified.")
         error("Use: blue-tap -s <session> report  OR  blue-tap report <dir>")
-        return
+        sys.exit(1)
 
     if fmt == "html":
         out = output or os.path.join(out_dir, "report.html")
@@ -231,7 +235,7 @@ def run_playbook_cmd(commands, playbook, list_playbooks_flag):
 
     \b
     Each argument is a command string (quote if it has spaces):
-      blue-tap -s mytest run-playbook "scan classic" "recon fingerprint TARGET" "vulnscan TARGET" "report"
+      blue-tap -s mytest run-playbook "discover classic" "recon TARGET fingerprint" "vulnscan TARGET" "report"
 
     Use TARGET as a placeholder — you'll be prompted to select a device.
 
@@ -289,7 +293,7 @@ def run_playbook_cmd(commands, playbook, list_playbooks_flag):
 
         if not os.path.exists(resolved_path):
             error(f"Playbook not found: {playbook}")
-            return
+            sys.exit(1)
 
         if resolved_path != playbook:
             info(f"Using bundled playbook: {resolved_path}")
@@ -308,11 +312,11 @@ def run_playbook_cmd(commands, playbook, list_playbooks_flag):
             commands = loader.load(resolved_path)
         except ValueError as exc:
             error(str(exc))
-            return
+            sys.exit(1)
 
     if not commands:
-        error("No commands specified. Usage: blue-tap run-playbook \"scan classic\" \"vulnscan TARGET\"")
-        return
+        error("No commands specified. Usage: blue-tap run-playbook \"discover classic\" \"vulnscan TARGET\"")
+        sys.exit(1)
 
     # Resolve TARGET / {target} / {hci} placeholders
     from blue_tap.hardware.adapter import resolve_active_hci
@@ -326,7 +330,7 @@ def run_playbook_cmd(commands, playbook, list_playbooks_flag):
         target_addr = resolve_address(None, prompt="Select target for workflow")
         if not target_addr:
             error("Target selection cancelled")
-            return
+            sys.exit(1)
 
     from blue_tap.framework.runtime.cli_events import emit_cli_event
     from blue_tap.framework.contracts.result_schema import (
@@ -528,6 +532,7 @@ def run_playbook_cmd(commands, playbook, list_playbooks_flag):
             id=f"step_{step_result['step']}",
             title=step_result["command"],
             module="playbook",
+            module_id="post_exploitation.playbook",
             protocol="multi",
             execution_status=execution_status,
             module_outcome=module_outcome,
@@ -545,6 +550,7 @@ def run_playbook_cmd(commands, playbook, list_playbooks_flag):
     envelope = build_run_envelope(
         schema="blue_tap.playbook.result",
         module="playbook",
+        module_id="post_exploitation.playbook",
         target=target_addr or "",
         adapter=hci_adapter,
         operator_context={"playbook": playbook_name, "step_count": len(commands)},
@@ -618,7 +624,7 @@ def session_show(name):
     )
     if not _os.path.exists(meta_path):
         error(f"Session '{name}' not found")
-        return
+        sys.exit(1)
     try:
         s = Session(name)
         smry = s.summary()
@@ -645,6 +651,7 @@ def session_show(name):
                 )
     except Exception as e:
         error(f"Cannot load session: {e}")
+        sys.exit(1)
 
 
 __all__ = ["report_cmd", "run_playbook_cmd", "session"]

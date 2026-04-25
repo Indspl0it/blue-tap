@@ -613,6 +613,7 @@ def scan_classic_result(duration: int = 10, hci: str | None = None) -> dict:
         ),
     ]
     result = build_scan_result(
+        module_id="discovery.scanner",
         scan_mode="classic",
         adapter=hci,
         duration_requested=duration,
@@ -659,6 +660,7 @@ def scan_ble_result_sync(duration: int = 10, passive: bool = False, adapter: str
         ),
     ]
     result = build_scan_result(
+        module_id="discovery.scanner",
         scan_mode="ble",
         adapter=adapter or "",
         duration_requested=duration,
@@ -730,6 +732,7 @@ def scan_all_result(duration: int = 10, hci: str | None = None) -> dict:
         ),
     ]
     result = build_scan_result(
+        module_id="discovery.scanner",
         scan_mode="all",
         adapter=hci,
         duration_requested=duration,

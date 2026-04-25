@@ -22,6 +22,7 @@ def test_firmware_run_id_format():
 
 def test_firmware_status_envelope_v2():
     env = build_firmware_status_result(
+        module_id="hardware.firmware_status",
         adapter="hci1",
         status={"installed": True, "loaded": True, "hooks": {"hook1": True, "hook2": True, "hook3": True, "hook4": True}},
     )
@@ -32,6 +33,7 @@ def test_firmware_status_envelope_v2():
 
 def test_firmware_status_partial_hooks():
     env = build_firmware_status_result(
+        module_id="hardware.firmware_status",
         adapter="hci1",
         status={"installed": True, "loaded": True, "hooks": {"hook1": True, "hook2": False}},
     )
@@ -40,6 +42,7 @@ def test_firmware_status_partial_hooks():
 
 def test_firmware_status_validates():
     env = build_firmware_status_result(
+        module_id="hardware.firmware_status",
         adapter="hci1",
         status={"installed": True, "loaded": False, "hooks": {}},
     )
@@ -49,6 +52,7 @@ def test_firmware_status_validates():
 
 def test_firmware_dump_envelope():
     env = build_firmware_dump_result(
+        module_id="hardware.firmware_dump",
         adapter="hci1",
         start_addr=0x80000000,
         end_addr=0x80100000,
@@ -65,6 +69,7 @@ def test_firmware_dump_envelope():
 
 def test_firmware_dump_validates():
     env = build_firmware_dump_result(
+        module_id="hardware.firmware_dump",
         adapter="hci1", start_addr=0, end_addr=256,
         output_path="/tmp/test.bin", success=True,
     )
@@ -74,6 +79,7 @@ def test_firmware_dump_validates():
 
 def test_connection_inspect_knob():
     env = build_connection_inspect_result(
+        module_id="hardware.connection_inspect",
         adapter="hci1",
         connections=[
             {"active": True, "address": "AA:BB:CC:DD:EE:FF", "encryption_enabled": True, "key_size": 1, "secure_connections": False},
@@ -86,6 +92,7 @@ def test_connection_inspect_knob():
 
 def test_connection_inspect_no_knob():
     env = build_connection_inspect_result(
+        module_id="hardware.connection_inspect",
         adapter="hci1",
         connections=[
             {"active": True, "address": "11:22:33:44:55:66", "encryption_enabled": True, "key_size": 16, "secure_connections": True},
@@ -95,13 +102,14 @@ def test_connection_inspect_no_knob():
 
 
 def test_connection_inspect_validates():
-    env = build_connection_inspect_result(adapter="hci1", connections=[])
+    env = build_connection_inspect_result(module_id="hardware.connection_inspect", adapter="hci1", connections=[])
     errors = validate_run_envelope(env)
     assert errors == [], f"Validation errors: {errors}"
 
 
 def test_firmware_operation_install():
     env = build_firmware_operation_result(
+        module_id="hardware.firmware_operation",
         adapter="hci1", operation="install", title="Install DarkFirmware",
         success=True, observations=["Backup saved", "Firmware written"],
     )
@@ -110,6 +118,7 @@ def test_firmware_operation_install():
 
 def test_firmware_operation_validates():
     env = build_firmware_operation_result(
+        module_id="hardware.firmware_operation",
         adapter="hci1", operation="init", title="Initialize Hooks",
         success=True,
     )
@@ -119,10 +128,10 @@ def test_firmware_operation_validates():
 
 def test_all_firmware_envelopes_json_serializable():
     envs = [
-        build_firmware_status_result(adapter="hci1", status={"installed": True, "loaded": True, "hooks": {}}),
-        build_firmware_dump_result(adapter="hci1", start_addr=0, end_addr=256, output_path="/tmp/x", success=True),
-        build_connection_inspect_result(adapter="hci1", connections=[]),
-        build_firmware_operation_result(adapter="hci1", operation="test", title="Test", success=True),
+        build_firmware_status_result(module_id="hardware.firmware_status", adapter="hci1", status={"installed": True, "loaded": True, "hooks": {}}),
+        build_firmware_dump_result(module_id="hardware.firmware_dump", adapter="hci1", start_addr=0, end_addr=256, output_path="/tmp/x", success=True),
+        build_connection_inspect_result(module_id="hardware.connection_inspect", adapter="hci1", connections=[]),
+        build_firmware_operation_result(module_id="hardware.firmware_operation", adapter="hci1", operation="test", title="Test", success=True),
     ]
     for env in envs:
         assert len(json.dumps(env, default=str)) > 0
@@ -130,7 +139,7 @@ def test_all_firmware_envelopes_json_serializable():
 
 def test_firmware_adapter_accepts():
     adapter = FirmwareReportAdapter()
-    env = build_firmware_status_result(adapter="hci1", status={"installed": True, "loaded": True, "hooks": {}})
+    env = build_firmware_status_result(module_id="hardware.firmware_status", adapter="hci1", status={"installed": True, "loaded": True, "hooks": {}})
     assert adapter.accepts(env)
 
 
@@ -142,7 +151,7 @@ def test_firmware_adapter_rejects_non_firmware():
 def test_firmware_adapter_round_trip():
     adapter = FirmwareReportAdapter()
     state = {}
-    env = build_firmware_status_result(adapter="hci1", status={"installed": True, "loaded": True, "hooks": {}})
+    env = build_firmware_status_result(module_id="hardware.firmware_status", adapter="hci1", status={"installed": True, "loaded": True, "hooks": {}})
     adapter.ingest(env, state)
     assert len(state["firmware_operations"]) == 1
     sections = adapter.build_sections(state)
@@ -155,6 +164,7 @@ def test_firmware_adapter_connection_inspection_card():
     adapter = FirmwareReportAdapter()
     state = {}
     env = build_connection_inspect_result(
+        module_id="hardware.connection_inspect",
         adapter="hci1",
         connections=[{"active": True, "address": "AA:BB:CC:DD:EE:FF", "encryption_enabled": True, "key_size": 1, "secure_connections": False}],
     )

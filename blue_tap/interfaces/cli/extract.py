@@ -5,10 +5,10 @@ from __future__ import annotations
 import rich_click as click
 
 from blue_tap.interfaces.cli._module_runner import invoke_or_exit, resolve_target
-from blue_tap.interfaces.cli.shared import LoggedCommand, LoggedGroup
+from blue_tap.interfaces.cli.shared import LoggedCommand, LoggedGroup, TargetSubcommandGroup
 
 
-@click.group(cls=LoggedGroup)
+@click.group(cls=TargetSubcommandGroup)
 @click.argument("target", required=False, default=None)
 @click.option("--hci", "-a", default=None, help="HCI adapter (e.g. hci0)")
 @click.pass_context
@@ -20,7 +20,13 @@ def extract(ctx, target, hci):
       blue-tap extract AA:BB:CC:DD:EE:FF contacts        # Extract from specific target
       blue-tap extract contacts                           # Interactive device picker
     """
+    import sys as _sys
+
     ctx.ensure_object(dict)
+    if any(a in ("--help", "-h") for a in _sys.argv[1:]):
+        ctx.obj["target"] = target or ""
+        ctx.obj["hci"] = hci
+        return
     target = resolve_target(target, hci=hci, prompt="Select target for data extraction")
     if not target:
         raise SystemExit(1)

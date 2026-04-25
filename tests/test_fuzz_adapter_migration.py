@@ -25,6 +25,7 @@ def _make_campaign_envelope(
     protocols = ["sdp", "ble-att"]
     proto_execs = [
         build_fuzz_protocol_execution(
+            module_id="fuzzing.engine",
             protocol=p,
             packets_sent=500,
             crashes=crashes,
@@ -80,6 +81,7 @@ def _make_campaign_envelope(
         }
 
     return build_fuzz_campaign_result(
+        module_id="fuzzing.campaign",
         target="AA:BB:CC:DD:EE:FF",
         adapter="session",
         campaign_summary=campaign_summary,

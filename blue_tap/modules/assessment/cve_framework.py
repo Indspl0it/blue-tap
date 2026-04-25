@@ -22,9 +22,6 @@ STATUS_INCONCLUSIVE = "inconclusive"
 STATUS_PAIRING_REQUIRED = "pairing_required"
 STATUS_NOT_APPLICABLE = "not_applicable"
 
-LEGACY_STATUS_POTENTIAL = "potential"
-LEGACY_STATUS_UNVERIFIED = "unverified"
-
 ACTIVE_CVE_STATUSES = (
     STATUS_CONFIRMED,
     STATUS_NOT_DETECTED,
@@ -33,19 +30,14 @@ ACTIVE_CVE_STATUSES = (
     STATUS_NOT_APPLICABLE,
 )
 
-ALL_STATUSES = ACTIVE_CVE_STATUSES + (
-    LEGACY_STATUS_POTENTIAL,
-    LEGACY_STATUS_UNVERIFIED,
-)
+ALL_STATUSES = ACTIVE_CVE_STATUSES
 
 STATUS_ORDER = {
     STATUS_CONFIRMED: 0,
     STATUS_NOT_DETECTED: 1,
-    LEGACY_STATUS_POTENTIAL: 2,
-    LEGACY_STATUS_UNVERIFIED: 3,
-    STATUS_INCONCLUSIVE: 4,
-    STATUS_PAIRING_REQUIRED: 5,
-    STATUS_NOT_APPLICABLE: 6,
+    STATUS_INCONCLUSIVE: 2,
+    STATUS_PAIRING_REQUIRED: 3,
+    STATUS_NOT_APPLICABLE: 4,
 }
 
 
@@ -126,7 +118,7 @@ def make_cve_finding(
 def summarize_findings(findings: list[dict]) -> dict:
     """Summarize finding counts in a report-friendly format."""
 
-    status_counts = Counter(f.get("status", LEGACY_STATUS_POTENTIAL) for f in findings)
+    status_counts = Counter(f.get("status", STATUS_INCONCLUSIVE) for f in findings)
     severity_counts = Counter(str(f.get("severity", "INFO")).upper() for f in findings)
     skipped = status_counts.get(STATUS_NOT_APPLICABLE, 0)
     return {
@@ -136,8 +128,6 @@ def summarize_findings(findings: list[dict]) -> dict:
         "severity_counts": dict(severity_counts),
         "confirmed": status_counts.get(STATUS_CONFIRMED, 0),
         "not_detected": status_counts.get(STATUS_NOT_DETECTED, 0),
-        "potential": status_counts.get(LEGACY_STATUS_POTENTIAL, 0),
-        "unverified": status_counts.get(LEGACY_STATUS_UNVERIFIED, 0),
         "inconclusive": status_counts.get(STATUS_INCONCLUSIVE, 0),
         "pairing_required": status_counts.get(STATUS_PAIRING_REQUIRED, 0),
         "not_applicable": skipped,
@@ -192,12 +182,14 @@ def build_vulnscan_result(
                 "cve": check.get("cve", ""),
             },
         )
+        check_id = str(check.get("cve", "") or check.get("title", "cve_check")).lower().replace(" ", "_").replace("-", "_")
         executions.append(
             make_execution(
                 kind="check",
-                id=str(check.get("cve", "") or check.get("title", "cve_check")).lower().replace(" ", "_"),
+                id=check_id,
                 title=check.get("title", check.get("cve", "CVE Check")),
                 module="assessment.vuln_scanner",
+                module_id="assessment.vuln_scanner",
                 protocol=check.get("section", "CVE").split(":")[0].replace("Check", "").strip() or "CVE",
                 execution_status=EXECUTION_ERROR if check.get("error") else EXECUTION_COMPLETED,
                 module_outcome=check.get("primary_status", STATUS_INCONCLUSIVE),
@@ -224,12 +216,14 @@ def build_vulnscan_result(
                 "finding_count": check.get("finding_count", 0),
             },
         )
+        check_id = str(check.get("check_id", "non_cve_check")).lower().replace("-", "_")
         executions.append(
             make_execution(
                 kind="check",
-                id=str(check.get("check_id", "non_cve_check")),
+                id=check_id,
                 title=check.get("title", "Non-CVE Check"),
                 module="assessment.vuln_scanner",
+                module_id="assessment.vuln_scanner",
                 protocol=check.get("section", "Posture").split(":")[0].replace("Check", "").strip() or "Posture",
                 execution_status=EXECUTION_ERROR if check.get("error") else EXECUTION_COMPLETED,
                 module_outcome=check.get("primary_status", STATUS_INCONCLUSIVE),
@@ -247,6 +241,7 @@ def build_vulnscan_result(
     return build_run_envelope(
         schema="blue_tap.vulnscan.result",
         module="assessment.vuln_scanner",
+        module_id="assessment.vuln_scanner",
         target=target,
         adapter=adapter,
         operator_context={"active": active},
@@ -294,6 +289,7 @@ def build_vuln_probe_result(
         id=operation,
         title=title,
         module="assessment.vuln_scanner",
+        module_id=f"assessment.{operation}",
         protocol=protocol,
         execution_status=EXECUTION_COMPLETED,
         module_outcome=outcome,
@@ -311,6 +307,7 @@ def build_vuln_probe_result(
     return build_run_envelope(
         schema="blue_tap.vulnscan.result",
         module="assessment.vuln_scanner",
+        module_id=f"assessment.{operation}",
         target=target,
         adapter=adapter,
         operator_context={"operation": operation, "active": False},

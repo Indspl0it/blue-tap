@@ -40,7 +40,11 @@ def doctor():
         for lim in limitations:
             console.print(f"  • {lim}")
 
-    if not limitations:
-        console.print()
+    console.print()
+    if not adapters:
+        warning("Environment NOT ready: no Bluetooth adapter present.")
+    elif limitations:
+        warning("Environment partially ready — see limitations above.")
+    else:
         success("Environment ready for Bluetooth operations.")
     console.print()

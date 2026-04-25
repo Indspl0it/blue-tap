@@ -129,6 +129,7 @@ def run_auto_recon(
         _emit(cli_events, event_type="execution_result", run_id=run_id, execution_id="fingerprint", target=address, adapter=hci, message="Fingerprint collection completed")
         executions.append(
             build_recon_execution(
+                module_id="reconnaissance.campaign",
                 operation="fingerprint",
                 title="Device Fingerprint",
                 protocol="Fingerprint",
@@ -155,6 +156,7 @@ def run_auto_recon(
         _emit(cli_events, event_type="execution_result", run_id=run_id, execution_id="sdp_browse", target=address, adapter=hci, message=f"SDP browse collected {len(sdp_entries)} service(s)")
         executions.append(
             build_recon_execution(
+                module_id="reconnaissance.campaign",
                 operation="sdp_browse",
                 title="SDP Service Browse",
                 protocol="SDP",
@@ -181,6 +183,7 @@ def run_auto_recon(
         _emit(cli_events, event_type="execution_result", run_id=run_id, execution_id="rfcomm_scan", target=address, adapter=hci, message=f"RFCOMM scan completed with {len(hidden_channels)} hidden channel(s)")
         executions.append(
             build_recon_execution(
+                module_id="reconnaissance.campaign",
                 operation="rfcomm_scan",
                 title="RFCOMM Channel Scan",
                 protocol="RFCOMM",
@@ -233,6 +236,7 @@ def run_auto_recon(
         _emit(cli_events, event_type="execution_result", run_id=run_id, execution_id="l2cap_scan", target=address, adapter=hci, message=f"L2CAP scan completed with {len(l2cap_correlation.get('unexpected_psms', []))} unexpected PSM(s)")
         executions.append(
             build_recon_execution(
+                module_id="reconnaissance.campaign",
                 operation="l2cap_scan",
                 title="L2CAP PSM Scan",
                 protocol="L2CAP",
@@ -257,6 +261,7 @@ def run_auto_recon(
         _emit(cli_events, event_type="execution_result", run_id=run_id, execution_id="pairing_mode_probe", target=address, adapter=hci, message=f"Pairing mode probe completed: {pairing_probe.get('pairing_method', 'Unknown')}")
         executions.append(
             build_recon_execution(
+                module_id="reconnaissance.campaign",
                 operation="pairing_mode_probe",
                 title="Pairing Mode Detection",
                 protocol="Pairing",
@@ -296,6 +301,7 @@ def run_auto_recon(
         _emit(cli_events, event_type="execution_result", run_id=run_id, execution_id="gatt_enum", target=address, adapter=hci, message=_gatt_summary(gatt_result))
         executions.append(
             build_recon_execution(
+                module_id="reconnaissance.campaign",
                 operation="gatt_enum",
                 title="GATT Enumeration",
                 protocol="GATT",
@@ -370,6 +376,7 @@ def run_auto_recon(
     _emit(cli_events, event_type="run_completed", run_id=run_id, target=address, adapter=hci, message="Recon run completed", details={"artifact_count": len(artifacts)})
     module_data["cli_events"] = cli_events
     return build_run_envelope(
+        module_id="reconnaissance.campaign",
         schema="blue_tap.recon.result",
         module="reconnaissance",
         run_id=run_id,
@@ -441,6 +448,7 @@ def _run_hci_capture_step(address: str, hci: str, duration: int, prerequisites: 
         _emit(cli_events, event_type="artifact_saved", run_id=run_id, execution_id="recon_hci_capture", target=address, adapter=hci, message=f"HCI capture saved to {artifact['path']}")
         metadata = _artifact_metadata(artifact["path"])
         execution = build_recon_execution(
+            module_id="reconnaissance.campaign",
             operation="recon_hci_capture",
             title="HCI Capture",
             protocol="HCI",
@@ -485,6 +493,7 @@ def _run_nrf_capture_step(address: str, duration: int, prerequisites: dict[str, 
         _emit(cli_events, event_type="artifact_saved", run_id=run_id, execution_id="recon_nrf_capture", target=address, adapter="nrf52840", message=f"BLE capture saved to {artifact['path']}")
         metadata = _artifact_metadata(artifact["path"])
         execution = build_recon_execution(
+            module_id="reconnaissance.campaign",
             operation="recon_nrf_capture",
             title="nRF BLE Capture",
             protocol="BLE",
@@ -530,6 +539,7 @@ def _run_lmp_capture_step(address: str, below_hci_hci: str, duration: int, prere
         _emit(cli_events, event_type="artifact_saved", run_id=run_id, execution_id="recon_below_hci", target=address, adapter=below_hci_hci, message=f"LMP capture saved to {artifact['path']}")
         metadata = _artifact_metadata(artifact["path"])
         execution = build_recon_execution(
+            module_id="reconnaissance.campaign",
             operation="recon_below_hci",
             title="Below-HCI Recon",
             protocol="LMP",
@@ -576,6 +586,7 @@ def _run_combined_capture_step(address: str, below_hci_hci: str, duration: int, 
         _emit(cli_events, event_type="artifact_saved", run_id=run_id, execution_id="recon_combined_capture", target=address, adapter=below_hci_hci, message=f"Combined capture saved to {artifact['path']}")
         metadata = _artifact_metadata(output)
         execution = build_recon_execution(
+            module_id="reconnaissance.campaign",
             operation="recon_combined_capture",
             title="Combined BLE and LMP Capture",
             protocol="BLE/LMP",
@@ -771,6 +782,7 @@ class ReconCampaignModule(Module):
             return build_run_envelope(
                 schema=self.schema_prefix,
                 module=self.module_id,
+                                module_id=self.module_id,
                 target=target,
                 adapter=hci,
                 started_at=ctx.started_at,

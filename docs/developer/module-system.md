@@ -136,7 +136,7 @@ A frozen dataclass that captures all metadata about a module. Defined in `blue_t
 
 | Field | Type | Required | Default | Description |
 |---|---|---|---|---|
-| `module_id` | `str` | Yes | | Format: `<family>.<name>`, regex: `^[a-z0-9_]+\.[a-z0-9_]+$` |
+| `module_id` | `str` | Yes | | Family-prefixed dotted id, regex: `^[a-z0-9_]+(\.[a-z0-9_]+)+$` (e.g. `assessment.vuln_scanner`; dotted hierarchies like `assessment.cve.knob` are accepted). Also required by `make_execution()` and `build_run_envelope()` |
 | `family` | `ModuleFamily` | Yes | | Enum value (see below) |
 | `name` | `str` | Yes | | Human-readable name (must be non-empty) |
 | `description` | `str` | Yes | | One-line purpose |
@@ -156,7 +156,7 @@ A frozen dataclass that captures all metadata about a module. Defined in `blue_t
 
 The descriptor validates itself on construction:
 
-1. `module_id` must match `^[a-z0-9_]+\.[a-z0-9_]+$`
+1. `module_id` must match `^[a-z0-9_]+(\.[a-z0-9_]+)+$`
 2. `family` must be a `ModuleFamily` enum instance
 3. `module_id` must start with `{family.value}.`
 4. `name` must be non-empty
@@ -183,18 +183,17 @@ class ModuleFamily(str, Enum):
 
 ### Canonical Outcomes per Family
 
-Defined in `FAMILY_OUTCOMES` (the strict set from the architecture rule):
+`FAMILY_OUTCOMES` (in `blue_tap.framework.registry.families`) is the **single source of truth**. `make_execution()` validates `module_outcome` against this table at construction time and raises `ValueError` on any unlisted value — there is no separate validator vocabulary.
 
-| Family | Canonical Outcomes |
+| Family | Allowed `module_outcome` values |
 |---|---|
 | `DISCOVERY` | `observed`, `merged`, `correlated`, `partial`, `not_applicable` |
-| `RECONNAISSANCE` | `observed`, `merged`, `correlated`, `partial`, `not_applicable` |
-| `ASSESSMENT` | `confirmed`, `inconclusive`, `pairing_required`, `not_applicable` |
-| `EXPLOITATION` | `success`, `unresponsive`, `recovered`, `not_applicable`, `aborted` |
-| `POST_EXPLOITATION` | `extracted`, `connected`, `streamed`, `transferred`, `not_applicable` |
-| `FUZZING` | `crash_found`, `timeout`, `corpus_grown`, `no_findings` |
-
-The runtime validation in `result_schema.py` uses a broader `VALID_OUTCOMES_BY_FAMILY` dict that includes legacy/specialized outcomes. New modules should stick to the canonical set above.
+| `RECONNAISSANCE` | `observed`, `merged`, `correlated`, `partial`, `not_applicable`, `unsupported_transport`, `collector_unavailable`, `prerequisite_missing`, `artifact_collected`, `hidden_surface_detected`, `no_relevant_traffic`, `undetermined`, `partial_observation`, `auth_required`, `not_found`, `not_connectable`, `timeout`, `no_results` |
+| `ASSESSMENT` | `confirmed`, `not_detected`, `inconclusive`, `pairing_required`, `not_applicable` |
+| `EXPLOITATION` | `success`, `confirmed`, `unresponsive`, `recovered`, `aborted`, `not_applicable` |
+| `POST_EXPLOITATION` | `extracted`, `connected`, `streamed`, `transferred`, `partial`, `completed`, `failed`, `aborted`, `not_applicable` |
+| `FUZZING` | `crash_found`, `crash_detected`, `timeout`, `corpus_grown`, `no_findings`, `completed`, `degraded`, `aborted`, `pairing_required`, `reproduced`, `not_applicable` |
+| `HARDWARE` | `completed`, `installed`, `hooks_active`, `hooks_partial`, `not_loaded`, `prerequisite_missing`, `spoofed`, `rejected`, `restored`, `method_unavailable`, `not_applicable` |
 
 ---
 

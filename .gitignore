@@ -47,6 +47,7 @@ tmp_dos_review.*
 
 # local AI tool scratch
 GEMINI.md
+CLAUDE.md
 
 # academic paper work — not part of source distribution
 paper/

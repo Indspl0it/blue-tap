@@ -201,6 +201,48 @@ class LoggedGroup(click.RichGroup):
 LoggedGroup.group_class = LoggedGroup
 
 
+class TargetSubcommandGroup(LoggedGroup):
+    """Group with both an optional positional ``TARGET`` and named subcommands.
+
+    Click's default parser greedily consumes the first non-flag positional as
+    ``TARGET``, which means ``blue-tap recon sdp --help`` is parsed as
+    ``recon TARGET=sdp --help`` and the user gets the parent help instead of
+    the ``sdp`` subcommand's help.
+
+    This subclass peeks at the args before Click parses them: if a bare
+    positional matches a registered subcommand name, an empty placeholder is
+    inserted before it so Click's positional consumer captures ``""`` for
+    ``TARGET`` and leaves the subcommand name intact.
+    """
+
+    def parse_args(self, ctx, args):
+        value_flags: set[str] = set()
+        for p in self.params:
+            if isinstance(p, click.Option) and not p.is_flag and not getattr(p, "count", False):
+                value_flags.update(p.opts)
+                value_flags.update(p.secondary_opts)
+
+        new_args: list[str] = []
+        injected = False
+        skip_next = False
+        for token in args:
+            if skip_next:
+                new_args.append(token)
+                skip_next = False
+                continue
+            if not injected and not token.startswith("-") and token in self.commands:
+                new_args.append("")
+                new_args.append(token)
+                injected = True
+                continue
+            if token in value_flags:
+                new_args.append(token)
+                skip_next = True
+                continue
+            new_args.append(token)
+        return super().parse_args(ctx, new_args)
+
+
 __all__ = [
     "_extract_target_param",
     "_infer_category",
@@ -218,4 +260,5 @@ __all__ = [
     "_save_json",
     "LoggedCommand",
     "LoggedGroup",
+    "TargetSubcommandGroup",
 ]

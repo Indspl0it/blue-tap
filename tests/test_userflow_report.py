@@ -37,12 +37,14 @@ def _make_runner(tmp_path: Path) -> CliRunner:
 
 def _discovery_envelope() -> dict:
     return build_run_envelope(
+        module_id="discovery.scanner",
         schema="blue_tap.scan.result",
         module="scanner",
         target="",
         adapter="hci0",
         summary={"outcome": "observed", "device_count": 1, "classic_count": 1, "ble_count": 0},
         executions=[make_execution(
+            module_id="discovery.scanner",
             execution_id="scan",
             kind="collector",
             id="scan",
@@ -59,12 +61,14 @@ def _discovery_envelope() -> dict:
 
 def _recon_envelope() -> dict:
     return build_run_envelope(
+        module_id="reconnaissance.sdp",
         schema="blue_tap.recon.sdp.result",
         module="sdp",
         target=TARGET,
         adapter="hci0",
         summary={"outcome": "observed", "service_count": 1},
         executions=[make_execution(
+            module_id="reconnaissance.sdp",
             execution_id="sdp_browse",
             kind="collector",
             id="sdp_browse",
@@ -81,12 +85,14 @@ def _recon_envelope() -> dict:
 
 def _assessment_envelope() -> dict:
     return build_run_envelope(
+        module_id="assessment.vuln_scanner",
         schema="blue_tap.vulnscan.result",
         module="assessment.vuln_scanner",
         target=TARGET,
         adapter="hci0",
         summary={"outcome": "inconclusive", "confirmed": 0, "inconclusive": 1},
         executions=[make_execution(
+            module_id="assessment.check_ssp",
             execution_id="check_ssp",
             kind="check",
             id="check_ssp",
@@ -103,6 +109,7 @@ def _assessment_envelope() -> dict:
 
 def _exploitation_envelope() -> dict:
     return build_run_envelope(
+        module_id="exploitation.knob",
         schema="blue_tap.attack.result",
         module="exploitation",
         target=TARGET,
@@ -127,12 +134,14 @@ def _exploitation_envelope() -> dict:
 
 def _post_exploitation_envelope() -> dict:
     return build_run_envelope(
+        module_id="post_exploitation.pbap",
         schema="blue_tap.post_exploitation.pbap.result",
         module="post_exploitation.pbap",
         target=TARGET,
         adapter="hci0",
         summary={"outcome": "extracted", "total_entries": 2},
         executions=[make_execution(
+            module_id="post_exploitation.pbap",
             execution_id="pbap_pb",
             kind="collector",
             id="pbap_pb",
@@ -149,12 +158,14 @@ def _post_exploitation_envelope() -> dict:
 
 def _fuzzing_envelope() -> dict:
     return build_run_envelope(
+        module_id="fuzzing.engine",
         schema="blue_tap.fuzz.result",
         module="engine",
         target=TARGET,
         adapter="hci0",
         summary={"outcome": "no_findings", "iterations": 100, "crashes": 0},
         executions=[make_execution(
+            module_id="fuzzing.engine",
             execution_id="fuzz_campaign",
             kind="phase",
             id="fuzz_campaign",

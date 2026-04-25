@@ -20,6 +20,7 @@ def build_audio_result(
     adapter: str,
     operation: str,
     title: str,
+    module_id: str,
     protocol: str = "Audio",
     module_data: dict[str, Any],
     summary_data: dict[str, Any] | None = None,
@@ -45,6 +46,7 @@ def build_audio_result(
         id=operation,
         title=title,
         module="audio",
+        module_id=module_id,
         protocol=protocol,
         execution_status=EXECUTION_COMPLETED,
         module_outcome=module_outcome,
@@ -58,6 +60,7 @@ def build_audio_result(
     return build_run_envelope(
         schema="blue_tap.audio.result",
         module="audio",
+        module_id=module_id,
         target=target,
         adapter=adapter,
         operator_context={"operation": operation, "protocol": protocol},

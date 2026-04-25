@@ -51,10 +51,17 @@ Blue-Tap is a Bluetooth Classic and BLE security assessment framework designed t
 - Linux (Kali recommended)
 - Python 3.10+
 - BlueZ 5.50+ (`bluetoothctl`, `hcitool`, `btmon`)
-- At least one Bluetooth HCI adapter
+- An **RTL8761B-based USB dongle** (e.g., TP-Link UB500) — Blue-Tap currently gates all live operations behind RTL8761B detection. Stock firmware is fine; DarkFirmware unlocks below-HCI features.
 - Root privileges for Bluetooth operations
 
-Optional: RTL8761B USB dongle (e.g., TP-Link UB500) for DarkFirmware / below-HCI attacks.
+Inspection commands that work without root and without hardware: `--help`, `--version`, `doctor`, `demo`, `session list/show`, `search`, `info`, `show-options`, `plugins`. Everything else — including `report`, `fuzz crashes/corpus/minimize`, and `run-playbook --list` — currently still goes through the root + RTL8761B gate at startup; run them with `sudo` on a host that has an RTL8761B dongle attached.
+
+```text
+$ blue-tap report ./sessions/example
+  ✖  Blue-Tap requires root for Bluetooth operations.
+```
+
+> Tightening the root gate so the read-only inspection paths above can run unprivileged is on the v2.6.3 backlog.
 
 ### Via PyPI
 
@@ -73,12 +80,14 @@ pip install -e .
 ### Verify Installation
 
 ```bash
-blue-tap --version          # Should print 2.6.2
-blue-tap doctor             # Check all prerequisites
-sudo blue-tap adapter list  # List Bluetooth adapters
+blue-tap --version          # prints 'blue-tap, version 2.6.2'
+blue-tap doctor             # check prerequisites — no root, no hardware needed
+blue-tap session list       # list past sessions — no root, no hardware needed
+blue-tap demo               # full pipeline against simulated data — no hardware needed
+sudo blue-tap adapter list  # enumerate live HCI adapters (needs root + RTL8761B)
 ```
 
-See the full [Installation Guide](https://Indspl0it.github.io/blue-tap/getting-started/installation/) for detailed setup, including DarkFirmware flashing and the IVI simulator.
+See the full [Installation Guide](https://Indspl0it.github.io/blue-tap/getting-started/installation/) for detailed setup, including DarkFirmware flashing.
 
 ## Usage
 
@@ -120,19 +129,25 @@ sudo blue-tap auto 4C:4F:EE:17:3A:89 --yes
 # Fleet scan — discover and assess all IVI devices in range
 sudo blue-tap fleet --duration 20 --class ivi
 
-# Run a playbook
-sudo blue-tap run-playbook --playbook ivi-full-audit.yaml
+# Run a bundled playbook (see `blue-tap run-playbook --list` for all)
+sudo blue-tap run-playbook --playbook ivi-attack 4C:4F:EE:17:3A:89
 ```
 
 ### Fuzzing
 
 ```bash
-# Multi-protocol fuzzing campaign
+# Multi-protocol fuzzing campaign (needs hardware)
 sudo blue-tap fuzz campaign 4C:4F:EE:17:3A:89 -p sdp -p rfcomm --duration 2h
 
-# Crash analysis
-blue-tap fuzz crashes list --protocol sdp --severity HIGH
-blue-tap fuzz minimize CRASH_ID
+# Crash analysis (reads on-disk crash database, but the CLI still asks for
+# root + RTL8761B at startup — run with sudo until the gate is loosened)
+sudo blue-tap fuzz crashes list --protocol sdp --severity HIGH
+sudo blue-tap fuzz crashes show CRASH_ID
+sudo blue-tap fuzz crashes export -o crashes.json
+
+# Get help for any fuzz subcommand
+blue-tap fuzz crashes --help
+blue-tap fuzz campaign --help
 ```
 
 See the full [CLI Reference](https://Indspl0it.github.io/blue-tap/guide/cli-reference/) for all commands and options.
@@ -143,7 +158,7 @@ Full documentation is hosted at **[Indspl0it.github.io/blue-tap](https://Indspl0
 
 | Section | Description |
 |---------|-------------|
-| [Getting Started](https://Indspl0it.github.io/blue-tap/getting-started/installation/) | Installation, hardware setup, quick start, IVI simulator |
+| [Getting Started](https://Indspl0it.github.io/blue-tap/getting-started/installation/) | Installation, hardware setup, quick start |
 | [CLI Reference](https://Indspl0it.github.io/blue-tap/guide/cli-reference/) | Every command, option, and example |
 | [CVE Detection Matrix](https://Indspl0it.github.io/blue-tap/cve/detection-matrix/) | 37 CVEs across vulnscan, exploitation, and DoS |
 | [DoS Matrix](https://Indspl0it.github.io/blue-tap/cve/dos-matrix/) | 30 DoS checks with severity and recovery monitoring |

@@ -89,7 +89,6 @@ nav:
       - Installation: getting-started/installation.md
       - Hardware Setup: getting-started/hardware-setup.md
       - Quick Start: getting-started/quick-start.md
-      - IVI Simulator: getting-started/ivi-simulator.md
   - User Guide:
       - CLI Reference: guide/cli-reference.md
       - Discovery & Scanning: guide/discovery.md

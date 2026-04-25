@@ -739,30 +739,25 @@ class HCIVSCSocket:
     def read_memory(self, address: int, size: int = 4) -> bytes:
         """Read memory from the Bluetooth controller via VSC 0xFC61.
 
-        The RTL8761B firmware interprets the size parameter as a read mode:
-        ``0x20`` (32) reads a full 4-byte word and returns 4 data bytes;
-        smaller values (4, 8) return only 1 byte.  We always use 0x20 for
-        reliable 4-byte reads, matching the DarkFirmware standalone tools.
+        The RTL8761B firmware always returns a full 4-byte word (mode 0x20).
+        This wrapper slices the response so callers requesting fewer bytes
+        get exactly that many — keeping the API honest for sub-word reads at
+        ranges that don't end on a 4-byte boundary.
 
         Args:
-            address: 32-bit memory address to read from (should be 4-byte aligned).
-            size:    Ignored — always reads 4 bytes.  Kept for API compatibility.
+            address: 32-bit memory address (4-byte alignment recommended).
+            size:    Number of bytes to return. Must be 1–4. The firmware
+                     read is always 4 bytes; the result is sliced to ``size``.
 
         Returns:
-            The raw bytes read from the controller (typically 4 bytes).
-
-        Raises:
-            OSError:      If the socket is not open.
-            TimeoutError: If the command-complete is not received.
+            ``size`` bytes from the controller, or ``b""`` on failure.
         """
-        logger.debug("Reading memory at %#010x", address)
-        # Params: size(1B) + address(4B LE)
-        # Use 0x20 as size — firmware reads a full 32-bit word and returns 4 bytes.
-        # Smaller size values (4, 8) only return 1 byte on RTL8761B.
+        if not 1 <= size <= 4:
+            raise ValueError(f"read_memory size must be 1–4, got {size}")
+        logger.debug("Reading memory at %#010x (size=%d)", address, size)
         params = struct.pack("<BI", 0x20, address)
         result = self.send_vsc(self.VSC_MEM_READ, params)
 
-        # Command complete returns: status(1) + data(...)
         if len(result) < 1:
             error("Empty response from memory read")
             return b""
@@ -772,7 +767,7 @@ class HCIVSCSocket:
             error(f"Memory read at 0x{address:08X} failed with status 0x{status:02X}")
             return b""
 
-        return result[1:]
+        return result[1 : 1 + size]
 
     def write_memory(self, address: int, data: bytes) -> bool:
         """Write memory on the Bluetooth controller via VSC 0xFC62.

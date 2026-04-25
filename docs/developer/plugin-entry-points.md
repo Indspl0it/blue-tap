@@ -208,6 +208,7 @@ class IviDiagCheckModule:
         return build_run_envelope(
             schema="blue_tap.ivi_diag_check.result",
             module="assessment",
+            module_id=module_id,
             target=target,
             adapter=adapter,
             summary={
@@ -423,7 +424,7 @@ In addition, the `ModuleDescriptor.__post_init__()` validation runs on construct
 
 | Check | Raises `ValueError` if |
 |---|---|
-| `module_id` format | Does not match `^[a-z0-9_]+\.[a-z0-9_]+$` |
+| `module_id` format | Does not match `^[a-z0-9_]+(\.[a-z0-9_]+)+$` (lowercase snake_case, dot-separated, dotted hierarchies allowed) |
 | `family` type | Not a `ModuleFamily` enum instance |
 | `module_id` prefix | Does not start with `{family.value}.` |
 | `name` | Empty string |
@@ -441,7 +442,7 @@ If `__post_init__` raises, the entry point is logged as an error and skipped. If
 | Must follow `ModuleDescriptor` schema | All required fields, valid `module_id` format, correct family prefix |
 | Must return valid `RunEnvelope` | Passes `validate_run_envelope()` |
 | Cannot override built-in modules | `register()` raises `ValueError` on duplicate `module_id` |
-| `module_outcome` must be valid | If `module_id` is passed to `make_execution()`, the outcome is validated against the family taxonomy |
+| `module_outcome` must be valid | `module_id` is required on `make_execution()` and `build_run_envelope()`; the outcome is validated against `FAMILY_OUTCOMES[family]` and a mismatch raises `ValueError` at construction |
 | Entry point must be importable | `validate_plugin()` warns if the module path cannot be imported |
 
 ---

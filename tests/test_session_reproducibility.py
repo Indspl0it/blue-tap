@@ -27,12 +27,9 @@ TARGET = "AA:BB:CC:DD:EE:FF"
 SESSION_NAME = "flow_repro"
 ITERATIONS = 25
 
-_SCAN_RESULT = {
-    "status": "completed",
-    "devices": [
-        {"address": TARGET, "name": "IVI Device", "type": "classic", "rssi": -55},
-    ],
-}
+_SCAN_RESULT = [
+    {"address": TARGET, "name": "IVI Device", "type": "classic", "rssi": -55},
+]
 
 _VULN_RESULT = {
     "schema": "blue_tap.vulnscan.result",
@@ -102,7 +99,12 @@ _VOLATILE_KEYS = frozenset({
 })
 
 _TS_RE = re.compile(
+    # ISO 8601 timestamps used in JSON envelopes and HTML headers
     r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[+-]\d{2}:\d{2}|Z)?"
+    # ...and bare HH:MM:SS shown in the report timeline cells (lookarounds
+    # exclude BD_ADDR runs like ``12:34:56:78:9A:BC`` which contain a similar
+    # 3-octet sub-pattern).
+    r"|(?<![\d:])\d{2}:\d{2}:\d{2}(?![\d:])"
 )
 
 
@@ -138,7 +140,7 @@ def _run_one_pipeline(tmp_path: Path) -> dict:
     """
     runner = _make_runner(tmp_path)
     with (
-        patch("blue_tap.hardware.scanner.scan_all_result", return_value=deepcopy(_SCAN_RESULT)),
+        patch("blue_tap.hardware.scanner.scan_all", return_value=deepcopy(_SCAN_RESULT)),
         patch(
             "blue_tap.modules.assessment.vuln_scanner.run_vulnerability_scan",
             return_value=deepcopy(_VULN_RESULT),
