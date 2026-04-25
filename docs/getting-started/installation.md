@@ -20,20 +20,20 @@ Blue-Tap requires a Linux environment with Bluetooth support. It uses raw HCI so
     R/W, in-flight modification). If no RTL8761B is present, hardware-using
     commands exit with `No RTL8761B / TP-Link UB500 dongle detected`.
 
-    The following commands run without root and without any adapter:
+    The following commands run without root **and** without any adapter
+    (the root and RTL8761B gates share one skip predicate, so anything
+    listed here skips both checks):
 
     - `blue-tap --version`, `blue-tap --help`
     - `blue-tap doctor`
     - `blue-tap demo`
     - `blue-tap session list`, `blue-tap session show <name>`
+    - `blue-tap report` (including `blue-tap report <dump-dir>`)
+    - `blue-tap fuzz crashes list / show / export`
+    - `blue-tap fuzz corpus list / minimize`
+    - `blue-tap fuzz minimize`
+    - `blue-tap run-playbook --list`
     - `blue-tap search`, `blue-tap info`, `blue-tap show-options`, `blue-tap plugins`
-
-    Everything else — including `report` (with or without a positional dump
-    directory), `fuzz crashes list/show/export`, `fuzz corpus list/minimize`,
-    `fuzz minimize`, and `run-playbook --list` — currently still hits the
-    root + RTL8761B gate at startup. Run them with `sudo` on a host that has
-    an RTL8761B dongle attached. Tightening that gate so the read-only
-    paths can run unprivileged is on the v2.6.3 backlog.
 
 !!! warning "Linux Only"
     Blue-Tap uses raw HCI sockets, D-Bus BlueZ APIs, and Linux-specific Bluetooth tooling.
@@ -162,7 +162,7 @@ The `-e` (editable) flag means changes to the source code take effect immediatel
 
 ```bash
 $ blue-tap --version
-blue-tap, version 2.6.2
+blue-tap, version 2.6.3
 ```
 
 If this command fails with `command not found`, ensure the pip install location is on your `$PATH`. On Kali, pip installs to `/usr/local/bin/` by default; on other distributions, it may install to `~/.local/bin/`.

@@ -11,12 +11,12 @@ security assessment and produced a professional report.
     refuses to run hardware-using commands without one — `No RTL8761B / TP-Link
     UB500 dongle detected`). Run commands with `sudo`.
 
-    The following inspection paths skip both gates: `--help`, `--version`,
-    `doctor`, `demo`, `session list / show`, `search`, `info`, `show-options`,
-    `plugins`. Everything else — including `report`, `fuzz crashes/corpus`,
-    and `run-playbook --list` — currently still goes through the root +
-    RTL8761B check at startup (loosening that gate for read-only paths is
-    on the v2.6.3 backlog).
+    The following inspection paths skip both gates and run unprivileged
+    against an empty machine: `--help`, `--version`, `doctor`, `demo`,
+    `session list / show`, `report` (including `report <dir>`),
+    `fuzz crashes list / show / export`, `fuzz corpus list / minimize`,
+    `fuzz minimize`, `run-playbook --list`, `search`, `info`,
+    `show-options`, `plugins`.
 
 !!! tip "No Hardware? Start with Demo Mode"
     If you do not have an RTL8761B dongle or a target device yet, skip to
@@ -223,15 +223,15 @@ sudo blue-tap report
     For JSON output use `-f json`:
 
     ```
-    $ sudo blue-tap report -f json sessions/blue-tap_20260425_191205
+    $ blue-tap report -f json sessions/blue-tap_20260425_191205
       ●  Loaded standardized session data from sessions/blue-tap_20260425_191205
       ✔  JSON report generated: sessions/blue-tap_20260425_191205/report.json
     ```
 
     No session is created when `report` is invoked with a positional dump dir,
     so the command is safe to re-run repeatedly without polluting `~/.blue-tap`.
-    The startup root + RTL8761B gate still fires though, so `sudo` and a
-    plugged-in dongle are required even for offline regeneration.
+    Both forms of `report` skip the root and RTL8761B gates — offline report
+    regeneration works on a machine with no Bluetooth hardware at all.
 
 This collects all results from the active session -- discovery, reconnaissance, vulnscan,
 any exploits or extractions you ran -- and produces a structured report. The HTML report

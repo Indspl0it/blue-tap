@@ -131,20 +131,22 @@ Real assessments often span multiple days. Blue-Tap creates a new session for ea
 # (e.g. when invoked from a playbook step). Without `-s`, plain
 # `blue-tap report` exits 1 with: ✖ No session active and no dump
 # directory specified.
-sudo blue-tap report --format html
+blue-tap report --format html
 
 # Report from a specific named session — pass the session name to the
 # global -s flag, then call `report` (the report command itself has no
 # --session flag).
-sudo blue-tap -s blue-tap_20260416_143022 report --format html
+blue-tap -s blue-tap_20260416_143022 report --format html
 
 # Report from a directory of session artefacts (e.g. an exported
 # session bundle). The positional argument points the report at any
-# directory of run-envelope JSON files. The hardware (RTL8761B) gate
-# is skipped for this form, but the startup root gate still fires —
-# `sudo` is required even for offline regeneration.
-sudo blue-tap report ./sessions/blue-tap_20260416_143022 --format html
+# directory of run-envelope JSON files.
+blue-tap report ./sessions/blue-tap_20260416_143022 --format html
 ```
+
+`report` skips both the root and the RTL8761B chipset gates, so all three
+forms above run unprivileged on a machine with no Bluetooth hardware —
+useful for off-host report regeneration from an exported session bundle.
 
 !!! tip "Multi-Day Assessments"
     Name your session directory after the engagement: `export BT_TAP_SESSIONS_DIR=./sessions/client-ivi-audit-2026`. All days of testing write to the same parent directory, and the final report aggregates everything.

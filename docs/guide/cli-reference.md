@@ -3,26 +3,30 @@
 Entry point: `blue-tap = blue_tap.interfaces.cli.main:main`
 
 !!! warning "Root + RTL8761B Required for Live Operations"
-    Most active commands require root privileges (raw HCI sockets) **and**
-    an RTL8761B-based USB dongle (the tool gates live commands behind
+    Live commands require root privileges (raw HCI sockets) **and** an
+    RTL8761B-based USB dongle (the tool gates live commands behind
     chipset detection — `No RTL8761B / TP-Link UB500 dongle detected`
-    otherwise). The startup root + chipset gate runs on every invocation
-    that isn't on the explicit skip list below; everything else needs
-    `sudo` and a dongle plugged in, even when the work is purely on-disk.
-
-    The skip list — neither root nor hardware required:
+    otherwise). Both the root check and the chipset check share one
+    skip predicate, so the no-root list and the no-hardware list are
+    the same:
 
     - `--help`, `--version`
     - `doctor`
     - `demo`
     - `session list`, `session show <name>`
+    - `report` (including `report <dump-dir>`)
+    - `fuzz crashes list / show / export`
+    - `fuzz corpus list / minimize`
+    - `fuzz minimize`
+    - `run-playbook --list`
     - `search`, `info`, `show-options`, `plugins`
 
-    The hardware gate is already loosened for `report <dump-dir>`,
-    `fuzz crashes list / show / export`, `fuzz corpus list / minimize`,
-    `fuzz minimize`, and `run-playbook --list` — but the *root* gate
-    still fires for them, so they currently still need `sudo`. Pruning
-    the root gate to match the hardware gate is on the v2.6.3 backlog.
+    Anything not on this list needs `sudo` and a plugged-in RTL8761B
+    dongle. (Prior to v2.6.3 the two gates had drifted: the hardware
+    gate was loosened for `report` / `fuzz crashes` / `run-playbook
+    --list`, but the root gate wasn't, so those paths still demanded
+    `sudo` despite never touching hardware. v2.6.3 collapses the two
+    skip-sets so the gates always agree.)
 
 ---
 
@@ -65,9 +69,9 @@ blue-tap report --format html             # 6. Generate assessment report
     session. Inspection commands (`--help`, `doctor`, `demo`, `session
     list/show`, `report`, `fuzz crashes/corpus/minimize`, `run-playbook
     --list`, `search`, `info`, `show-options`, `plugins`) do **not**
-    create sessions, so help and inspection never pollute `~/.blue-tap`
-    even when invoked under `sudo` (which the root gate currently still
-    requires for several of them — see the warning above).
+    create sessions, so help and inspection never pollute `~/.blue-tap`.
+    Those same commands also skip the root + RTL8761B gates, so they
+    work on a machine with no Bluetooth hardware at all.
 
     Use `-s mytest` to name a session for later reference, or let
     Blue-Tap auto-generate one (`blue-tap_YYYYMMDD_HHMMSS`).
@@ -547,17 +551,15 @@ blue-tap run-playbook [COMMANDS...]
 
 !!! example "Example: Run a bundled playbook"
     ```bash
-    sudo blue-tap run-playbook --list                       # See available playbooks
+    blue-tap run-playbook --list                            # See available playbooks (no root, no hardware)
     sudo blue-tap run-playbook --playbook ivi-attack 4C:4F:EE:17:3A:89
     ```
 
     Bundled playbook names (resolved without a path): `full-assessment`,
-    `ivi-attack`, `lmp-fuzzing`, `passive-recon`, `quick-recon`.
-
-    `--list` itself only walks the on-disk playbook directory (no hardware
-    work), but the startup root + RTL8761B gate still fires before that
-    code runs, so `sudo` and a dongle are required even for `--list` until
-    the v2.6.3 cleanup loosens the root gate.
+    `ivi-attack`, `lmp-fuzzing`, `passive-recon`, `quick-recon`. `--list`
+    walks the on-disk playbook directory only and skips both the root and
+    RTL8761B gates; running an actual playbook still needs `sudo` and a
+    dongle for the live steps inside it.
 
 ---
 

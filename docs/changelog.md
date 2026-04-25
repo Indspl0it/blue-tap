@@ -5,7 +5,13 @@ All notable changes to Blue-Tap are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.6.3] - 2026-04-25
+
+### Summary
+
+Blue-Tap 2.6.3 makes `module_id` a mandatory field on every envelope, adds the `HARDWARE` outcome family for adapter / firmware operations, hardens the session atomic-write path against `SIGKILL`-induced debris on Linux, fixes two RTL8761B reliability bugs (post-USB-reset firmware-load wait, sub-word memory reads), and ships a batch of CLI usability fixes — the most visible of which is that read-only inspection commands (`report`, `fuzz crashes/corpus/minimize`, `run-playbook --list`) now actually run unprivileged, matching what the docs already promised.
+
+> **Plugin authors:** if your module called `make_execution()` or `build_run_envelope()` without the `module_id=` kwarg, that now raises `ValueError` at construction. Add the family-prefixed id (e.g. `module_id="assessment.my_check"`). The previous "skip outcome validation when module_id is missing" backward-compat path is gone.
 
 ### Changed — Framework contracts
 
@@ -29,7 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`--help` no longer creates sessions** — `~/.blue-tap/sessions/` (or `./sessions/`) used to accumulate one zero-command directory per `--help` invocation. Help / inspection commands are now session-free.
 - **Privilege + hardware gates moved into the Click callback** — Click now resolves the subcommand and validates required arguments *before* the root or RTL8761B gates fire, so `blue-tap garbage` returns Click's native `No such command 'garbage'` (exit 2) instead of the misleading "requires root" message.
 - **`session list / show` no longer requires root** — listing/inspecting on-disk sessions is pure file I/O. (Verified end-to-end without `sudo`.)
-- **RTL8761B (hardware) gate scope tightened** — `report <dump-dir>`, `fuzz crashes list / show / export`, `fuzz corpus list / minimize`, `fuzz minimize`, and `run-playbook --list` now skip the chipset check (they don't touch hardware). The *root* gate still fires for these paths in this release — they remain `sudo`-only — and pruning that root gate to match the hardware gate is tracked for v2.6.3. The session-only paths (`session list / show`) skip both gates today.
+- **Root + RTL8761B gates now share one skip predicate.** Previously the hardware gate was loosened for `report <dump-dir>`, `fuzz crashes list / show / export`, `fuzz corpus list / minimize`, `fuzz minimize`, and `run-playbook --list`, but the root gate wasn't — so those paths still demanded `sudo` even though they never touched the Bluetooth stack. The two gates now consult the same `_subcommand_needs_hw()` predicate, so the no-root list and the no-hardware list are identical: anything in `_NO_HW_INVOKED` (or matched by `_NO_HW_SUBCOMMANDS`, or `run-playbook --list`) skips both checks. Verified: `blue-tap report ./sessions/...`, `blue-tap fuzz crashes list`, and `blue-tap run-playbook --list` all run end-to-end without `sudo` on a machine with no Bluetooth adapter attached.
 - **`report` returns non-zero on error** — the no-session path was returning exit code 0 despite printing `✖ No session active and no dump directory specified`. Same fix applied to `session show <missing>` and the `run-playbook` error paths.
 - **`doctor` no longer says "Environment ready" when no adapter is present** — split verdicts: `Environment ready` (tools + adapter), `partially ready` (limitations reported), or `NOT ready` (no adapter).
 - **Banner suppressed for `--help` invocations** — was showing the ASCII banner and module-load count even on help-only calls.
@@ -39,7 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Tests
 
-- Smoke matrix: 21 invocations covering version/help/doctor/session/report/fuzz/discover/exploit/auto/spoof — all pass with correct exit codes (0 for success, 1 for runtime failure, 2 for invalid command). Zero crashes across edge-case sweep.
+- End-to-end smoke verification: `--version`, `--help`, `doctor` (with and without an adapter present), `session list/show`, `demo` (full 9-phase pipeline), `report` (no-session error path), `fuzz crashes list`, and `run-playbook --list` all run cleanly without `sudo` on a machine with no Bluetooth hardware. Hardware-using paths still surface the `No RTL8761B / TP-Link UB500 dongle detected` message and exit 1 cleanly when invoked under `sudo` against an empty machine. Invalid commands surface Click's native `No such command` and exit 2. Zero crashes observed across the matrix.
 
 ---
 
@@ -808,6 +814,7 @@ This release extends Blue-Tap below the HCI boundary with a custom firmware plat
 - 4 fuzzing strategies, crash database, minimization
 - Session management, HTML/JSON reports, auto pentest, playbooks
 
+[2.6.3]: https://github.com/Indspl0it/blue-tap/compare/v2.6.2...v2.6.3
 [2.6.2]: https://github.com/Indspl0it/blue-tap/compare/v2.6.1...v2.6.2
 [2.6.1]: https://github.com/Indspl0it/blue-tap/compare/v2.6.0...v2.6.1
 [2.6.0]: https://github.com/Indspl0it/blue-tap/compare/v2.5.0...v2.6.0

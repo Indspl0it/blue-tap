@@ -68,16 +68,15 @@ click.rich_click.COMMAND_GROUPS = {
 }
 
 
-_NO_ROOT_INVOKED = {
-    "session", "doctor", "demo",
-    "search", "info", "show-options", "plugins",
-}
-
 # Subcommands of these groups that don't touch hardware.
 _NO_HW_SUBCOMMANDS = {
     "fuzz": {"crashes", "corpus", "minimize"},
 }
 
+# Top-level commands whose entire surface is on-disk / registry-only and
+# therefore needs neither root nor an RTL8761B dongle. Both the privilege
+# gate and the chipset gate consult ``_subcommand_needs_hw()`` (which reads
+# this set), so these two gates always agree on what a "read-only" path is.
 _NO_HW_INVOKED = {
     "session", "doctor", "demo", "report",
     "search", "info", "show-options", "plugins",
@@ -155,20 +154,24 @@ def cli(ctx, verbose, session_name):
 
     # Root + RTL gates run AFTER Click has resolved the subcommand, so an
     # unknown command name or missing required argument surfaces with Click's
-    # native error before we ever reach a privilege/hardware check.
-    if invoked not in _NO_ROOT_INVOKED and not _check_privileges():
-        error(
-            "Blue-Tap requires root for Bluetooth operations.\n"
-            "\n"
-            "  Run with: [bold]sudo blue-tap[/bold] <command>\n"
-            "\n"
-            "  Or: sudo setcap cap_net_raw+eip $(which python3)\n"
-            "\n"
-            "  [dim]No root needed: --help, doctor, session, search, plugins[/dim]"
-        )
-        sys.exit(1)
-
+    # native error before we ever reach a privilege/hardware check. The two
+    # gates share one skip predicate: if the subcommand path doesn't touch
+    # Bluetooth hardware, it doesn't need root either (both gates exist for
+    # raw-HCI access).
     if _subcommand_needs_hw(invoked):
+        if not _check_privileges():
+            error(
+                "Blue-Tap requires root for Bluetooth operations.\n"
+                "\n"
+                "  Run with: [bold]sudo blue-tap[/bold] <command>\n"
+                "\n"
+                "  Or: sudo setcap cap_net_raw+eip $(which python3)\n"
+                "\n"
+                "  [dim]No root needed: --help, --version, doctor, demo, session, "
+                "report, fuzz crashes/corpus/minimize, run-playbook --list, "
+                "search, info, show-options, plugins[/dim]"
+            )
+            sys.exit(1)
         _check_rtl_dongle()
 
     # Session creation — skip for read-only and help-only invocations.
