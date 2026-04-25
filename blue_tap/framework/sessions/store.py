@@ -39,8 +39,12 @@ def _atomic_write_bytes_or_text(filepath: str, content: str | bytes) -> None:
     """Write ``content`` to ``filepath`` atomically via tempfile + os.replace.
 
     The temp file lives in the same directory as the target so the final
-    rename is atomic on POSIX. On failure the temp file is best-effort
-    unlinked before the exception propagates, leaving no partial state behind.
+    rename is atomic. After the rename we fsync the parent directory so the
+    rename itself reaches stable storage — without this a power loss between
+    ``os.replace`` returning and the directory entry being flushed can leave
+    the file invisible after reboot. On failure the temp file is best-effort
+    unlinked before the exception propagates, leaving no partial state
+    behind.
     """
     directory = os.path.dirname(filepath) or "."
     os.makedirs(directory, exist_ok=True)
@@ -52,6 +56,19 @@ def _atomic_write_bytes_or_text(filepath: str, content: str | bytes) -> None:
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp_path, filepath)
+        # Durably commit the rename itself to the directory inode. Gated on
+        # O_DIRECTORY availability so platforms without POSIX directory-fd
+        # semantics fall through cleanly.
+        if hasattr(os, "O_DIRECTORY"):
+            try:
+                dir_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+            except OSError:
+                pass
+            else:
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
     except Exception:
         if os.path.exists(tmp_path):
             try:
@@ -205,26 +222,14 @@ class Session:
     def _save_meta(self):
         """Write session metadata to disk atomically.
 
-        Writes to a temp file in the same directory, fsyncs, then renames on top
-        of the target. A crash mid-write leaves the previous session.json intact
-        instead of producing a truncated file that ``_load`` would interpret as
+        Delegates to ``_atomic_write_json`` so the same tmp-file + fsync +
+        rename + parent-dir-fsync protocol is used everywhere. A crash
+        mid-write leaves the previous session.json intact instead of
+        producing a truncated file that ``_load`` would interpret as
         corrupt and silently recreate.
         """
         self.metadata["last_updated"] = _now_iso_utc()
-        tmp_path = f"{self.meta_file}.tmp"
-        try:
-            with open(tmp_path, "w") as f:
-                json.dump(self.metadata, f, indent=2, default=str)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp_path, self.meta_file)
-        except Exception:
-            if os.path.exists(tmp_path):
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
-            raise
+        _atomic_write_json(self.meta_file, self.metadata)
 
     def log(self, command: str, data: dict | list | str,
             category: str = "general", target: str = "") -> str:
