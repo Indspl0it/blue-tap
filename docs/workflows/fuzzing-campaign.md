@@ -329,7 +329,7 @@ $ sudo blue-tap fuzz crashes export --format pcap -o crashes.pcap
 Target a known CVE with its proof-of-concept as a seed, mutating around it to find variants:
 
 ```bash
-$ sudo blue-tap fuzz cve AA:BB:CC:DD:EE:FF --cve CVE-2017-0785
+$ sudo blue-tap fuzz cve AA:BB:CC:DD:EE:FF --cve-id 2017-0785
 [*] Loading CVE-2017-0785 seed (BlueBorne SDP info leak)
 [*] Seed: SDP ServiceSearchAttribute with crafted continuation state
 [*] Mutating around CVE pattern...
@@ -359,7 +359,7 @@ $ sudo blue-tap fuzz cve AA:BB:CC:DD:EE:FF --cve CVE-2017-0785
 Import real Bluetooth traffic and use it as fuzzing seeds:
 
 ```bash
-$ sudo blue-tap fuzz replay --capture traffic.btsnoop AA:BB:CC:DD:EE:FF
+$ sudo blue-tap fuzz replay traffic.btsnoop -t AA:BB:CC:DD:EE:FF
 [*] Parsing traffic.btsnoop...
 [*] Extracted 1,247 protocol packets:
       SDP: 89, L2CAP: 412, RFCOMM: 298, BNEP: 34, other: 414

@@ -132,8 +132,8 @@ hciconfig hci0 reset
 **Fix:**
 
 ```bash
-# Try setting with raw hex
-blue-tap adapter set-class --hci hci0 --class 0x240404
+# Try setting with raw hex (device class is a positional argument)
+blue-tap adapter set-class 0x240404 --hci hci0
 
 # Verify
 hciconfig hci0 class
@@ -288,10 +288,10 @@ sdptool browse local
 
 ```bash
 # Increase cooldown between test cases to allow recovery
-blue-tap fuzz --cooldown 2.0 TARGET
+blue-tap fuzz campaign TARGET --cooldown 30
 
 # Check recorded crashes to see what triggered it
-blue-tap fuzz crashes
+blue-tap fuzz crashes list
 ```
 
 ### No crashes detected
@@ -304,15 +304,15 @@ blue-tap fuzz crashes
 
 ```bash
 # Try a different strategy
-blue-tap fuzz --strategy coverage TARGET
-blue-tap fuzz --strategy state-machine TARGET
-blue-tap fuzz --strategy targeted TARGET
+blue-tap fuzz campaign TARGET --strategy coverage_guided
+blue-tap fuzz campaign TARGET --strategy state_machine
+blue-tap fuzz campaign TARGET --strategy targeted
 
-# Increase campaign duration
-blue-tap fuzz --duration 3600 TARGET
+# Increase campaign duration (accepts 30m, 1h, 2h, etc.)
+blue-tap fuzz campaign TARGET --duration 1h
 
-# Validate the transport works by running a known CVE reproduction
-blue-tap fuzz --repro cve_2022_39177 TARGET
+# Validate the transport works by replaying a known CVE pattern
+blue-tap fuzz cve TARGET --cve-id 2022-39177
 ```
 
 ### Crash minimization hangs
@@ -413,7 +413,7 @@ sudo apt install spooftooph
 For persistent (firmware-level) or volatile (RAM) patching that survives resets, use the RTL8761B with DarkFirmware:
 
 ```bash
-blue-tap adapter firmware-spoof --mac AA:BB:CC:DD:EE:FF
+blue-tap adapter firmware-spoof AA:BB:CC:DD:EE:FF
 ```
 
 ---

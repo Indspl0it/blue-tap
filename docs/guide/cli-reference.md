@@ -183,13 +183,13 @@ blue-tap vulnscan [TARGET]
 
 !!! example "Example: Scan a single CVE"
     ```
-    $ sudo blue-tap vulnscan 4C:4F:EE:17:3A:89 --cve CVE-2019-9506
+    $ sudo blue-tap vulnscan 4C:4F:EE:17:3A:89 --cve CVE-2020-0022
     Session: blue-tap_20260416_143511
 
-    [CVE-2019-9506] KNOB Key Negotiation
+    [CVE-2020-0022] BlueFrag ACL Fragment Boundary
       execution_status: completed
       module_outcome:   confirmed
-      evidence:         Target accepted key_size=1 (min_key_length=1)
+      evidence:         Target accepts ACL fragments crossing L2CAP boundary
       severity:         CRITICAL
     ```
 

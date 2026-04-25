@@ -173,10 +173,10 @@ The Class of Device is a 24-bit field that Bluetooth Classic devices include in 
 
 ## CLI Usage
 
-### Discover all nearby devices (default: combined)
+### Discover all nearby devices (Classic + BLE)
 
 ```bash
-blue-tap discover
+blue-tap discover all
 ```
 
 ### Classic-only scan with 20-second duration

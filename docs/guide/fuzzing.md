@@ -160,13 +160,13 @@ blue-tap fuzz l2cap-sig TARGET
 ### CVE reproduction
 
 ```bash
-blue-tap fuzz cve TARGET --cve CVE-2017-0785
+blue-tap fuzz cve TARGET --cve-id 2017-0785
 ```
 
 ??? example "Example output"
 
     ```
-    $ sudo blue-tap fuzz cve 4C:4F:EE:17:3A:89 --cve CVE-2017-0785
+    $ sudo blue-tap fuzz cve 4C:4F:EE:17:3A:89 --cve-id 2017-0785
 
     ─────────────── CVE Reproduction: CVE-2017-0785 ────────────────
     15:35:00  ●  Loading CVE-2017-0785 template (SDP continuation state attack)
@@ -619,13 +619,13 @@ Seeds are stored as binary files in the session directory:
 Import and replay packets from Bluetooth snoop captures.
 
 ```bash
-blue-tap fuzz replay --capture file.btsnoop TARGET
+blue-tap fuzz replay file.btsnoop -t TARGET
 ```
 
 ??? example "Example output"
 
     ```
-    $ sudo blue-tap fuzz replay --capture crash_capture.btsnoop 4C:4F:EE:17:3A:89
+    $ sudo blue-tap fuzz replay crash_capture.btsnoop -t 4C:4F:EE:17:3A:89
 
     ──────────────────── PCAP Replay ────────────────────
     16:00:00  ●  Parsing crash_capture.btsnoop (btsnoop v1)

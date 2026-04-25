@@ -130,11 +130,15 @@ Real assessments often span multiple days. Blue-Tap creates a new session for ea
 # Report from the current session (default)
 blue-tap report --format html
 
-# Report from a specific session
-blue-tap report --session blue-tap_20260416_143022 --format html
+# Report from a specific named session — pass the session name to the
+# global -s flag, then call `report` (the report command itself has no
+# --session flag).
+blue-tap -s blue-tap_20260416_143022 report --format html
 
-# Report combining all sessions in the directory
-blue-tap report --all --format html
+# Report from a directory of session artefacts (e.g. an exported
+# session bundle). The positional argument points the report at any
+# directory of run-envelope JSON files.
+blue-tap report ./sessions/blue-tap_20260416_143022 --format html
 ```
 
 !!! tip "Multi-Day Assessments"
