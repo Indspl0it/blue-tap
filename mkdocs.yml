@@ -3,7 +3,6 @@ site_description: Bluetooth/BLE Penetration Testing Toolkit for Automotive IVI S
 site_url: https://indspl0it.github.io/blue-tap
 repo_url: https://github.com/Indspl0it/blue-tap
 repo_name: Indspl0it/blue-tap
-copyright: Copyright &copy; 2024-2026 Santhosh Ballikonda
 
 theme:
   name: material

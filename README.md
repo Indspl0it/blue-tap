@@ -158,7 +158,7 @@ Blue-Tap is provided for **authorized security testing and research purposes onl
 
 ## License
 
-[GNU General Public License v3.0](LICENSE) — Copyright (C) 2026 Santhosh Ballikonda
+[GNU General Public License v3.0](LICENSE)
 
 ---
 
