@@ -9,6 +9,7 @@ build/
 .eggs/
 *.wav
 *.pdf
+!docs/paper/Blue-Tap_2026_v1.pdf
 *.log
 *.pid
 .coverage
@@ -50,4 +51,4 @@ GEMINI.md
 CLAUDE.md
 
 # academic paper work — not part of source distribution
-paper/
+/paper/
