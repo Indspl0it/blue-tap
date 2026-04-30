@@ -31,7 +31,7 @@ import traceback
 logger = logging.getLogger(__name__)
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from typing import Any
 
 
@@ -73,6 +73,7 @@ from blue_tap.modules.fuzzing.transport import (
     LMPTransport,
     RawACLTransport,
 )
+from blue_tap.modules.fuzzing._random import random_bytes, set_random_source
 from blue_tap.modules.fuzzing.crash_db import CrashDB
 from blue_tap.modules.fuzzing.corpus import Corpus
 from blue_tap.modules.fuzzing.mutators import CorpusMutator
@@ -378,6 +379,9 @@ class FuzzCampaign:
         cooldown: float = DEFAULT_COOLDOWN_SECONDS,
         run_id: str = "",
         transport_overrides: dict[str, dict[str, Any]] | None = None,
+        random_source: Callable[[int], bytes] | None = None,
+        dry_run: bool = False,
+        trajectory_interval_seconds: float | None = None,
     ) -> None:
         self.target = target
         protocols = [canonical_protocol(p) for p in protocols]
@@ -394,6 +398,26 @@ class FuzzCampaign:
             proto: dict(values)
             for proto, values in dict(transport_overrides or {}).items()
         }
+        # Reproducibility hook: ``random_source(n) -> bytes`` of length n.
+        # Defaults to ``os.urandom`` (CSPRNG, non-reproducible). When a
+        # seeded callable is supplied, ``run()`` installs it via
+        # :func:`set_random_source` for the whole campaign so every
+        # ``random_bytes()`` call across the engine, mutators, strategies,
+        # and protocol builders draws from it — yielding byte-identical
+        # payloads across runs with the same seed. Wall-clock timing
+        # (latency) is independently pinned to 0.0 under ``dry_run`` so
+        # the response analyzer never branches on real durations.
+        self._random_bytes: Callable[[int], bytes] = random_source or os.urandom
+
+        self.dry_run = bool(dry_run)
+        # Trajectory: when interval > 0, snapshot stats at most once per
+        # interval inside the main loop. ``None`` / non-positive disables
+        # recording entirely (no overhead).
+        if trajectory_interval_seconds is not None and trajectory_interval_seconds <= 0:
+            trajectory_interval_seconds = None
+        self.trajectory_interval_seconds = trajectory_interval_seconds
+        self._trajectory: list[dict[str, Any]] = []
+        self._last_trajectory_time: float = 0.0
 
         # Fuzz artifact directory
         self._fuzz_dir = os.path.join(self.session_dir, "fuzz")
@@ -487,10 +511,27 @@ class FuzzCampaign:
     def _setup_transports(self) -> dict[str, Any]:
         """Create transport instances for each configured protocol.
 
+        When ``dry_run`` is set, every protocol gets a :class:`MockTransport`
+        instead of a real socket-backed transport — for benchmarks,
+        regression tests, and notebook research that should not touch
+        Bluetooth hardware.
+
         Returns:
             Mapping of protocol name to transport instance.
         """
         transports: dict[str, Any] = {}
+
+        if self.dry_run:
+            from blue_tap.modules.fuzzing.transport import MockTransport
+            for protocol in self.protocols:
+                if protocol not in PROTOCOL_TRANSPORT_MAP:
+                    warning(f"Skipping unknown protocol: {protocol}")
+                    continue
+                transports[protocol] = MockTransport(
+                    self.target, protocol=protocol,
+                )
+            self._transports = transports
+            return transports
 
         for protocol in self.protocols:
             spec = PROTOCOL_TRANSPORT_MAP.get(protocol)
@@ -570,12 +611,12 @@ class FuzzCampaign:
         seed = self.corpus.get_random_seed(protocol)
         if seed is None:
             import random as _rng
-            seed = os.urandom(_rng.randint(8, 256))
+            seed = random_bytes(_rng.randint(8, 256))
 
         mutated = self._mutator.mutate(seed)
         if not mutated:
             import random as _rng
-            mutated = os.urandom(_rng.randint(4, 64))
+            mutated = random_bytes(_rng.randint(4, 64))
         mutation_log = getattr(self._mutator, "last_mutations", ["mutated"])
         return mutated, mutation_log
 
@@ -818,16 +859,20 @@ class FuzzCampaign:
         if not self._running:
             return
 
-        # Verify target is still alive
-        if not _check_target_alive(self.target):
-            warning("Target not responding after cooldown. Extending wait...")
-            self._interruptible_sleep(TARGET_DEAD_TIMEOUT)
-            if not self._running:
-                return
+        # Verify target is still alive. Skipped under dry_run — there is
+        # no real target and MockTransport never reports a real crash, so
+        # this branch is reached only via injected response_factory; in
+        # that case we keep the campaign running for the caller to drive.
+        if not self.dry_run:
             if not _check_target_alive(self.target):
-                error("Target appears permanently down. Stopping campaign.")
-                self._running = False
-                return
+                warning("Target not responding after cooldown. Extending wait...")
+                self._interruptible_sleep(TARGET_DEAD_TIMEOUT)
+                if not self._running:
+                    return
+                if not _check_target_alive(self.target):
+                    error("Target appears permanently down. Stopping campaign.")
+                    self._running = False
+                    return
 
         emit_cli_event(
             event_type="recovery_wait_finished",
@@ -852,6 +897,42 @@ class FuzzCampaign:
         end = time.time() + seconds
         while time.time() < end and self._running:
             time.sleep(min(0.5, end - time.time()))
+
+    def _maybe_record_trajectory(self) -> None:
+        """Append a trajectory snapshot if the configured interval has elapsed.
+
+        No-op when ``trajectory_interval_seconds`` is None. Cheap to call
+        every iteration — the elapsed-time check short-circuits before
+        any allocation.
+        """
+        if self.trajectory_interval_seconds is None:
+            return
+        now = time.time()
+        if now - self._last_trajectory_time < self.trajectory_interval_seconds:
+            return
+        self._last_trajectory_time = now
+
+        states = 0
+        transitions = 0
+        if self._state_tracker is not None:
+            try:
+                graphs = self._state_tracker.to_dict().get("graphs", {}) or {}
+                for g in graphs.values():
+                    states += len(g.get("nodes", []) or [])
+                    transitions += len(g.get("edges", []) or [])
+            except Exception:
+                logger.debug("trajectory: state tracker snapshot failed",
+                             exc_info=True)
+
+        self._trajectory.append({
+            "elapsed_seconds": round(self.stats.runtime_seconds, 3),
+            "iterations": self.stats.iterations,
+            "packets_sent": self.stats.packets_sent,
+            "crashes": self.stats.crashes,
+            "errors": self.stats.errors,
+            "states": states,
+            "transitions": transitions,
+        })
 
     # ------------------------------------------------------------------
     # Loop control
@@ -903,6 +984,11 @@ class FuzzCampaign:
     def run(self) -> dict:
         """Execute the fuzzing campaign.
 
+        Activates the campaign's :attr:`_random_bytes` source for every
+        ``random_bytes()`` call made by the strategies, mutators, and
+        protocol builders during this run, restoring the previous
+        process-wide source on exit (including exception paths).
+
         Installs a SIGINT handler for graceful shutdown, sets up transports,
         and enters the main fuzz loop. On completion (or interrupt), saves
         campaign state and prints a final summary.
@@ -910,6 +996,11 @@ class FuzzCampaign:
         Returns:
             Summary dict with campaign statistics.
         """
+        with set_random_source(self._random_bytes):
+            return self._run_impl()
+
+    def _run_impl(self) -> dict:
+        """Inner body of :meth:`run` — runs under an active random-source context."""
         self._running = True
         self.stats = CampaignStats()
         self._last_stats_time = time.time()
@@ -931,20 +1022,25 @@ class FuzzCampaign:
         if self.max_iterations is not None:
             info(f"Iteration limit: [bt.yellow]{self.max_iterations:,}[/bt.yellow]")
 
-        # Verify target is reachable
-        info("Checking target reachability...")
-        if not _check_target_alive(self.target):
-            error(
-                f"Target {self.target} is not reachable. "
-                "Ensure it is powered on and in range."
-            )
-            try:
-                signal.signal(signal.SIGINT, prev_handler)
-            except ValueError:
-                pass
-            return {"result": "error", "reason": "target_unreachable"}
+        # Verify target is reachable. Skipped under dry_run because there
+        # is no real target — l2ping would fail and abort the campaign
+        # before MockTransport ever gets used.
+        if self.dry_run:
+            info("Skipping target reachability check (dry_run).")
+        else:
+            info("Checking target reachability...")
+            if not _check_target_alive(self.target):
+                error(
+                    f"Target {self.target} is not reachable. "
+                    "Ensure it is powered on and in range."
+                )
+                try:
+                    signal.signal(signal.SIGINT, prev_handler)
+                except ValueError:
+                    pass
+                return {"result": "error", "reason": "target_unreachable"}
 
-        success("Target is alive.")
+            success("Target is alive.")
         emit_cli_event(
             event_type="run_started",
             module="fuzzing",
@@ -1013,7 +1109,9 @@ class FuzzCampaign:
                         t0 = time.time()
                         transport.send(seed)
                         response = transport.recv(recv_timeout=5.0)
-                        latency_ms = (time.time() - t0) * 1000
+                        # See main loop: pin baseline latency to 0 under
+                        # dry_run for full reproducibility.
+                        latency_ms = 0.0 if self.dry_run else (time.time() - t0) * 1000
                         self._analyzer.record_baseline(proto, response, latency_ms)
                     except Exception:
                         logger.debug("Baseline sample failed for %s", proto, exc_info=True)
@@ -1038,6 +1136,7 @@ class FuzzCampaign:
         _last_event_protocol = ""
         try:
             while self._should_continue():
+                self._maybe_record_trajectory()
                 protocol = self._next_protocol()
                 if protocol != _last_event_protocol:
                     emit_cli_event(
@@ -1092,7 +1191,16 @@ class FuzzCampaign:
                         if protocol in self._protocol_stats:
                             self._protocol_stats[protocol].packets_sent += 1
                         response = transport.recv()
-                    latency_ms = (time.time() - t0) * 1000
+                    # Wall-clock latency is non-deterministic across runs.
+                    # Under dry_run we want byte-identical reproducibility
+                    # (same seed → same payloads, end-to-end), so the
+                    # response analyzer must not branch on real latency.
+                    # Pin to 0.0 — clustering becomes a no-op, but every
+                    # other determinism property is preserved.
+                    if self.dry_run:
+                        latency_ms = 0.0
+                    else:
+                        latency_ms = (time.time() - t0) * 1000
 
                     self._analyze_response(
                         protocol, fuzz_case, response, mutation_log, latency_ms,
@@ -1112,8 +1220,11 @@ class FuzzCampaign:
                         except Exception as exc:
                             logger.debug("State tracker error for %s: %s", protocol, exc)
 
-                    # Health monitoring
-                    if self._health_monitor is not None:
+                    # Health monitoring. Under dry_run, every probe would
+                    # call l2ping against a fake target, flooding warnings
+                    # and burning CPU on syscalls; the entire monitor is
+                    # meaningless without a real device.
+                    if self._health_monitor is not None and not self.dry_run:
                         self._health_monitor.record_fuzz_case(fuzz_case)
                         if self._health_monitor.should_check(self.stats.iterations):
                             try:
@@ -1431,7 +1542,7 @@ class FuzzCampaign:
         # Always add some random seeds as well
         import random as _rng
         for i in range(3):
-            seeds.append((os.urandom(_rng.randint(8, 128)), f"random_{i}"))
+            seeds.append((random_bytes(_rng.randint(8, 128)), f"random_{i}"))
 
         for data, label in seeds:
             self.corpus.add_seed(protocol, data, name=label)
@@ -1689,6 +1800,9 @@ class FuzzCampaign:
             "crash_db_path": os.path.join(self._fuzz_dir, "crashes.db"),
             "corpus_dir": os.path.join(self._fuzz_dir, "corpus"),
         }
+
+        if self._trajectory:
+            result["trajectory"] = list(self._trajectory)
 
         # State coverage stats (Phase 1)
         if self._state_tracker is not None:

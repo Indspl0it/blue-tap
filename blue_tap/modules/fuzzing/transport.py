@@ -20,6 +20,7 @@ import socket
 import struct
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from blue_tap.utils.bt_helpers import run_cmd
@@ -325,6 +326,93 @@ class BluetoothTransport(ABC):
     def __repr__(self) -> str:
         state = "connected" if self._connected else "disconnected"
         return f"<{self.__class__.__name__} addr={self.address} {state}>"
+
+
+# ---------------------------------------------------------------------------
+# Mock transport (dry-run / benchmarking)
+# ---------------------------------------------------------------------------
+
+class MockTransport(BluetoothTransport):
+    """In-process transport with no socket — for dry runs and benchmarks.
+
+    Drops every send into a bounded ring buffer (so memory stays flat
+    over long campaigns) and returns canned responses on recv. The
+    response factory is injectable so research code can simulate
+    protocol-specific replies; the default returns ``b""`` (empty,
+    indistinguishable from a timeout).
+
+    Thread-safety: NOT thread-safe — one instance per protocol, used by
+    the engine's single fuzzing loop. No lock is held; the engine never
+    accesses the same MockTransport from multiple threads.
+    """
+
+    DEFAULT_SEND_BUFFER_LEN = 64
+
+    def __init__(
+        self,
+        address: str,
+        *,
+        protocol: str = "",
+        response_factory: Callable[[bytes], bytes] | None = None,
+        send_buffer_len: int = DEFAULT_SEND_BUFFER_LEN,
+    ) -> None:
+        super().__init__(address, timeout=0.1, max_reconnects=0)
+        self.protocol = protocol
+        self._response_factory: Callable[[bytes], bytes] = (
+            response_factory if response_factory is not None else (lambda _payload: b"")
+        )
+        if send_buffer_len < 1:
+            raise ValueError("send_buffer_len must be >= 1")
+        self.sent: collections.deque[bytes] = collections.deque(maxlen=send_buffer_len)
+
+    # The abstract socket hooks are unused — we override connect/send/recv
+    # directly to avoid creating any real socket. Keep concrete (no-op)
+    # implementations so MockTransport can be instantiated.
+    def _create_socket(self) -> socket.socket:
+        raise RuntimeError("MockTransport does not create real sockets")
+
+    def _connect_socket(self, sock: socket.socket) -> None:
+        raise RuntimeError("MockTransport does not connect real sockets")
+
+    def connect(self) -> bool:
+        self._connected = True
+        return True
+
+    def send(self, data: bytes) -> int:
+        if not isinstance(data, (bytes, bytearray)):
+            raise TypeError(f"MockTransport.send requires bytes, got {type(data).__name__}")
+        payload = bytes(data)
+        self.sent.append(payload)
+        self.stats.bytes_sent += len(payload)
+        self.stats.packets_sent += 1
+        return len(payload)
+
+    def recv(self, bufsize: int = 4096, recv_timeout: float | None = None) -> bytes | None:
+        last = self.sent[-1] if self.sent else b""
+        try:
+            response = self._response_factory(last)
+        except Exception as exc:
+            error(f"MockTransport response_factory raised {type(exc).__name__}: {exc}")
+            return None
+        if not isinstance(response, (bytes, bytearray)):
+            raise TypeError(
+                f"MockTransport response_factory must return bytes, got "
+                f"{type(response).__name__}"
+            )
+        response = bytes(response)
+        self.stats.bytes_received += len(response)
+        self.stats.packets_received += 1
+        return response
+
+    def close(self) -> None:
+        self._connected = False
+
+    def is_alive(self) -> bool:
+        return self._connected
+
+    def reconnect(self) -> bool:
+        self._connected = True
+        return True
 
 
 # ---------------------------------------------------------------------------
