@@ -13,7 +13,7 @@
   <img src="https://img.shields.io/badge/modules-101-cyan" alt="101 Modules"/>
   <img src="https://img.shields.io/badge/CVEs-37-red" alt="37 CVEs"/>
   <img src="https://img.shields.io/badge/platform-Linux%20(Kali)-557C94" alt="Linux"/>
-  <a href="https://doi.org/10.5281/zenodo.19897655"><img src="https://zenodo.org/badge/DOI/10.5281/zenodo.19897655.svg" alt="DOI"/></a>
+  <a href="https://doi.org/10.5281/zenodo.19897655"><img src="https://img.shields.io/badge/DOI-10.5281%2Fzenodo.19897655-blue" alt="DOI"/></a>
 </p>
 
 <p align="center">

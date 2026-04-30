@@ -35,7 +35,7 @@ Bluetooth &amp; BLE penetration testing toolkit purpose-built for automotive IVI
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-blue?style=flat-square)](#)
 [![Platform](https://img.shields.io/badge/platform-Linux%20(Kali)-557C94?style=flat-square&logo=kalilinux&logoColor=white)](#)
 [![Modules](https://img.shields.io/badge/modules-101-cyan?style=flat-square)](#)
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19897655.svg)](https://doi.org/10.5281/zenodo.19897655)
+[![DOI](https://img.shields.io/badge/DOI-10.5281%2Fzenodo.19897655-blue?style=flat-square)](https://doi.org/10.5281/zenodo.19897655)
 
 </div>
 
