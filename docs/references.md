@@ -12,23 +12,24 @@ If you use Blue-Tap in academic research, security assessments, or publications,
 
 ```bibtex
 @software{bluetap2026,
-  author       = {{Blue-Tap Project}},
+  author       = {Ballikonda, Santhosh},
   title        = {{Blue-Tap}: Bluetooth/BLE Penetration Testing Toolkit for Automotive IVI Systems},
   version      = {2.6.4},
   year         = {2026},
-  url          = {https://github.com/Indspl0it/blue-tap},
-  license      = {GPL-3.0-or-later},
-  note         = {101 modules, 25 CVE detections, 16-protocol fuzzer with DarkFirmware support}
+  publisher    = {Zenodo},
+  doi          = {10.5281/zenodo.19897655},
+  url          = {https://doi.org/10.5281/zenodo.19897655},
+  license      = {GPL-3.0-or-later}
 }
 ```
 
 ### Plain Text
 
-> Blue-Tap Project. *Blue-Tap: Bluetooth/BLE Penetration Testing Toolkit for Automotive IVI Systems*, v2.6.4, 2026. Available at: https://github.com/Indspl0it/blue-tap
+> Ballikonda, S. *Blue-Tap: Bluetooth/BLE Penetration Testing Toolkit for Automotive IVI Systems* (v2.6.4). Zenodo, 2026. DOI: [10.5281/zenodo.19897655](https://doi.org/10.5281/zenodo.19897655)
 
 ### IEEE Style
 
-> Blue-Tap Project, "Blue-Tap: Bluetooth/BLE Penetration Testing Toolkit for Automotive IVI Systems," version 2.6.4, 2026. [Online]. Available: https://github.com/Indspl0it/blue-tap
+> S. Ballikonda, "Blue-Tap: Bluetooth/BLE Penetration Testing Toolkit for Automotive IVI Systems," version 2.6.4, Zenodo, 2026. DOI: 10.5281/zenodo.19897655. [Online]. Available: https://doi.org/10.5281/zenodo.19897655
 
 ---
 
