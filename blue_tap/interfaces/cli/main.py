@@ -288,12 +288,21 @@ def demo_cmd(output):
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def _check_privileges() -> bool:
-    """Check if running with root/sudo."""
+    """Check if running with root/sudo.
+
+    Honors ``BLUE_TAP_SKIP_ROOT_CHECK=1`` so test runners and CI can exercise
+    hardware-gated subcommands without holding raw-HCI capabilities. The bypass
+    is intentionally opt-in via an explicit env var — never inferred.
+    """
+    if os.environ.get("BLUE_TAP_SKIP_ROOT_CHECK") == "1":
+        return True
     return os.geteuid() == 0
 
 
 def _check_rtl_dongle() -> None:
     """Detect RTL8761B dongle at startup and offer to flash DarkFirmware."""
+    if os.environ.get("BLUE_TAP_SKIP_ROOT_CHECK") == "1":
+        return
     try:
         from blue_tap.hardware.firmware import DarkFirmwareManager
         from blue_tap.utils.output import console
