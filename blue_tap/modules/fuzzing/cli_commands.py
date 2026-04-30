@@ -8,6 +8,7 @@ existing ``fuzz`` Click group defined in ``cli.py``.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import select
 import signal
@@ -16,6 +17,8 @@ import threading
 import time
 import traceback
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 try:
     import termios
@@ -64,6 +67,30 @@ from blue_tap.framework.envelopes.fuzz import build_fuzz_operation_result, make_
 from blue_tap.framework.contracts.result_schema import make_artifact
 from blue_tap.framework.runtime.cli_events import emit_cli_event
 from blue_tap.modules.fuzzing.corpus import Corpus, generate_full_corpus
+
+
+_FUZZ_SEED_ENV_VAR = "BLUE_TAP_FUZZ_SEED"
+
+
+def _resolve_seed_from_env(explicit_seed: int | None) -> int | None:
+    """Return the effective campaign seed: explicit > env var > None.
+
+    The env var (``BLUE_TAP_FUZZ_SEED``) accepts decimal, ``0x``-hex, or
+    ``0o``-octal. Validation matches :func:`run_campaign` so the CLI and
+    the research API behave identically.
+    """
+    if explicit_seed is not None:
+        return explicit_seed
+    raw = os.environ.get(_FUZZ_SEED_ENV_VAR)
+    if raw is None or not raw.strip():
+        return None
+    try:
+        return int(raw.strip(), 0)
+    except ValueError as exc:
+        raise click.BadParameter(
+            f"{_FUZZ_SEED_ENV_VAR} must be an integer literal "
+            f"(decimal, 0x-hex, or 0o-octal); got {raw!r}"
+        ) from exc
 
 
 def ensure_corpus(session_dir: str, protocols: list[str] | None = None) -> Corpus:
@@ -639,9 +666,35 @@ def _campaign_command(fuzz_group):
                   help="Enable btsnoop pcap capture during fuzzing")
     @click.option("--resume", is_flag=True,
                   help="Resume previous campaign from session")
+    @click.option(
+        "--dry-run", "dry_run", is_flag=True,
+        help=(
+            "Run the full mutation/strategy/state-tracker pipeline against an "
+            "in-process MockTransport (no hardware, no l2ping). Useful for CI "
+            "smoke tests and reproducibility sweeps."
+        ),
+    )
+    @click.option(
+        "--seed", default=None, type=int,
+        help=(
+            "Integer seed for byte-level reproducible mutations. Falls back "
+            "to BLUE_TAP_FUZZ_SEED if unset. Two campaigns with the same "
+            "seed produce byte-identical fuzz payloads."
+        ),
+    )
+    @click.option(
+        "--trajectory-interval", "trajectory_interval", default=None,
+        type=click.FloatRange(min=0.0, min_open=True),
+        help=(
+            "Sample (iterations, packets, crashes, states, transitions) at "
+            "most once per N seconds into CampaignResult.trajectory. "
+            "Required for to_csv export."
+        ),
+    )
     def campaign(
         address, protocols, strategy, duration, iterations,
         delay, timeout, cooldown, capture, resume,
+        dry_run, seed, trajectory_interval,
     ):
         """Run a multi-protocol fuzzing campaign with live dashboard.
 
@@ -662,6 +715,21 @@ def _campaign_command(fuzz_group):
         fuzz_dir = os.path.join(session_dir, "fuzz")
         os.makedirs(fuzz_dir, exist_ok=True)
 
+        # ── Validate flag combinations ────────────────────────────────
+        # --resume rebuilds state from disk; the dry_run / random_source
+        # kwargs aren't part of the persisted campaign state, so silently
+        # ignoring them would mislead the operator.
+        if resume and dry_run:
+            error("--dry-run cannot be combined with --resume")
+            return
+        if resume and seed is not None:
+            error("--seed cannot be combined with --resume "
+                  "(seed is not persisted in campaign state)")
+            return
+        if dry_run and capture:
+            warning("--dry-run disables --capture (no real HCI traffic)")
+            capture = False
+
         # ── Resume mode ───────────────────────────────────────────────
         if resume:
             try:
@@ -676,9 +744,22 @@ def _campaign_command(fuzz_group):
             info(f"Resuming campaign against [bt.purple]{address}[/bt.purple]")
         else:
             # ── Resolve target ────────────────────────────────────────
-            address = resolve_address(address)
-            if not address:
-                return
+            # Under --dry-run there's no real device; the engine routes
+            # every protocol through MockTransport and bypasses the
+            # l2ping reachability check. A placeholder address is fine
+            # and avoids prompting the operator for one when running
+            # under CI.
+            if dry_run:
+                if not address:
+                    address = "00:00:00:00:00:00"
+                    info(
+                        "[dim]--dry-run: using placeholder target "
+                        f"{address}[/dim]"
+                    )
+            else:
+                address = resolve_address(address)
+                if not address:
+                    return
 
             # ── Resolve protocols ─────────────────────────────────────
             proto_list: list[str]
@@ -696,6 +777,20 @@ def _campaign_command(fuzz_group):
                     error(str(exc))
                     return
 
+            # ── Resolve seed (kwarg > env var > None) ─────────────────
+            effective_seed = _resolve_seed_from_env(seed)
+            random_source = None
+            if effective_seed is not None:
+                from blue_tap.modules.fuzzing._random import (
+                    derive_random_source_from_seed,
+                )
+                # Lock down :mod:`random`-driven decisions too — see the
+                # symmetric block in research.run_campaign for rationale.
+                import random as _random
+                _random.seed(effective_seed)
+                random_source = derive_random_source_from_seed(effective_seed)
+                info(f"[dim]Seed locked: {effective_seed}[/dim]")
+
             # ── Create campaign ───────────────────────────────────────
             cam = FuzzCampaign(
                 target=address,
@@ -705,6 +800,9 @@ def _campaign_command(fuzz_group):
                 max_iterations=iterations,
                 session_dir=session_dir,
                 cooldown=float(cooldown),
+                random_source=random_source,
+                dry_run=dry_run,
+                trajectory_interval_seconds=trajectory_interval,
             )
 
         # ── Pcap capture ──────────────────────────────────────────────
@@ -1595,6 +1693,281 @@ def _format_hex_dump(hex_str: str, bytes_per_line: int = 16) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Benchmark subcommand
+# ---------------------------------------------------------------------------
+
+def _benchmark_command(fuzz_group) -> None:
+    """Register ``blue-tap fuzz benchmark`` on the fuzz Click group.
+
+    Wraps :func:`blue_tap.modules.fuzzing.benchmark` for operators / CI.
+    Runs ``--trials`` campaigns with the same configuration, aggregates
+    per-metric stats, prints a Rich summary table, and (optionally)
+    persists the full :class:`BenchmarkResult` JSON for later analysis
+    and per-trial trajectory CSVs for plotting.
+    """
+
+    @fuzz_group.command("benchmark")
+    @click.argument("address", required=False, default=None)
+    @click.option(
+        "--protocol", "-p", "protocols", multiple=True, default=("all",),
+        type=click.Choice([
+            "sdp", "obex-pbap", "obex-map", "obex-opp",
+            "at-hfp", "at-phonebook", "at-sms",
+            "ble-att", "ble-smp", "bnep", "rfcomm", "all",
+        ], case_sensitive=False),
+        help=(
+            "Protocols to fuzz per trial (repeat for multiple, default: all). "
+            "For variance studies on a single attack surface, narrow to one "
+            "protocol — e.g. -p sdp."
+        ),
+    )
+    @click.option(
+        "--strategy", "-s", default="coverage_guided",
+        type=click.Choice(
+            ["coverage_guided", "random", "state_machine", "targeted"],
+            case_sensitive=False,
+        ),
+        help="Mutation strategy (default: coverage_guided).",
+    )
+    @click.option("--trials", "-t", default=5, type=click.IntRange(min=1),
+                  help="Number of independent trials to run (default: 5).")
+    @click.option("--duration", "-d", default=None,
+                  help="Per-trial duration: 30s, 5m, 1h, ... (mutually exclusive with --iterations).")
+    @click.option("--iterations", "-n", default=None, type=click.IntRange(min=1),
+                  help="Per-trial max test cases (overrides --duration).")
+    @click.option("--base-seed", default=None, type=int,
+                  help=(
+                      "Trial i uses seed (base_seed + i). Falls back to "
+                      "BLUE_TAP_FUZZ_SEED if unset. Same base produces the "
+                      "same trial sequence."
+                  ))
+    @click.option("--label", default=None,
+                  help="Human label for this benchmark run (default: <strategy>@<trials>).")
+    @click.option("--output", "-o", "output_path", default=None,
+                  type=click.Path(dir_okay=False, writable=True),
+                  help="Write full BenchmarkResult JSON (round-trippable) to this path.")
+    @click.option("--csv-dir", "csv_dir", default=None,
+                  type=click.Path(file_okay=False, writable=True),
+                  help=(
+                      "Write each trial's trajectory CSV to this directory "
+                      "as trial_{i}.csv (created if missing)."
+                  ))
+    @click.option("--cooldown", default=10, type=click.IntRange(min=0),
+                  help="Seconds between trials (default: 10).")
+    @click.option(
+        "--dry-run", "dry_run", is_flag=True,
+        help=(
+            "Run every trial against MockTransport (no hardware). Pairs "
+            "well with --base-seed for deterministic CI runs."
+        ),
+    )
+    @click.option(
+        "--trajectory-interval", "trajectory_interval", default=None,
+        type=click.FloatRange(min=0.0, min_open=True),
+        help=(
+            "Per-trial trajectory sampling interval (seconds). Required "
+            "for --csv-dir to produce non-empty trajectory files."
+        ),
+    )
+    def benchmark_cmd(
+        address, protocols, strategy, trials, duration, iterations,
+        base_seed, label, output_path, csv_dir, cooldown, dry_run,
+        trajectory_interval,
+    ):
+        """Run N independent fuzzing trials and aggregate per-metric stats.
+
+        \b
+        Examples:
+          blue-tap fuzz benchmark AA:BB:CC:DD:EE:FF -p sdp -t 5 -d 1m
+          blue-tap fuzz benchmark --dry-run --strategy random -n 200 -t 10
+          blue-tap fuzz benchmark --dry-run -t 3 -n 50 \\
+              --base-seed 42 -o bench.json --csv-dir ./traj/
+        """
+        from blue_tap.modules.fuzzing.research import benchmark as run_benchmark
+
+        # ── Session dir ──────────────────────────────────────────────
+        sess = get_session()
+        if sess is None:
+            session_dir = os.getcwd()
+        else:
+            session_dir = sess.dir
+
+        # ── Resolve target ───────────────────────────────────────────
+        if dry_run:
+            if not address:
+                address = "00:00:00:00:00:00"
+                info(f"[dim]--dry-run: using placeholder target {address}[/dim]")
+        else:
+            address = resolve_address(address)
+            if not address:
+                return
+
+        # ── Resolve protocols ────────────────────────────────────────
+        if "all" in protocols:
+            proto_list = list(PROTOCOL_TRANSPORT_MAP.keys())
+        else:
+            proto_list = list(protocols)
+
+        # ── Mutually exclusive duration / iterations ─────────────────
+        if duration is not None and iterations is not None:
+            error("--duration and --iterations are mutually exclusive")
+            return
+        if duration is None and iterations is None:
+            error("Either --duration or --iterations is required")
+            return
+
+        if csv_dir and trajectory_interval is None:
+            warning(
+                "--csv-dir without --trajectory-interval will produce "
+                "header-only CSVs (no trajectory samples were recorded). "
+                "Pass e.g. --trajectory-interval 1 to capture rows."
+            )
+
+        dur_seconds: float | None = None
+        if duration is not None:
+            try:
+                dur_seconds = parse_duration(duration)
+            except ValueError as exc:
+                error(str(exc))
+                return
+
+        # ── Run benchmark ────────────────────────────────────────────
+        section(f"Benchmark: {strategy} × {trials} trials")
+        info(
+            f"Target: [bt.purple]{address}[/bt.purple]  "
+            f"Protocols: {', '.join(proto_list)}  "
+            + (f"Duration: {duration}" if duration else f"Iterations: {iterations}")
+            + (f"  Base seed: {base_seed}" if base_seed is not None else "")
+            + ("  [dim](dry-run)[/dim]" if dry_run else "")
+        )
+
+        try:
+            result = run_benchmark(
+                target=address,
+                protocols=proto_list,
+                strategy=strategy,
+                trials=trials,
+                label=label,
+                base_seed=base_seed,
+                duration=dur_seconds,
+                max_iterations=iterations,
+                session_dir=session_dir,
+                cooldown=float(cooldown),
+                dry_run=dry_run,
+                trajectory_interval_seconds=trajectory_interval,
+            )
+        except (ValueError, RuntimeError) as exc:
+            error(f"Benchmark failed: {exc}")
+            return
+
+        # ── Print summary table ──────────────────────────────────────
+        section("Benchmark Summary")
+        table = Table(show_header=True, header_style="bold")
+        table.add_column("Metric", style=CYAN)
+        table.add_column("n", justify="right")
+        table.add_column("mean", justify="right")
+        table.add_column("stdev", justify="right")
+        table.add_column("min", justify="right")
+        table.add_column("max", justify="right")
+
+        def _fmt(value: float, *, precision: int = 3) -> str:
+            if value != value:  # NaN
+                return "—"
+            return f"{value:.{precision}f}"
+
+        for metric_name, stats_dict, precision in (
+            ("crashes", result.crashes, 1),
+            ("crashes_per_kpkt", result.crashes_per_kpkt, 3),
+            ("iterations", result.iterations, 1),
+            ("packets_sent", result.packets_sent, 1),
+            ("runtime_seconds", result.runtime_seconds, 2),
+            ("states_discovered", result.states_discovered, 1),
+        ):
+            table.add_row(
+                metric_name,
+                str(int(stats_dict.get("n", 0))),
+                _fmt(stats_dict.get("mean", float("nan")), precision=precision),
+                _fmt(stats_dict.get("stdev", float("nan")), precision=precision),
+                _fmt(stats_dict.get("min", float("nan")), precision=precision),
+                _fmt(stats_dict.get("max", float("nan")), precision=precision),
+            )
+        console.print(table)
+
+        if result.aborted_trials or result.error_trials:
+            warning(
+                f"{result.aborted_trials} aborted, {result.error_trials} "
+                "errored trials are still included in the aggregate stats"
+            )
+
+        # ── Persist JSON ─────────────────────────────────────────────
+        if output_path:
+            import tempfile
+            target_path = os.path.abspath(output_path)
+            parent = os.path.dirname(target_path) or "."
+            os.makedirs(parent, exist_ok=True)
+            tmp_name: str | None = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode="w", dir=parent, delete=False,
+                    suffix=".json.tmp", encoding="utf-8",
+                ) as tmp:
+                    tmp_name = tmp.name
+                    tmp.write(result.to_json())
+                    tmp.flush()
+                    os.fsync(tmp.fileno())
+                os.replace(tmp_name, target_path)
+                tmp_name = None
+                success(f"Wrote benchmark JSON to [bt.cyan]{target_path}[/bt.cyan]")
+            finally:
+                if tmp_name is not None and os.path.exists(tmp_name):
+                    try:
+                        os.unlink(tmp_name)
+                    except OSError:
+                        pass
+
+        # ── Persist per-trial trajectory CSVs ────────────────────────
+        if csv_dir:
+            csv_dir_abs = os.path.abspath(csv_dir)
+            os.makedirs(csv_dir_abs, exist_ok=True)
+            written = 0
+            for i, trial in enumerate(result.trials):
+                csv_path = os.path.join(csv_dir_abs, f"trial_{i}.csv")
+                try:
+                    trial.to_csv(csv_path)
+                    written += 1
+                except OSError as exc:
+                    warning(f"Failed to write {csv_path}: {exc}")
+            success(
+                f"Wrote {written}/{len(result.trials)} trajectory CSVs to "
+                f"[bt.cyan]{csv_dir_abs}[/bt.cyan]"
+            )
+
+        # ── Log to session ───────────────────────────────────────────
+        try:
+            log_command(
+                f"fuzz_benchmark_{strategy}_t{trials}",
+                {
+                    "label": result.label,
+                    "trials": len(result.trials),
+                    "strategy": result.strategy,
+                    "protocols": proto_list,
+                    "crashes_mean": result.crashes.get("mean", 0.0),
+                    "crashes_per_kpkt_mean": result.crashes_per_kpkt.get("mean", 0.0),
+                    "aborted_trials": result.aborted_trials,
+                    "error_trials": result.error_trials,
+                    "dry_run": dry_run,
+                    "base_seed": base_seed,
+                    "output_path": output_path,
+                    "csv_dir": csv_dir,
+                },
+                category="fuzz",
+                target=address,
+            )
+        except (OSError, RuntimeError) as exc:
+            logger.debug("benchmark: log_command skipped: %s", exc)
+
+
+# ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
 
@@ -1607,6 +1980,7 @@ def register_fuzz_commands(fuzz_group) -> None:
         register_fuzz_commands(fuzz)
     """
     _campaign_command(fuzz_group)
+    _benchmark_command(fuzz_group)
     _crash_commands(fuzz_group)
 
     # Register per-protocol commands and corpus management from cli_extra
