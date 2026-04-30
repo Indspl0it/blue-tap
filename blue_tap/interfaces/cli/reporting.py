@@ -565,6 +565,13 @@ def run_playbook_cmd(commands, playbook, list_playbooks_flag):
     from blue_tap.framework.sessions.store import log_command
     log_command("playbook_run", envelope, category="general")
 
+    # Surface step failures as a non-zero exit. Wrappers (CI, scripts,
+    # outer playbooks) need to distinguish "all green" from "some steps
+    # broken" — without this, a fully-failed playbook returns 0 and
+    # downstream automation treats it as success.
+    if failed > 0:
+        raise SystemExit(1)
+
 
 # ============================================================================
 # SESSION - Session Management
