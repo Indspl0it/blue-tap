@@ -32,9 +32,10 @@ CVE targets: CVE-2019-9506 (KNOB), CVE-2020-10135 (BIAS),
 
 from __future__ import annotations
 
-import os
 import struct
 from collections.abc import Generator
+
+from blue_tap.modules.fuzzing._random import random_bytes
 
 
 # ---------------------------------------------------------------------------
@@ -467,7 +468,7 @@ def build_in_rand(random_number: bytes | None = None) -> bytes:
     Returns:
         17-byte PDU: opcode(1) + random_number(16).
     """
-    rand = random_number if random_number is not None else os.urandom(16)
+    rand = random_number if random_number is not None else random_bytes(16)
     return build_lmp(LMP_IN_RAND, rand[:16].ljust(16, b"\x00"))
 
 
@@ -482,7 +483,7 @@ def build_comb_key(random_number: bytes | None = None) -> bytes:
     Returns:
         17-byte PDU: opcode(1) + random_number(16).
     """
-    rand = random_number if random_number is not None else os.urandom(16)
+    rand = random_number if random_number is not None else random_bytes(16)
     return build_lmp(LMP_COMB_KEY, rand[:16].ljust(16, b"\x00"))
 
 
@@ -497,7 +498,7 @@ def build_unit_key(key: bytes | None = None) -> bytes:
     Returns:
         17-byte PDU: opcode(1) + key(16).
     """
-    k = key if key is not None else os.urandom(16)
+    k = key if key is not None else random_bytes(16)
     return build_lmp(LMP_UNIT_KEY, k[:16].ljust(16, b"\x00"))
 
 
@@ -513,7 +514,7 @@ def build_au_rand(random_number: bytes | None = None) -> bytes:
     Returns:
         17-byte PDU: opcode(1) + random_number(16).
     """
-    rand = random_number if random_number is not None else os.urandom(16)
+    rand = random_number if random_number is not None else random_bytes(16)
     return build_lmp(LMP_AU_RAND, rand[:16].ljust(16, b"\x00"))
 
 
@@ -543,7 +544,7 @@ def build_temp_rand(random_number: bytes | None = None) -> bytes:
     Returns:
         17-byte PDU: opcode(1) + random_number(16).
     """
-    rand = random_number if random_number is not None else os.urandom(16)
+    rand = random_number if random_number is not None else random_bytes(16)
     return build_lmp(LMP_TEMP_RAND, rand[:16].ljust(16, b"\x00"))
 
 
@@ -607,7 +608,7 @@ def build_start_encryption_req(random_number: bytes | None = None) -> bytes:
     Returns:
         17-byte PDU: opcode(1) + random_number(16).
     """
-    rand = random_number if random_number is not None else os.urandom(16)
+    rand = random_number if random_number is not None else random_bytes(16)
     return build_lmp(LMP_START_ENCRYPTION_REQ, rand[:16].ljust(16, b"\x00"))
 
 
@@ -973,7 +974,7 @@ def build_encapsulated_payload(data: bytes | None = None) -> bytes:
     Returns:
         17-byte PDU: opcode(1) + data(16).
     """
-    d = data if data is not None else os.urandom(16)
+    d = data if data is not None else random_bytes(16)
     return build_lmp(LMP_ENCAPSULATED_PAYLOAD, d[:16].ljust(16, b"\x00"))
 
 
@@ -999,7 +1000,7 @@ def build_simple_pairing_number(number: bytes | None = None) -> bytes:
     Returns:
         17-byte PDU: opcode(1) + number(16).
     """
-    n = number if number is not None else os.urandom(16)
+    n = number if number is not None else random_bytes(16)
     return build_lmp(LMP_SIMPLE_PAIRING_NUMBER, n[:16].ljust(16, b"\x00"))
 
 
@@ -1015,7 +1016,7 @@ def build_dhkey_check(confirmation: bytes | None = None) -> bytes:
     Returns:
         17-byte PDU: opcode(1) + confirmation(16).
     """
-    c = confirmation if confirmation is not None else os.urandom(16)
+    c = confirmation if confirmation is not None else random_bytes(16)
     return build_lmp(LMP_DHKEY_CHECK, c[:16].ljust(16, b"\x00"))
 
 
@@ -1360,7 +1361,7 @@ def fuzz_all_opcodes(
         expected_size = COMMAND_SIZES.get(opcode, 2)
         param_len = max(0, expected_size - 1)
         for i in range(count_per_opcode):
-            params = os.urandom(param_len) if param_len > 0 else b""
+            params = random_bytes(param_len) if param_len > 0 else b""
             yield (f"{name}_rand_{i}", build_lmp(opcode, params))
 
     # Extended opcodes
@@ -1368,7 +1369,7 @@ def fuzz_all_opcodes(
         expected_size = EXT_COMMAND_SIZES.get(ext_opcode, 3)
         param_len = max(0, expected_size - 2)  # Subtract escape + ext_opcode
         for i in range(count_per_opcode):
-            params = os.urandom(param_len) if param_len > 0 else b""
+            params = random_bytes(param_len) if param_len > 0 else b""
             yield (f"ext_{name}_rand_{i}", _build_ext(ext_opcode, params))
 
 
@@ -1412,7 +1413,7 @@ def fuzz_features() -> Generator[tuple[str, bytes], None, None]:
 
     # Random feature masks
     for i in range(8):
-        yield (f"features_random_{i}", build_features_res(features=os.urandom(8)))
+        yield (f"features_random_{i}", build_features_res(features=random_bytes(8)))
 
     # Extended features page variations
     yield (
@@ -1511,9 +1512,9 @@ def fuzz_oversized() -> Generator[tuple[str, bytes], None, None]:
         # Fill to firmware max send size
         pad_len = FIRMWARE_MAX_SEND - len(pdu)
         if pad_len > 0:
-            yield (f"oversized_{name}_pad_{pad_len}", pdu + os.urandom(pad_len))
+            yield (f"oversized_{name}_pad_{pad_len}", pdu + random_bytes(pad_len))
         # Fill to the full spec-maximum 17-byte PDU (patched firmware handles this)
-        yield (f"oversized_{name}_max17", pdu + os.urandom(MAX_LMP_PDU - len(pdu)))
+        yield (f"oversized_{name}_max17", pdu + random_bytes(MAX_LMP_PDU - len(pdu)))
 
 
 def fuzz_invalid_opcodes() -> Generator[tuple[str, bytes], None, None]:
@@ -1531,25 +1532,25 @@ def fuzz_invalid_opcodes() -> Generator[tuple[str, bytes], None, None]:
         if opcode not in DEFINED_COMMANDS:
             yield (
                 f"undefined_std_opcode_{opcode}",
-                build_lmp(opcode, os.urandom(min(16, FIRMWARE_MAX_SEND - 1))),
+                build_lmp(opcode, random_bytes(min(16, FIRMWARE_MAX_SEND - 1))),
             )
 
     # Opcode 0 (reserved) — fill remaining bytes to firmware max
-    yield ("reserved_opcode_0", bytes([0x00]) + os.urandom(FIRMWARE_MAX_SEND - 1))
+    yield ("reserved_opcode_0", bytes([0x00]) + random_bytes(FIRMWARE_MAX_SEND - 1))
 
     # Undefined extended opcodes
     for ext_opcode in range(1, 32):
         if ext_opcode not in DEFINED_EXT_COMMANDS:
             yield (
                 f"undefined_ext_opcode_{ext_opcode}",
-                _build_ext(ext_opcode, os.urandom(min(15, FIRMWARE_MAX_SEND - 2))),
+                _build_ext(ext_opcode, random_bytes(min(15, FIRMWARE_MAX_SEND - 2))),
             )
 
     # High extended opcodes (well beyond defined range)
     for ext_opcode in [64, 128, 200, 255]:
         yield (
             f"undefined_ext_opcode_{ext_opcode}",
-            _build_ext(ext_opcode, os.urandom(min(15, FIRMWARE_MAX_SEND - 2))),
+            _build_ext(ext_opcode, random_bytes(min(15, FIRMWARE_MAX_SEND - 2))),
         )
 
 
@@ -1573,17 +1574,17 @@ def fuzz_invalid_tid() -> Generator[tuple[str, bytes], None, None]:
         # Encode as if tid=1 (set LSB of the encoded byte)
         encoded_byte = ((opcode & 0x7F) << 1) | 1
         param_len = max(0, COMMAND_SIZES.get(opcode, 2) - 1)
-        params = os.urandom(param_len) if param_len > 0 else b""
+        params = random_bytes(param_len) if param_len > 0 else b""
         yield (
             f"tid1_raw_{COMMAND_NAMES.get(opcode, str(opcode))}",
             bytes([encoded_byte]) + params,
         )
 
     # Zero byte (opcode=0, tid=0) — fill to firmware max
-    yield ("tid_zero_byte", b"\x00" + os.urandom(FIRMWARE_MAX_SEND - 1))
+    yield ("tid_zero_byte", b"\x00" + random_bytes(FIRMWARE_MAX_SEND - 1))
 
     # All-ones byte (opcode=127, tid=1 -> escape with tid=1) — fill to firmware max
-    yield ("tid_all_ones", b"\xff" + os.urandom(FIRMWARE_MAX_SEND - 2))
+    yield ("tid_all_ones", b"\xff" + random_bytes(FIRMWARE_MAX_SEND - 2))
 
 
 def fuzz_io_capabilities() -> Generator[tuple[str, bytes], None, None]:
@@ -1908,7 +1909,7 @@ def fuzz_braktooth_patterns() -> Generator[tuple[str, list[bytes]], None, None]:
     for op in range(68, 80):
         yield (f"undefined_op_{op}_during_auth", [
             build_features_req(),
-            build_lmp(op, os.urandom(8)),
+            build_lmp(op, random_bytes(8)),
         ])
 
     # CVE-2021-34147 pattern: LMP_AU_RAND flood (duplicate challenge)

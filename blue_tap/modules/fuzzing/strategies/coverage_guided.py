@@ -37,6 +37,7 @@ import hashlib
 import random
 from dataclasses import dataclass
 
+from blue_tap.modules.fuzzing._random import random_bytes
 from blue_tap.modules.fuzzing.corpus import Corpus
 from blue_tap.modules.fuzzing.mutators import CorpusMutator
 from blue_tap.modules.fuzzing.strategies._registry import get_registry, PROTOCOLS as _SHARED_PROTOCOLS
@@ -179,8 +180,7 @@ class CoverageGuidedStrategy(FuzzStrategy):
         # minimal random blob so the engine never sends an empty payload.
         self._stats.total_generated += 1
         if not data:  # type: ignore[possibly-undefined]
-            import os as _os
-            data = _os.urandom(8)
+            data = random_bytes(8)
             log = ["fallback(empty_mutation_output)"]
         return data, log
 

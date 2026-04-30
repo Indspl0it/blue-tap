@@ -24,8 +24,9 @@ CVE targets: CVE-2024-24746 (Zephyr), SweynTooth family, CVE-2020-10069
 
 from __future__ import annotations
 
-import os
 import struct
+
+from blue_tap.modules.fuzzing._random import random_bytes
 
 
 # ---------------------------------------------------------------------------
@@ -566,7 +567,7 @@ def fuzz_write_sizes() -> list[bytes]:
     """
     cases: list[bytes] = []
     for size in [0, 1, 20, 22, 23, 100, 255, 512]:
-        payload = os.urandom(size) if size > 0 else b""
+        payload = random_bytes(size) if size > 0 else b""
         cases.append(build_write_req(0x0003, payload))
         cases.append(build_write_cmd(0x0003, payload))
     return cases
@@ -588,7 +589,7 @@ def fuzz_prepare_write_overflow() -> list[bytes]:
     cases: list[bytes] = []
     for offset in [0, 1, 0x7FFF, 0xFFFE, 0xFFFF]:
         for size in [1, 100, 512]:
-            cases.append(build_prepare_write_req(0x0003, offset, os.urandom(size)))
+            cases.append(build_prepare_write_req(0x0003, offset, random_bytes(size)))
     # Execute Write without prior Prepare (tests empty queue handling)
     cases.append(build_execute_write_req(0x01))
     # Execute Write with cancel (tests cancel of empty queue)
@@ -628,7 +629,7 @@ def fuzz_invalid_uuid_sizes() -> list[bytes]:
     """
     cases: list[bytes] = []
     for size in [1, 3, 4, 5, 8, 15, 17, 32]:
-        pdu = struct.pack("<BHH", ATT_READ_BY_TYPE_REQ, 0x0001, 0xFFFF) + os.urandom(size)
+        pdu = struct.pack("<BHH", ATT_READ_BY_TYPE_REQ, 0x0001, 0xFFFF) + random_bytes(size)
         cases.append(pdu)
     return cases
 
@@ -695,7 +696,7 @@ def fuzz_service_discovery() -> list[bytes]:
     ))
     # Find By Type Value with oversized value
     cases.append(build_find_by_type_value_req(
-        0x0001, 0xFFFF, UUID_PRIMARY_SERVICE, os.urandom(256)
+        0x0001, 0xFFFF, UUID_PRIMARY_SERVICE, random_bytes(256)
     ))
 
     # Read By Type targeting CCCD across full range
@@ -746,11 +747,11 @@ def fuzz_notification_from_client() -> list[bytes]:
 
     # Client sends Notification (invalid direction)
     cases.append(build_handle_value_ntf(0x0001, b"\x00"))
-    cases.append(build_handle_value_ntf(0x0001, os.urandom(20)))
+    cases.append(build_handle_value_ntf(0x0001, random_bytes(20)))
 
     # Client sends Indication (invalid direction)
     cases.append(build_handle_value_ind(0x0001, b"\x00"))
-    cases.append(build_handle_value_ind(0x0001, os.urandom(20)))
+    cases.append(build_handle_value_ind(0x0001, random_bytes(20)))
 
     # Unsolicited Confirmation
     cases.append(build_handle_value_cfm())

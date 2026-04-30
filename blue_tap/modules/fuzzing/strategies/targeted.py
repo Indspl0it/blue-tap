@@ -22,10 +22,10 @@ Reference: lessons-from-bluetooth-specifications.md, Section 11
 
 from __future__ import annotations
 
-import os
 import struct
 from collections.abc import Generator
 
+from blue_tap.modules.fuzzing._random import random_bytes
 from blue_tap.modules.fuzzing.mutators import CorpusMutator, FieldMutator
 from blue_tap.modules.fuzzing.protocols.att import (
     UUID_CHARACTERISTIC,
@@ -654,8 +654,8 @@ class TargetedStrategy:
 
         # --- Variation 3: Random points (overwhelmingly not on curve) ---
         for i in range(10):
-            x = os.urandom(32)
-            y = os.urandom(32)
+            x = random_bytes(32)
+            y = random_bytes(32)
             yield (
                 [pairing_req, build_pairing_public_key(x, y)],
                 f"CVE-2018-5383 variant: random point #{i+1} "
@@ -668,8 +668,8 @@ class TargetedStrategy:
             (b"\x01" + b"\x00" * 31, b"\x00" * 32, "small X=1, Y=0"),
             (b"\x00" * 32, b"\x01" + b"\x00" * 31, "X=0, small Y=1"),
             (b"\x01" + b"\x00" * 31, b"\x01" + b"\x00" * 31, "X=1, Y=1"),
-            (os.urandom(32), b"\x00" * 32, "random X, Y=0"),
-            (b"\x00" * 32, os.urandom(32), "X=0, random Y"),
+            (random_bytes(32), b"\x00" * 32, "random X, Y=0"),
+            (b"\x00" * 32, random_bytes(32), "X=0, random Y"),
         ]
         for x, y, label in edge_cases:
             yield (

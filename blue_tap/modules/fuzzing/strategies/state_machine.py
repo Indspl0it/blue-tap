@@ -25,12 +25,12 @@ Reference: lessons-from-bluetooth-specifications.md, Sections 5, 6, 9
 
 from __future__ import annotations
 
-import os
 import random
 import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
+from blue_tap.modules.fuzzing._random import random_bytes
 from blue_tap.modules.fuzzing.mutators import CorpusMutator
 from blue_tap.modules.fuzzing.strategies.base import FuzzStrategy
 
@@ -671,18 +671,18 @@ class SMPStateMachine(StateMachineModel):
             max_key_size=16, init_key_dist=KEY_DIST_ALL,
             resp_key_dist=KEY_DIST_ALL,
         )
-        confirm_pkt = build_pairing_confirm(os.urandom(16))
-        random_pkt = build_pairing_random(os.urandom(16))
-        pubkey_pkt = build_pairing_public_key(os.urandom(32), os.urandom(32))
-        dhkey_pkt = build_pairing_dhkey_check(os.urandom(16))
+        confirm_pkt = build_pairing_confirm(random_bytes(16))
+        random_pkt = build_pairing_random(random_bytes(16))
+        pubkey_pkt = build_pairing_public_key(random_bytes(32), random_bytes(32))
+        dhkey_pkt = build_pairing_dhkey_check(random_bytes(16))
         failed_pkt = build_pairing_failed(SMP_ERR_UNSPECIFIED)
 
         # Key distribution packets
-        enc_info_pkt = build_encryption_info(os.urandom(16))
-        central_id_pkt = build_central_identification(0x1234, os.urandom(8))
-        identity_pkt = build_identity_info(os.urandom(16))
-        identity_addr_pkt = build_identity_addr_info(0x00, os.urandom(6))
-        signing_pkt = build_signing_info(os.urandom(16))
+        enc_info_pkt = build_encryption_info(random_bytes(16))
+        central_id_pkt = build_central_identification(0x1234, random_bytes(8))
+        identity_pkt = build_identity_info(random_bytes(16))
+        identity_addr_pkt = build_identity_addr_info(0x00, random_bytes(6))
+        signing_pkt = build_signing_info(random_bytes(16))
 
         self.initial_state = "idle"
 
@@ -1057,7 +1057,7 @@ class ATTStateMachine(StateMachineModel):
         # 9. Prepare Write with huge offset, no prior Prepare
         sequences.append((
             [
-                att["build_prepare_write_req"](0x0003, 0xFFFF, os.urandom(100)),
+                att["build_prepare_write_req"](0x0003, 0xFFFF, random_bytes(100)),
                 att["build_execute_write_req"](0x01),
             ],
             ["INVALID: Prepare Write with max offset then Execute"],

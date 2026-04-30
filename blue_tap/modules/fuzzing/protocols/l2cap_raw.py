@@ -10,8 +10,9 @@ Ported from DarkFirmware's l2cap_fuzzer.py (15 test cases).
 
 from __future__ import annotations
 
-import os
 import struct
+
+from blue_tap.modules.fuzzing._random import random_bytes
 
 
 # ---------------------------------------------------------------------------
@@ -77,8 +78,22 @@ CID_BR_SMP = 0x0007         # BR/EDR Security Manager
 # ---------------------------------------------------------------------------
 # Fuzz test cases — malformed L2CAP frames
 # ---------------------------------------------------------------------------
+#
+# Two layers, on purpose:
+#
+# - ``_STRUCTURAL_L2CAP_RAW_FUZZ_TESTS`` is a module-level constant whose
+#   payloads are deterministic byte sequences. Built once at import.
+# - ``_random_l2cap_raw_fuzz_tests`` builds the entries whose payloads
+#   come from :func:`random_bytes` and therefore must be evaluated
+#   *inside* the active random-source context. Called per-campaign by
+#   the public ``fuzz_raw_*`` helpers so the engine's seeded source
+#   drives them.
+#
+# Mixing random-data entries into a module-level constant would freeze
+# their bytes at import time — making ``run_campaign(seed=X)`` produce
+# different payloads on first vs. subsequent calls in the same process.
 
-L2CAP_RAW_FUZZ_TESTS: list[dict] = [
+_STRUCTURAL_L2CAP_RAW_FUZZ_TESTS: list[dict] = [
     {
         "name": "zero_length_l2cap",
         "desc": "L2CAP with length=0",
@@ -125,11 +140,6 @@ L2CAP_RAW_FUZZ_TESTS: list[dict] = [
         "frame": build_l2cap(CID_SIGNALING, b"\x08\x01"),
     },
     {
-        "name": "echo_oversized",
-        "desc": "L2CAP Echo Request with 500 bytes data",
-        "frame": build_l2cap_echo_req(data=os.urandom(500)),
-    },
-    {
         "name": "info_req_invalid_type",
         "desc": "Information Request with invalid type 0xFFFF",
         "frame": build_l2cap_info_req(0xFFFF),
@@ -157,16 +167,55 @@ L2CAP_RAW_FUZZ_TESTS: list[dict] = [
 ]
 
 
-def _frames_matching(prefixes: tuple[str, ...]) -> list[bytes]:
-    """Return raw L2CAP frames whose test names begin with *prefixes*."""
+def _random_l2cap_raw_fuzz_tests() -> list[dict]:
+    """Return the fuzz cases whose payloads come from the active random source."""
+    return [
+        {
+            "name": "echo_oversized",
+            "desc": "L2CAP Echo Request with 500 bytes data",
+            "frame": build_l2cap_echo_req(data=random_bytes(500)),
+        },
+    ]
+
+
+def _l2cap_raw_fuzz_tests() -> list[dict]:
+    """Combined view of structural + random-data fuzz cases.
+
+    Each call rebuilds the random-data entries against the *currently
+    active* random source. Callers that need a single coherent snapshot
+    of the test list (e.g. :func:`generate_all_l2cap_sig_fuzz_cases`)
+    must call this once and pass the result through their helpers — see
+    :func:`_frames_matching_in` — to avoid generating multiple
+    independently-randomised variants of the same logical case within
+    one campaign.
+    """
+    return _STRUCTURAL_L2CAP_RAW_FUZZ_TESTS + _random_l2cap_raw_fuzz_tests()
+
+
+def _frames_matching_in(
+    tests: list[dict], prefixes: tuple[str, ...]
+) -> list[bytes]:
+    """Filter *tests* to frames whose names start with one of *prefixes*."""
     frames: list[bytes] = []
-    for case in L2CAP_RAW_FUZZ_TESTS:
+    for case in tests:
         name = str(case.get("name", ""))
         if any(name.startswith(prefix) for prefix in prefixes):
             frame = case.get("frame", b"")
             if isinstance(frame, bytes):
                 frames.append(frame)
     return frames
+
+
+def _frames_matching(prefixes: tuple[str, ...]) -> list[bytes]:
+    """Convenience wrapper: build a fresh test list and filter it.
+
+    Every call samples a *new* set of random-data entries from the
+    active random source. Public callers (``fuzz_raw_*``) use this when
+    they want fresh randomness; the engine-side aggregator
+    :func:`generate_all_l2cap_sig_fuzz_cases` materialises one snapshot
+    instead and passes it through :func:`_frames_matching_in`.
+    """
+    return _frames_matching_in(_l2cap_raw_fuzz_tests(), prefixes)
 
 
 def fuzz_raw_cid_manipulation() -> list[bytes]:
@@ -205,16 +254,36 @@ def fuzz_raw_info_requests() -> list[bytes]:
 
 
 def generate_all_l2cap_sig_fuzz_cases() -> list[bytes]:
-    """Return full BR/EDR signaling-channel L2CAP frames for raw ACL injection."""
+    """Return full BR/EDR signaling-channel L2CAP frames for raw ACL injection.
+
+    Builds one coherent snapshot of the test list — including a single
+    set of random-data entries — and re-uses it across every filter
+    group below. Without this single-snapshot discipline, each filter
+    helper would call :func:`_l2cap_raw_fuzz_tests` independently,
+    generating a *different* random ``echo_oversized`` payload each
+    time. The dedup set would then keep them all and the output would
+    grow with each duplicate variant.
+    """
+    tests = _l2cap_raw_fuzz_tests()
     cases: list[bytes] = []
     seen: set[bytes] = set()
-    for group in (
-        fuzz_raw_cid_manipulation(),
-        fuzz_raw_config_signaling(),
-        fuzz_raw_echo_requests(),
-        fuzz_raw_info_requests(),
-        [case["frame"] for case in L2CAP_RAW_FUZZ_TESTS if isinstance(case.get("frame"), bytes)],
-    ):
+
+    cid_manip = _frames_matching_in(tests, (
+        "zero_length_l2cap", "max_length_l2cap", "bad_cid_",
+        "smp_on_classic", "truncated_l2cap_header",
+    ))
+    config_sig = _frames_matching_in(tests, (
+        "conn_req_", "config_req_", "disconnect_req_",
+    ))
+    echo = _frames_matching_in(tests, ("echo_", "signaling_truncated"))
+    echo.extend([
+        build_l2cap(CID_SIGNALING, struct.pack("<BBH", 0x08, 0x01, 0xFFFF) + b"PING"),
+        build_l2cap(CID_SIGNALING, struct.pack("<BBH", 0x08, 0x01, 0x0000) + b"PING"),
+    ])
+    info_req = _frames_matching_in(tests, ("info_req_",))
+    full = [case["frame"] for case in tests if isinstance(case.get("frame"), bytes)]
+
+    for group in (cid_manip, config_sig, echo, info_req, full):
         for frame in group:
             if frame not in seen:
                 seen.add(frame)

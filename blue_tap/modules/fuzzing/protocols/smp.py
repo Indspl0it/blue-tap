@@ -21,8 +21,9 @@ CVE targets: CVE-2018-5383 (Invalid Curve), CVE-2020-26558 (Passkey Bypass)
 
 from __future__ import annotations
 
-import os
 import struct
+
+from blue_tap.modules.fuzzing._random import random_bytes
 
 
 # ---------------------------------------------------------------------------
@@ -602,10 +603,10 @@ def fuzz_public_key_invalid_curve() -> list[bytes]:
     return [
         build_pairing_public_key(b"\x00" * 32, b"\x00" * 32),       # Zero point
         build_pairing_public_key(b"\xFF" * 32, b"\xFF" * 32),       # Max values
-        build_pairing_public_key(os.urandom(32), os.urandom(32)),   # Random (not on curve)
-        build_pairing_public_key(os.urandom(32), os.urandom(32)),   # Another random
+        build_pairing_public_key(random_bytes(32), random_bytes(32)),   # Random (not on curve)
+        build_pairing_public_key(random_bytes(32), random_bytes(32)),   # Another random
         build_pairing_public_key(gx, gy),                            # Generator point
-        build_pairing_public_key(os.urandom(32), b"\x00" * 32),    # y=0 (edge case)
+        build_pairing_public_key(random_bytes(32), b"\x00" * 32),    # y=0 (edge case)
         build_pairing_public_key(b"\x01" + b"\x00" * 31, b"\x00" * 32),  # Small x, y=0
     ]
 
@@ -623,29 +624,29 @@ def fuzz_out_of_sequence() -> list[list[bytes]]:
     """
     return [
         # Confirm without Request (Phase 2 before Phase 1)
-        [build_pairing_confirm(os.urandom(16))],
+        [build_pairing_confirm(random_bytes(16))],
 
         # Random without Confirm
-        [build_pairing_random(os.urandom(16))],
+        [build_pairing_random(random_bytes(16))],
 
         # Public Key without Request (SC Phase 2 before Phase 1)
-        [build_pairing_public_key(os.urandom(32), os.urandom(32))],
+        [build_pairing_public_key(random_bytes(32), random_bytes(32))],
 
         # DHKey Check without Public Key exchange
-        [build_pairing_dhkey_check(os.urandom(16))],
+        [build_pairing_dhkey_check(random_bytes(16))],
 
         # Failed then continue pairing (should have terminated)
         [build_pairing_failed(SMP_ERR_UNSPECIFIED),
-         build_pairing_confirm(os.urandom(16))],
+         build_pairing_confirm(random_bytes(16))],
 
         # Key distribution before pairing completes
-        [build_encryption_info(os.urandom(16))],
-        [build_central_identification(0x1234, os.urandom(8))],
-        [build_identity_info(os.urandom(16))],
+        [build_encryption_info(random_bytes(16))],
+        [build_central_identification(0x1234, random_bytes(8))],
+        [build_identity_info(random_bytes(16))],
 
         # Security Request then immediate Confirm (skipping Request/Response)
         [build_security_request(AUTH_SC_BOND_MITM),
-         build_pairing_confirm(os.urandom(16))],
+         build_pairing_confirm(random_bytes(16))],
 
         # Double Request (send Request twice)
         [build_pairing_request(), build_pairing_request()],
@@ -683,13 +684,13 @@ def fuzz_oversized_pdus() -> list[bytes]:
         List of oversized SMP PDU bytes.
     """
     cases: list[bytes] = []
-    extra = os.urandom(32)  # Extra trailing data
+    extra = random_bytes(32)  # Extra trailing data
 
     # Pairing Request + extra bytes
     cases.append(build_pairing_request() + extra)
 
     # Pairing Confirm + extra bytes
-    cases.append(build_pairing_confirm(os.urandom(16)) + extra)
+    cases.append(build_pairing_confirm(random_bytes(16)) + extra)
 
     # Pairing Failed + extra bytes
     cases.append(build_pairing_failed(SMP_ERR_UNSPECIFIED) + extra)
@@ -698,13 +699,13 @@ def fuzz_oversized_pdus() -> list[bytes]:
     cases.append(build_security_request() + extra)
 
     # Public Key + extra bytes (already 65 bytes, adding more)
-    cases.append(build_pairing_public_key(os.urandom(32), os.urandom(32)) + extra)
+    cases.append(build_pairing_public_key(random_bytes(32), random_bytes(32)) + extra)
 
     # Keypress Notification + extra bytes
     cases.append(build_keypress_notification() + extra)
 
     # DHKey Check + extra bytes
-    cases.append(build_pairing_dhkey_check(os.urandom(16)) + extra)
+    cases.append(build_pairing_dhkey_check(random_bytes(16)) + extra)
 
     return cases
 
@@ -723,15 +724,15 @@ def fuzz_truncated_pdus() -> list[bytes]:
     # Full PDUs to truncate
     full_pdus: list[tuple[str, bytes]] = [
         ("PairingRequest", build_pairing_request()),
-        ("PairingConfirm", build_pairing_confirm(os.urandom(16))),
-        ("PairingRandom", build_pairing_random(os.urandom(16))),
-        ("EncryptionInfo", build_encryption_info(os.urandom(16))),
-        ("CentralId", build_central_identification(0x1234, os.urandom(8))),
-        ("IdentityInfo", build_identity_info(os.urandom(16))),
-        ("IdentityAddrInfo", build_identity_addr_info(0x00, os.urandom(6))),
-        ("SigningInfo", build_signing_info(os.urandom(16))),
-        ("PublicKey", build_pairing_public_key(os.urandom(32), os.urandom(32))),
-        ("DHKeyCheck", build_pairing_dhkey_check(os.urandom(16))),
+        ("PairingConfirm", build_pairing_confirm(random_bytes(16))),
+        ("PairingRandom", build_pairing_random(random_bytes(16))),
+        ("EncryptionInfo", build_encryption_info(random_bytes(16))),
+        ("CentralId", build_central_identification(0x1234, random_bytes(8))),
+        ("IdentityInfo", build_identity_info(random_bytes(16))),
+        ("IdentityAddrInfo", build_identity_addr_info(0x00, random_bytes(6))),
+        ("SigningInfo", build_signing_info(random_bytes(16))),
+        ("PublicKey", build_pairing_public_key(random_bytes(32), random_bytes(32))),
+        ("DHKeyCheck", build_pairing_dhkey_check(random_bytes(16))),
     ]
 
     for _name, pdu in full_pdus:

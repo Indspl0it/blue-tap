@@ -22,8 +22,9 @@ CVE targets: CVE-2017-0781 (Android BlueBorne heap underallocation)
 
 from __future__ import annotations
 
-import os
 import struct
+
+from blue_tap.modules.fuzzing._random import random_bytes
 
 
 # ---------------------------------------------------------------------------
@@ -340,7 +341,7 @@ def fuzz_setup_uuid_sizes() -> list[bytes]:
     for size in (0, 1, 2, 3, 4, 8, 16, 32, 128, 255):
         # Matching UUID data: uuid_size * 2 bytes (dst + src)
         if size > 0:
-            uuid_data = os.urandom(size * 2)
+            uuid_data = random_bytes(size * 2)
         else:
             uuid_data = b""
         cases.append(

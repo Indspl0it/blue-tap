@@ -8,10 +8,11 @@ aggressive exploration.
 
 from __future__ import annotations
 
-import os
 import random
 from dataclasses import dataclass, field
 from typing import Any
+
+from blue_tap.modules.fuzzing._random import random_bytes
 
 
 # ---------------------------------------------------------------------------
@@ -131,7 +132,7 @@ class FieldMutator:
         """
         if extra is None:
             extra = random.randint(1, 64)
-        return data + os.urandom(max(0, extra))
+        return data + random_bytes(max(0, extra))
 
 
 # ---------------------------------------------------------------------------
@@ -480,12 +481,12 @@ class CorpusMutator:
         This mode is designed for maximum exploration — it stacks many
         mutations on a single input to produce highly divergent outputs.
         """
-        result = data if data else os.urandom(random.randint(1, 32))
+        result = data if data else random_bytes(random.randint(1, 32))
         num_ops = random.randint(5, 20)
         for _ in range(num_ops):
             op = random.choice(CorpusMutator._OPS)
             result = op(result)
             # Re-seed if we accidentally truncated to nothing
             if not result:
-                result = os.urandom(random.randint(1, 16))
+                result = random_bytes(random.randint(1, 16))
         return result
