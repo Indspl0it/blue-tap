@@ -18,6 +18,7 @@ Entry point: `blue-tap = blue_tap.interfaces.cli.main:main`
     - `fuzz crashes list / show / export`
     - `fuzz corpus list / minimize`
     - `fuzz minimize`
+    - `fuzz campaign --dry-run` and `fuzz benchmark --dry-run`
     - `run-playbook --list`
     - `search`, `info`, `show-options`, `plugins`
 
@@ -337,9 +338,40 @@ blue-tap fuzz campaign [ADDRESS] [--protocol/-p PROTO]... [--strategy/-s STRATEG
 | `--delay` | float | `0.5` | Seconds between test cases |
 | `--capture / --no-capture` | flag | `--no-capture` | Record a btsnoop pcap during the run |
 | `--resume` | flag | --- | Resume the previous campaign from `session_dir/fuzz/campaign_state.json`. Resumes stats, corpus, crash DB, and coverage state. Falls back to a fresh run if the state file is missing or unreadable. |
+| `--dry-run` | flag | --- | Run the full pipeline against an in-process mock transport — no hardware, no l2ping. Disables `--capture`. Cannot be combined with `--resume`. |
+| `--seed N` | int | --- | Seed for byte-level reproducible mutations. Falls back to `BLUE_TAP_FUZZ_SEED`. Cannot be combined with `--resume`. |
+| `--trajectory-interval SECONDS` | float (>0) | --- | Trajectory sampling cadence; required for `CampaignResult.to_csv` to produce non-empty rows. |
 
 !!! tip "Protocol aliases"
     Short names like `pbap`, `hfp`, `opp`, `att`, `smp` are accepted whenever protocols are passed as option strings (module `PROTOCOLS=`), and are normalized to canonical keys (`obex-pbap`, `at-hfp`, `obex-opp`, `ble-att`, `ble-smp`). The `fuzz campaign --protocol` flag itself uses strict Click choices — pass the canonical name there.
+
+#### fuzz benchmark
+
+Run N independent trials of the same configuration, aggregate per-metric stats, and optionally write a round-trippable JSON plus per-trial trajectory CSVs. Use it to compare strategies on the same target with proper variance handling, or to drive variance-aware experiments from CI.
+
+```bash
+blue-tap fuzz benchmark [ADDRESS] [--protocol/-p PROTO]... [--strategy/-s STRATEGY] \
+    [--trials/-t N] (--duration/-d SPAN | --iterations/-n N) \
+    [--base-seed N] [--label TEXT] [-o BENCH.json] [--csv-dir DIR] \
+    [--cooldown N] [--dry-run] [--trajectory-interval SECONDS]
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `-p, --protocol` | repeatable choice | `all` | Protocols to fuzz per trial. For variance studies on a single attack surface, narrow to one (e.g. `-p sdp`). |
+| `-s, --strategy` | choice | `coverage_guided` | `coverage_guided`, `random`, `state_machine`, `targeted` |
+| `-t, --trials` | int (≥1) | `5` | Number of independent trials. |
+| `-d, --duration` | duration | --- | Per-trial time budget. Mutually exclusive with `-n`. |
+| `-n, --iterations` | int (≥1) | --- | Per-trial test-case cap. Mutually exclusive with `-d`. |
+| `--base-seed N` | int | --- | Trial *i* uses seed `base_seed + i`. Falls back to `BLUE_TAP_FUZZ_SEED`. |
+| `--label TEXT` | string | `<strategy>@<trials>` | Human label stored in `BenchmarkResult.label`. |
+| `-o, --output FILE` | path | --- | Write the full `BenchmarkResult` JSON (round-trippable). |
+| `--csv-dir DIR` | path | --- | Write each trial's trajectory CSV as `trial_{i}.csv`. |
+| `--cooldown N` | int (≥0) | `10` | Seconds between trials. |
+| `--dry-run` | flag | --- | Run every trial against `MockTransport`. Pairs with `--base-seed` for deterministic CI. |
+| `--trajectory-interval SECONDS` | float (>0) | --- | Per-trial sampling cadence — required for `--csv-dir` to produce non-empty rows. |
+
+The summary table reports `(n, mean, stdev, min, max)` for `crashes`, `crashes_per_kpkt`, `iterations`, `packets_sent`, `runtime_seconds`, `states_discovered`. Aborted / errored trials are kept in `BenchmarkResult.trials` and counted separately so callers can decide whether to discard them.
 
 #### fuzz crashes replay
 

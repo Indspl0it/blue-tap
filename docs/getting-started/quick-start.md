@@ -15,8 +15,8 @@ security assessment and produced a professional report.
     against an empty machine: `--help`, `--version`, `doctor`, `demo`,
     `session list / show`, `report` (including `report <dir>`),
     `fuzz crashes list / show / export`, `fuzz corpus list / minimize`,
-    `fuzz minimize`, `run-playbook --list`, `search`, `info`,
-    `show-options`, `plugins`.
+    `fuzz minimize`, `fuzz campaign --dry-run`, `fuzz benchmark --dry-run`,
+    `run-playbook --list`, `search`, `info`, `show-options`, `plugins`.
 
 !!! tip "No Hardware? Start with Demo Mode"
     If you do not have an RTL8761B dongle or a target device yet, skip to

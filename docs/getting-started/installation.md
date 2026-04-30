@@ -32,6 +32,8 @@ Blue-Tap requires a Linux environment with Bluetooth support. It uses raw HCI so
     - `blue-tap fuzz crashes list / show / export`
     - `blue-tap fuzz corpus list / minimize`
     - `blue-tap fuzz minimize`
+    - `blue-tap fuzz campaign --dry-run` and `blue-tap fuzz benchmark --dry-run`
+      (in-process mock transport — exercises the full pipeline without hardware)
     - `blue-tap run-playbook --list`
     - `blue-tap search`, `blue-tap info`, `blue-tap show-options`, `blue-tap plugins`
 

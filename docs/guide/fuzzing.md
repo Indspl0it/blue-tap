@@ -113,9 +113,71 @@ blue-tap fuzz campaign TARGET -p sdp -p rfcomm --duration 2h --strategy coverage
 | `--cooldown` | Seconds to wait after crash detection |
 | `--capture/--no-capture` | Record a btsnoop pcap during fuzzing |
 | `--resume` | Resume the previous campaign from the session's `fuzz/campaign_state.json`. Restores stats, corpus, crash DB, and coverage state. If the state file is missing or unreadable, starts a fresh campaign. |
+| `--dry-run` | Run the full mutation/strategy/state-tracker pipeline against an in-process mock transport — no hardware, no l2ping. Useful for CI smoke tests. Disables `--capture` and cannot be combined with `--resume`. |
+| `--seed N` | Integer seed for byte-level reproducible mutations. Falls back to `BLUE_TAP_FUZZ_SEED` if unset. Two campaigns with the same seed produce byte-identical fuzz payloads. Cannot be combined with `--resume`. |
+| `--trajectory-interval SECONDS` | Sample `(iterations, packets_sent, crashes, states, transitions)` at most once per `N` seconds into the campaign result's trajectory. |
+
+!!! tip "Reproducible runs"
+    Use `--seed` (or `BLUE_TAP_FUZZ_SEED=<int>`) to lock the byte stream. Decimal, `0x`-hex, and `0o`-octal literals are accepted. Combine with `--dry-run` for fully hardware-free reproduction:
+    ```bash
+    BLUE_TAP_FUZZ_SEED=42 blue-tap fuzz campaign --dry-run --strategy random -p sdp -n 200 --cooldown 0
+    ```
 
 !!! tip "Protocol name aliases"
     When protocols are supplied as a comma-separated string (module `PROTOCOLS=pbap,hfp` via `blue-tap run fuzzing.engine`), short aliases are accepted and normalized: `pbap→obex-pbap`, `hfp→at-hfp`, `map→obex-map`, `opp→obex-opp`, `att→ble-att`, `smp→ble-smp`, `phonebook→at-phonebook`, `sms→at-sms`. The `fuzz campaign --protocol` CLI flag is a strict Click choice — pass the canonical name there.
+
+### Benchmark (variance + comparison)
+
+`fuzz benchmark` runs N independent trials of the same configuration and aggregates per-metric stats. Use it to compare strategies on the same target with proper variance handling, or to drive variance-aware experiments from CI.
+
+```bash
+blue-tap fuzz benchmark TARGET [-p PROTO]... [-s STRATEGY] -t TRIALS \
+    (-n ITERATIONS | -d DURATION) \
+    [--base-seed INT] [--dry-run] \
+    [--trajectory-interval SECONDS] \
+    [-o BENCH.json] [--csv-dir DIR]
+```
+
+| Flag | Description |
+|------|-------------|
+| `-t/--trials` | Number of independent trials to run (≥1, default 5). |
+| `--base-seed N` | Trial *i* uses seed `base_seed + i`. Falls back to `BLUE_TAP_FUZZ_SEED` if unset. Same base produces the same trial sequence. |
+| `--label TEXT` | Human label for the run (default `<strategy>@<trials>`). |
+| `-o/--output FILE` | Write the full benchmark result as round-trippable JSON. |
+| `--csv-dir DIR` | Write each trial's trajectory CSV as `trial_{i}.csv` (directory is created if missing). Pair with `--trajectory-interval` for non-empty rows. |
+| `--cooldown N` | Seconds between trials (default 10). |
+| `--dry-run` | Run every trial against the in-process mock transport — no hardware. Pairs with `--base-seed` for deterministic CI runs. |
+| `--trajectory-interval SECONDS` | Per-trial sampling cadence — required for `--csv-dir` to produce non-empty CSVs. |
+
+Aggregated metrics: `crashes`, `crashes_per_kpkt`, `iterations`, `packets_sent`, `runtime_seconds`, `states_discovered`. Each row is `(n, mean, stdev, min, max)`.
+
+??? example "CI-style benchmark"
+
+    ```
+    $ blue-tap fuzz benchmark --dry-run --strategy random -p sdp \
+        -t 3 -n 200 --cooldown 0 --base-seed 42 \
+        --trajectory-interval 0.05 -o bench.json --csv-dir traj/
+
+    ────────────── Benchmark: random × 3 trials ──────────────
+      ●  Target: 00:00:00:00:00:00  Protocols: sdp
+         Iterations: 200  Base seed: 42  (dry-run)
+
+    ────────────────── Benchmark Summary ──────────────────
+    ┏━━━━━━━━━━━━━━━━━━━┳━━━┳━━━━━━━┳━━━━━━━┳━━━━━━━┳━━━━━━━┓
+    ┃ Metric            ┃ n ┃  mean ┃ stdev ┃   min ┃   max ┃
+    ┡━━━━━━━━━━━━━━━━━━━╇━━━╇━━━━━━━╇━━━━━━━╇━━━━━━━╇━━━━━━━┩
+    │ crashes           │ 3 │   0.0 │   0.0 │   0.0 │   0.0 │
+    │ crashes_per_kpkt  │ 3 │ 0.000 │ 0.000 │ 0.000 │ 0.000 │
+    │ iterations        │ 3 │ 200.0 │   0.0 │ 200.0 │ 200.0 │
+    │ packets_sent      │ 3 │ 200.0 │   0.0 │ 200.0 │ 200.0 │
+    │ runtime_seconds   │ 3 │  0.04 │  0.01 │  0.03 │  0.05 │
+    │ states_discovered │ 3 │   1.0 │   0.0 │   1.0 │   1.0 │
+    └───────────────────┴───┴───────┴───────┴───────┴───────┘
+      ✔  Wrote benchmark JSON to bench.json
+      ✔  Wrote 3/3 trajectory CSVs to traj/
+    ```
+
+For programmatic use (notebooks, ablation studies), see the [Programmatic API](#programmatic-api) below.
 
 ### Single protocol
 
@@ -232,6 +294,57 @@ $ blue-tap fuzz campaign AA:BB:CC:DD:EE:FF -p sdp -p rfcomm --duration 1h --stra
 [15:02:14]   Waiting for target recovery...
 [15:02:29]   Target recovered after 15.2s. Resuming.
 ```
+
+### Programmatic API
+
+The same engine is available as a small typed Python surface for notebooks, ablation studies, and CI scripts that don't need the dashboard. `run_campaign()` returns a typed `CampaignResult`; `benchmark()` runs N trials and returns an aggregate `BenchmarkResult` with mean / stdev / min / max for every metric.
+
+```python
+from blue_tap.modules.fuzzing import (
+    run_campaign, benchmark, compare_campaigns, compare_benchmarks,
+)
+
+result = run_campaign(
+    target="AA:BB:CC:DD:EE:FF",
+    protocols=["sdp"],
+    strategy="random",
+    max_iterations=500,
+    dry_run=True,
+    seed=42,
+    trajectory_interval_seconds=0.5,
+)
+print(result.crashes_per_kpkt, result.states_discovered)
+result.to_csv("traj.csv")
+open("run.json", "w").write(result.to_json())
+
+a = benchmark(target="AA:BB:CC:DD:EE:FF", protocols=["sdp"],
+              strategy="random", trials=10, base_seed=100,
+              dry_run=True, max_iterations=200)
+b = benchmark(target="AA:BB:CC:DD:EE:FF", protocols=["sdp"],
+              strategy="coverage_guided", trials=10, base_seed=100,
+              dry_run=True, max_iterations=200)
+delta = compare_benchmarks(a, b)
+print(delta.cohens_d, delta.effect_size_label)
+```
+
+| Symbol | Purpose |
+|--------|---------|
+| `run_campaign(...)` | Run a single campaign and return a typed `CampaignResult`. Catches `KeyboardInterrupt` and exceptions so batch experiments survive single bad runs. |
+| `benchmark(...)` | Run N trials of the same configuration and aggregate per-metric stats into a `BenchmarkResult`. |
+| `compare_campaigns(a, b)` | Per-metric `CampaignDelta` (positive = `b > a`). |
+| `compare_benchmarks(a, b)` | Effect-size comparison with Cohen's d on `crashes_per_kpkt`. |
+| `CampaignResult.to_csv(path)` | Write trajectory rows (`elapsed_seconds`, `iterations`, `packets_sent`, `crashes`, `errors`, `states`, `transitions`) as CSV. |
+| `CampaignResult.to_json()` / `from_json()` | Round-trip every field except `raw_summary`. |
+| `BenchmarkResult.to_json()` / `from_json()` | Round-trip the aggregate plus every trial. |
+| `MockTransport` | In-process transport used under `dry_run=True`. |
+
+!!! note "Reproducibility"
+    Setting `seed=N` (or exporting `BLUE_TAP_FUZZ_SEED=N`) seeds the global `random` module and installs a `random.Random(N).randbytes`-backed source through a `ContextVar`, so every strategy, mutator, and protocol builder reads bytes from the same deterministic stream. Two runs with the same seed produce byte-identical fuzz payloads. Wall-clock fields (`runtime_seconds`, `packets_per_second`) are not part of the contract.
+
+| Environment variable | Effect |
+|----------------------|--------|
+| `BLUE_TAP_FUZZ_SEED` | Default seed for `run_campaign`, `fuzz campaign --seed`, and `fuzz benchmark --base-seed` when no explicit value is passed. Accepts decimal, `0x`-hex, or `0o`-octal. |
+| `BLUE_TAP_SKIP_ROOT_CHECK=1` | Skip the root check and the RTL8761B chipset gate. Intended for test runners and CI smoke tests under `--dry-run`. |
 
 ---
 
