@@ -9,6 +9,7 @@ from blue_tap.modules.fuzzing.transport import (
     BLETransport,
     BluetoothTransport,
     L2CAPTransport,
+    MockTransport,
     RFCOMMTransport,
     TransportStats,
 )
@@ -42,10 +43,33 @@ from blue_tap.modules.fuzzing.minimizer import (
 from blue_tap.modules.fuzzing import campaign as _campaign  # noqa: F401
 from blue_tap.modules.fuzzing import minimizer as _minimizer_mod  # noqa: F401
 from blue_tap.modules.fuzzing import transport as _transport_mod  # noqa: F401
+from blue_tap.modules.fuzzing.research import (
+    BenchmarkComparison,
+    BenchmarkResult,
+    CampaignDelta,
+    CampaignResult,
+    benchmark,
+    compare_benchmarks,
+    compare_campaigns,
+    list_protocols,
+    list_strategies,
+    run_campaign,
+)
 
 __all__ = [
+    "BenchmarkComparison",
+    "BenchmarkResult",
+    "CampaignDelta",
+    "CampaignResult",
+    "benchmark",
+    "compare_benchmarks",
+    "compare_campaigns",
+    "list_protocols",
+    "list_strategies",
+    "run_campaign",
     "BluetoothTransport",
     "L2CAPTransport",
+    "MockTransport",
     "RFCOMMTransport",
     "BLETransport",
     "TransportStats",
