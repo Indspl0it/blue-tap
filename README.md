@@ -9,7 +9,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/python-3.10%2B-blue" alt="Python 3.10+"/>
   <img src="https://img.shields.io/badge/license-GPL--3.0-green" alt="License GPL-3.0"/>
-  <img src="https://img.shields.io/badge/version-2.6.3-orange" alt="Version 2.6.3"/>
+  <img src="https://img.shields.io/badge/version-2.6.4-orange" alt="Version 2.6.4"/>
   <img src="https://img.shields.io/badge/modules-101-cyan" alt="101 Modules"/>
   <img src="https://img.shields.io/badge/CVEs-37-red" alt="37 CVEs"/>
   <img src="https://img.shields.io/badge/platform-Linux%20(Kali)-557C94" alt="Linux"/>
@@ -39,7 +39,7 @@ Blue-Tap is a Bluetooth Classic and BLE security assessment framework designed t
 
 **Post-Exploitation** — Phonebook extraction (PBAP), message access (MAP), call audio (HFP), audio streaming (A2DP), media control (AVRCP), file push (OPP), Bluesnarfer (OBEX), and AT command probing. [Guide](https://Indspl0it.github.io/blue-tap/guide/post-exploitation/)
 
-**Protocol Fuzzing** — 16-protocol mutation fuzzer with coverage-guided, state-machine, targeted, and random-walk strategies. Crash database, payload minimization, CVE reproduction, and live Rich dashboard. 6,685+ seeds. [Guide](https://Indspl0it.github.io/blue-tap/guide/fuzzing/)
+**Protocol Fuzzing** — 16-protocol mutation fuzzer with coverage-guided, state-machine, targeted, and random-walk strategies. Crash database, payload minimization, CVE reproduction, and live Rich dashboard. 6,685+ seeds. Typed Python research API (`run_campaign`, `benchmark`, `MockTransport`) plus a seedable mutation stream for reproducible campaigns and hardware-free CI smoke tests. [Guide](https://Indspl0it.github.io/blue-tap/guide/fuzzing/)
 
 **DarkFirmware (Below-HCI)** — RTL8761B firmware patching for LMP injection, link-layer monitoring, and controller memory R/W. Reaches the 40-45% of Bluetooth CVEs invisible to host-only tools. [Hardware Setup](https://Indspl0it.github.io/blue-tap/getting-started/hardware-setup/)
 
@@ -55,7 +55,7 @@ Blue-Tap is a Bluetooth Classic and BLE security assessment framework designed t
 - An **RTL8761B-based USB dongle** (e.g., TP-Link UB500) — Blue-Tap currently gates all live operations behind RTL8761B detection. Stock firmware is fine; DarkFirmware unlocks below-HCI features.
 - Root privileges for Bluetooth operations
 
-Inspection commands that work without root **and** without an adapter: `--help`, `--version`, `doctor`, `demo`, `session list/show`, `report` (including `report <dir>`), `fuzz crashes list/show/export`, `fuzz corpus list/minimize`, `fuzz minimize`, `run-playbook --list`, `search`, `info`, `show-options`, `plugins`. Anything that touches the Bluetooth stack — `discover`, `recon`, `vulnscan`, `exploit`, `dos`, `extract`, `fuzz campaign`, `auto`, `fleet`, `adapter`, `spoof`, `run-playbook` (without `--list`) — needs `sudo` and an RTL8761B dongle.
+Inspection commands that work without root **and** without an adapter: `--help`, `--version`, `doctor`, `demo`, `session list/show`, `report` (including `report <dir>`), `fuzz crashes list/show/export`, `fuzz corpus list/minimize`, `fuzz minimize`, `fuzz campaign --dry-run`, `fuzz benchmark --dry-run`, `run-playbook --list`, `search`, `info`, `show-options`, `plugins`. Anything that touches the Bluetooth stack — `discover`, `recon`, `vulnscan`, `exploit`, `dos`, `extract`, `fuzz campaign` (without `--dry-run`), `auto`, `fleet`, `adapter`, `spoof`, `run-playbook` (without `--list`) — needs `sudo` and an RTL8761B dongle.
 
 ### Via PyPI
 
@@ -74,7 +74,7 @@ pip install -e .
 ### Verify Installation
 
 ```bash
-blue-tap --version          # prints 'blue-tap, version 2.6.3'
+blue-tap --version          # prints 'blue-tap, version 2.6.4'
 blue-tap doctor             # check prerequisites — no root, no hardware needed
 blue-tap session list       # list past sessions — no root, no hardware needed
 blue-tap demo               # full pipeline against simulated data — no hardware needed
@@ -133,6 +133,15 @@ sudo blue-tap run-playbook --playbook ivi-attack 4C:4F:EE:17:3A:89
 # Multi-protocol fuzzing campaign (needs hardware)
 sudo blue-tap fuzz campaign 4C:4F:EE:17:3A:89 -p sdp -p rfcomm --duration 2h
 
+# Reproducible CI smoke (v2.6.4+ — no hardware, no root)
+BLUE_TAP_FUZZ_SEED=42 blue-tap fuzz campaign --dry-run --strategy random \
+    -p sdp -n 200 --cooldown 0
+
+# Variance benchmarks for research (v2.6.4+)
+blue-tap fuzz benchmark --dry-run --strategy random -p sdp -t 5 -n 500 \
+    --base-seed 42 --trajectory-interval 0.5 \
+    -o bench.json --csv-dir traj/
+
 # Crash analysis (no root, no hardware needed — pure on-disk crash database)
 blue-tap fuzz crashes list --protocol sdp --severity HIGH
 blue-tap fuzz crashes show CRASH_ID
@@ -141,6 +150,7 @@ blue-tap fuzz crashes export -o crashes.json
 # Get help for any fuzz subcommand
 blue-tap fuzz crashes --help
 blue-tap fuzz campaign --help
+blue-tap fuzz benchmark --help
 ```
 
 See the full [CLI Reference](https://Indspl0it.github.io/blue-tap/guide/cli-reference/) for all commands and options.

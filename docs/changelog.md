@@ -5,6 +5,66 @@ All notable changes to Blue-Tap are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.4] - 2026-04-30
+
+### Summary
+
+Blue-Tap 2.6.4 turns the fuzzer into a research-grade tool: a typed Python API (`run_campaign`, `benchmark`, `MockTransport`, `CampaignResult`, `BenchmarkResult`) for driving campaigns from notebooks and CI, byte-level reproducibility through a `ContextVar`-scoped random source, an in-process mock transport that lets the full mutation/strategy/state-tracker pipeline run with zero hardware, and a new `fuzz benchmark` subcommand that runs N independent trials and aggregates per-metric statistics. Three CLI bugs are fixed along the way (sub-help dispatcher under target subcommand groups, `run-playbook` exit code on failure, and a root-gate bypass for test runners).
+
+> **Researchers / scripting users:** the new programmatic surface lives at `blue_tap.modules.fuzzing` (`run_campaign`, `benchmark`, `compare_campaigns`, `compare_benchmarks`, `CampaignResult`, `BenchmarkResult`, `MockTransport`). It bypasses RunContext / RunEnvelope, so it's a *thin* wrapper for ablation studies and not a replacement for the CLI / playbook flow.
+
+### Added — Programmatic research API
+
+- **`run_campaign(target, protocols, *, strategy, duration, max_iterations, session_dir, cooldown, seed, dry_run, random_source, trajectory_interval_seconds, ...) -> CampaignResult`** — drives a single `FuzzCampaign` and returns a typed result. Catches `KeyboardInterrupt` (records `aborted=True`) and any other exception (records `error=...`) so batch experiments survive single bad runs. Surfaces engine-side terminal failures (`{"result": "error", "reason": "..."}`) into `CampaignResult.error` rather than returning an all-zero "successful" result.
+- **`benchmark(target, protocols, *, strategy, trials, base_seed, ...) -> BenchmarkResult`** — runs N independent trials with seeds `base_seed, base_seed+1, …`, aggregates `crashes`, `crashes_per_kpkt`, `iterations`, `packets_sent`, `runtime_seconds`, and `states_discovered` into per-metric `(n, mean, stdev, median, min, max)` dicts. Errored / aborted trials are kept in `BenchmarkResult.trials` and counted separately so callers can decide whether to discard them.
+- **`compare_campaigns(a, b) -> CampaignDelta`** — per-metric delta (positive = `b > a`).
+- **`compare_benchmarks(a, b) -> BenchmarkComparison`** — Cohen's d on the per-trial `crashes_per_kpkt` series with pooled stdev plus a conventional effect-size label (`negligible` / `small` / `medium` / `large`).
+- **`CampaignResult.to_csv(path)`** — atomically writes trajectory rows (`elapsed_seconds`, `iterations`, `packets_sent`, `crashes`, `errors`, `states`, `transitions`) as CSV. Empty trajectory still produces a header-only file. Fixed column order, missing keys become empty cells, extra keys are dropped.
+- **`CampaignResult.to_json()` / `from_json()` and `BenchmarkResult.to_json()` / `from_json()`** — round-trip every field except `raw_summary` (which is omitted from `to_dict` by design). `BenchmarkResult.from_dict` rejects compact-form payloads (no `trials` key) — aggregate stats alone can't reconstruct per-trial state.
+- **`MockTransport`** — in-process subclass of `BluetoothTransport` used under `dry_run=True`. Bounded `collections.deque` for sent payloads (default 64), validates `send_buffer_len ≥ 1`, rejects non-`bytes` sends, validates that response factories return `bytes`, swallows factory exceptions and surfaces them as `recv() → None`. Documented thread-safety contract.
+- **`list_strategies()` / `list_protocols()`** — typed introspection of registered strategies and protocols for menu-driven UIs.
+
+### Added — Engine reproducibility plumbing
+
+- **`blue_tap.modules.fuzzing._random`** module — canonical random-source mechanism for the fuzzing tree. Holds the active source in a `contextvars.ContextVar` so concurrent campaigns in different threads / async contexts don't cross-contaminate.
+    - `random_bytes(n)` — replaces every `os.urandom(n)` call site in `mutators.py`, `engine.py`, `protocols/{att,bnep,lmp,smp}.py`, and `strategies/{coverage_guided,random_walk,state_machine,targeted}.py`. Validates `n ≥ 0` at the boundary.
+    - `set_random_source(callable)` context manager — installs a pluggable `Callable[[int], bytes]` for the lifetime of the with-block. Restores on exit (including exception paths). Validates that the source is callable.
+    - `derive_random_source_from_seed(seed)` — canonical seed → byte-source mapping shared by both `run_campaign(seed=…)` and the `fuzz campaign --seed` CLI flag, so the two entry points are guaranteed to produce identical streams for the same seed.
+- **Byte-level reproducibility contract.** `seed=N` (or `BLUE_TAP_FUZZ_SEED=N`) seeds the global `random` module *and* installs a `random.Random(N).randbytes`-backed source through the ContextVar. Every strategy / mutator / protocol builder reads bytes through that single source — two runs with the same seed produce byte-identical fuzz payloads, not just statistically similar ones. Wall-clock fields (`runtime_seconds`, `packets_per_second`) are explicitly *not* part of the contract.
+- **`l2cap_raw.py` two-layer split.** `_STRUCTURAL_L2CAP_RAW_FUZZ_TESTS` is a module-level constant (built once at import); `_random_l2cap_raw_fuzz_tests()` is a function that re-evaluates the random-data entries against the *currently active* random source. `generate_all_l2cap_sig_fuzz_cases()` takes one coherent snapshot of the test list and threads it through a new `_frames_matching_in(tests, prefixes)` helper, so the dedup pass keeps exactly one `echo_oversized` variant per call instead of multiple independently-randomised variants.
+
+### Added — `fuzz campaign` flags
+
+- **`--dry-run`** — runs the full mutation / strategy / state-tracker pipeline against `MockTransport`. Bypasses the pre-loop `l2ping` reachability check, skips crash-recovery liveness probes, pins response latency to `0.0` (so the response analyzer's clustering is also deterministic), and accepts a placeholder target if none is supplied. Intended for CI smoke tests and reproducibility sweeps. Disables `--capture` automatically and is rejected in combination with `--resume`.
+- **`--seed N`** — integer seed for byte-level reproducible mutations. Falls back to `BLUE_TAP_FUZZ_SEED` if unset. Rejected in combination with `--resume` (seed isn't part of the persisted campaign state, and silently ignoring it would mislead the operator). Hex (`0x2a`), octal (`0o52`), and decimal literals are all accepted.
+- **`--trajectory-interval SECONDS`** — samples `(elapsed_seconds, iterations, packets_sent, crashes, errors, states, transitions)` at most once per `N` seconds inside the main loop; results land in `CampaignResult.trajectory`. Required for non-empty `to_csv` output.
+
+### Added — `fuzz benchmark` subcommand
+
+- **`blue-tap fuzz benchmark TARGET [-p PROTO]... [-s STRATEGY] -t TRIALS (-d DURATION | -n ITERATIONS) [--base-seed N] [--label TEXT] [-o BENCH.json] [--csv-dir DIR] [--cooldown N] [--dry-run] [--trajectory-interval SECONDS]`** — runs N independent trials of the same configuration and aggregates per-metric stats. Prints a Rich summary table (`crashes`, `crashes_per_kpkt`, `iterations`, `packets_sent`, `runtime_seconds`, `states_discovered`; one row each as `n / mean / stdev / min / max`), atomically writes the round-trippable `BenchmarkResult` JSON when `-o` is given, and writes per-trial `trial_{i}.csv` trajectory files into `--csv-dir` (paired with `--trajectory-interval` to make the rows non-empty). Aborted / errored trials still appear in the aggregate but are also surfaced as a separate operator warning. Logs to the active session under `category="fuzz"`.
+
+### Added — Environment variables
+
+- **`BLUE_TAP_FUZZ_SEED`** — default seed for `run_campaign`, `fuzz campaign --seed`, and `fuzz benchmark --base-seed` when no explicit value is passed. Accepts decimal, `0x`-hex, or `0o`-octal. Validated at the boundary in both Python (`ValueError`) and the CLI (`click.BadParameter`). For `benchmark`, the env var resolves to `base_seed` so successive trials still get distinct seeds (`base, base+1, base+2, …`) instead of the same seed being applied identically to every trial.
+- **`BLUE_TAP_SKIP_ROOT_CHECK=1`** — bypasses the root and RTL8761B chipset gates in the CLI. Intended for test runners and CI smoke tests under `--dry-run`. Picked up by both `_check_privileges()` and `_check_rtl_dongle()` in `interfaces/cli/main.py` and pre-set in `tests/conftest.py` so the pytest suite can run without `sudo`.
+
+### Fixed — CLI
+
+- **`TargetSubcommandGroup` no longer mis-parses target + subcommand combinations.** `blue-tap recon AA:BB:CC:DD:EE:FF sdp --help` previously produced `No such command ''.` because the empty-`TARGET` placeholder was injected even after a real positional target had been seen, pushing the subcommand into the wrong slot. The peeker now tracks `seen_positional` and only injects the placeholder when the subcommand name is the *first* positional. Value-flag detection runs before the positional check so `--protocol sdp recon` no longer treats `sdp` as a positional. Verified: `recon` / `exploit` / `extract` sub-help dispatches now exit 0 with the correct help text.
+- **`run-playbook` exit code on partial failure.** A 1-of-1 failed playbook used to print `✖ Failed: 1` and exit 0 because the `log_command` call swallowed the failure. The runner now raises `SystemExit(1)` after logging when any step fails, so CI can rely on the exit code.
+
+### Changed — CLI defaults
+
+- **`fuzz campaign` and `fuzz benchmark` share the same default protocol set.** Both default to `-p all` (all 16 registered protocols). Earlier benchmark drafts defaulted to `-p sdp` for variance-on-one-surface use cases — that choice is left to the operator (`-p sdp -p rfcomm`) rather than baked into the CLI default, matching the existing `fuzz campaign` behaviour.
+
+### Tests
+
+- **`tests/test_fuzzing_research_api.py`** (new) — 52 tests covering the research API surface: `CampaignResult` / `CampaignDelta` / `BenchmarkResult` / `BenchmarkComparison` shape and round-trip; `MockTransport` validation; `dry_run` end-to-end via `run_campaign` and `benchmark`; engine-error → `CampaignResult.error` propagation; `set_random_source` restore-on-exception; `random_bytes` non-negative-length validation; byte-level reproducibility (same seed → same protocol breakdown across runs, different seeds → different breakdowns); `BLUE_TAP_FUZZ_SEED` env-var resolution including precedence over and conflict with explicit seed kwargs; `derive_random_source_from_seed` determinism; `to_csv` empty/full trajectory, fixed column order, atomic write (no temp leftovers), missing-parent-dir error.
+- **`tests/test_fuzz_cli_v2_6_4.py`** (new) — CLI integration tests for the new flags: `--dry-run` + `--seed` reproducibility through the real Click command, `--resume` × `--dry-run` rejection, `--resume` × `--seed` rejection, `--dry-run` automatically disabling `--capture`, env-var seed (`0xdeadbeef`) flowing through to `Seed locked: ...`, env-var validation rejecting non-integer values, full `fuzz benchmark` round-trip (JSON + per-trial CSVs + summary table), `--csv-dir` warning when `--trajectory-interval` is missing, mutually-exclusive `--duration` / `--iterations` validation, env-base-seed driving aggregate-stat reproducibility across two benchmark runs, `--label` flowing through to `BenchmarkResult.label`.
+- **Test counts:** 442 → 456 passing, 1 skipped, 0 failing. Lint (`ruff`) clean.
+
+---
+
 ## [2.6.3] - 2026-04-25
 
 ### Summary
@@ -814,6 +874,7 @@ This release extends Blue-Tap below the HCI boundary with a custom firmware plat
 - 4 fuzzing strategies, crash database, minimization
 - Session management, HTML/JSON reports, auto pentest, playbooks
 
+[2.6.4]: https://github.com/Indspl0it/blue-tap/compare/v2.6.3...v2.6.4
 [2.6.3]: https://github.com/Indspl0it/blue-tap/compare/v2.6.2...v2.6.3
 [2.6.2]: https://github.com/Indspl0it/blue-tap/compare/v2.6.1...v2.6.2
 [2.6.1]: https://github.com/Indspl0it/blue-tap/compare/v2.6.0...v2.6.1

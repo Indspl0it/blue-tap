@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "blue-tap"
-version = "2.6.3"
+version = "2.6.4"
 description = "Bluetooth/BLE Penetration Testing Toolkit for Automotive IVI Systems"
 readme = "README.md"
 license = "GPL-3.0-or-later"
