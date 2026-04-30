@@ -12,7 +12,7 @@ Kali ships with all required Bluetooth tools pre-installed. This is the path of 
 
 ```bash
 # Install Blue-Tap
-pip install -e .
+pip install blue-tap
 
 # Install optional spoofing tools (not in base Kali)
 sudo apt install bdaddr spooftooph
@@ -53,7 +53,7 @@ sudo blue-tap doctor
 set -e
 
 echo "[1/4] Installing Blue-Tap..."
-pip install -e .
+pip install blue-tap
 
 echo "[2/4] Installing optional tools..."
 sudo apt install -y bdaddr spooftooph
@@ -160,7 +160,7 @@ sudo apt update
 sudo apt install -y bluez bluez-tools spooftooph pulseaudio-utils
 
 echo "[2/6] Installing Blue-Tap..."
-pip install -e .
+pip install blue-tap
 
 echo "[3/6] Enabling Bluetooth service..."
 sudo systemctl enable --now bluetooth
@@ -202,7 +202,7 @@ Installation is the same as Ubuntu/Debian (Raspberry Pi OS is Debian-based):
 ```bash
 # Same as Ubuntu/Debian setup
 sudo apt install bluez bluez-tools spooftooph pulseaudio-utils
-pip install -e .
+pip install blue-tap
 ```
 
 ### Verification
@@ -234,7 +234,7 @@ sudo apt update
 sudo apt install -y bluez bluez-tools spooftooph pulseaudio-utils
 
 echo "[2/6] Installing Blue-Tap..."
-pip install -e .
+pip install blue-tap
 
 echo "[3/6] Enabling Bluetooth service..."
 sudo systemctl enable --now bluetooth
