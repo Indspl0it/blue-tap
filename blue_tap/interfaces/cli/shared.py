@@ -224,21 +224,35 @@ class TargetSubcommandGroup(LoggedGroup):
 
         new_args: list[str] = []
         injected = False
+        seen_positional = False
         skip_next = False
         for token in args:
             if skip_next:
                 new_args.append(token)
                 skip_next = False
                 continue
-            if not injected and not token.startswith("-") and token in self.commands:
-                new_args.append("")
-                new_args.append(token)
-                injected = True
-                continue
             if token in value_flags:
                 new_args.append(token)
                 skip_next = True
                 continue
+            # Only inject the empty TARGET placeholder when we encounter a
+            # subcommand name as the first positional. If a real TARGET
+            # already appeared, Click has already consumed it — injecting
+            # would shift the subcommand name into ARGS and Click would
+            # report "No such command ''.".
+            if (
+                not injected
+                and not seen_positional
+                and not token.startswith("-")
+                and token in self.commands
+            ):
+                new_args.append("")
+                new_args.append(token)
+                injected = True
+                seen_positional = True
+                continue
+            if not token.startswith("-"):
+                seen_positional = True
             new_args.append(token)
         return super().parse_args(ctx, new_args)
 
