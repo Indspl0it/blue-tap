@@ -55,8 +55,6 @@ Blue-Tap is a Bluetooth Classic and BLE security assessment framework designed t
 - An **RTL8761B-based USB dongle** (e.g., TP-Link UB500) — Blue-Tap currently gates all live operations behind RTL8761B detection. Stock firmware is fine; DarkFirmware unlocks below-HCI features.
 - Root privileges for Bluetooth operations
 
-Inspection commands that work without root **and** without an adapter: `--help`, `--version`, `doctor`, `demo`, `session list/show`, `report` (including `report <dir>`), `fuzz crashes list/show/export`, `fuzz corpus list/minimize`, `fuzz minimize`, `fuzz campaign --dry-run`, `fuzz benchmark --dry-run`, `run-playbook --list`, `search`, `info`, `show-options`, `plugins`. Anything that touches the Bluetooth stack — `discover`, `recon`, `vulnscan`, `exploit`, `dos`, `extract`, `fuzz campaign` (without `--dry-run`), `auto`, `fleet`, `adapter`, `spoof`, `run-playbook` (without `--list`) — needs `sudo` and an RTL8761B dongle.
-
 ### Via PyPI
 
 ```bash
