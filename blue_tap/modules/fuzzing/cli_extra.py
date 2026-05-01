@@ -38,6 +38,17 @@ from blue_tap.framework.runtime.cli_events import emit_cli_event
 from blue_tap.framework.envelopes.fuzz import make_fuzz_run_id
 
 
+def _fuzz_dry_run_skip(operation: str, **details) -> bool:
+    """Return True and print plan when dry-run active; for engine-bypass commands."""
+    from blue_tap.interfaces.cli._module_runner import _is_dry_run
+    if not _is_dry_run():
+        return False
+    bits = [f"{k}={v}" for k, v in details.items() if v is not None and v != ""]
+    suffix = f" ({', '.join(bits)})" if bits else ""
+    info(f"[bt.yellow]Dry-run:[/bt.yellow] would {operation}{suffix}")
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Protocol choices for corpus commands
 # ---------------------------------------------------------------------------
@@ -83,18 +94,20 @@ def _run_via_engine(
     timeout: float = 5.0,
     transport_override: dict | None = None,
 ) -> dict:
-    """Run fuzz cases through the campaign engine for standardized envelopes.
-
-    Only protocols present in engine.PROTOCOL_TRANSPORT_MAP are supported.
-    Callers should verify compatibility before using this helper.
-    """
+    """Run fuzz cases through the campaign engine; honors root ``--dry-run`` via MockTransport."""
+    from blue_tap.interfaces.cli._module_runner import _is_dry_run
     from blue_tap.modules.fuzzing.engine import FuzzCampaign
     from blue_tap.modules.fuzzing.cli_commands import ensure_corpus
+
+    dry_run = _is_dry_run()
 
     if not session_dir:
         session = get_session()
         if session:
             session_dir = session.dir
+        elif dry_run:
+            session_dir = "/tmp/blue-tap-dry-run"
+            os.makedirs(session_dir, exist_ok=True)
         else:
             session_dir = os.path.join("sessions", "fuzz_adhoc")
 
@@ -106,6 +119,7 @@ def _run_via_engine(
         protocols=[protocol],
         session_dir=session_dir,
         transport_overrides={protocol: dict(transport_override or {})} if transport_override else None,
+        dry_run=dry_run,
     )
     envelope = campaign.run_single_protocol(protocol, cases, delay=delay, recv_timeout=timeout)
 
@@ -1088,6 +1102,11 @@ def register_extra_commands(fuzz_group):
         """
         from blue_tap.modules.fuzzing.strategies.targeted import TargetedStrategy
 
+        if not list_cves and _fuzz_dry_run_skip(
+            "run CVE reproduction patterns", target=address or "(prompt)", cve_id=cve_id or "all",
+        ):
+            return
+
         strategy = TargetedStrategy()
 
         # --list: show table of supported CVEs
@@ -1214,6 +1233,13 @@ def register_extra_commands(fuzz_group):
           blue-tap fuzz replay capture.btsnoop -t AA:BB:CC:DD:EE:FF --mutate
         """
         from blue_tap.modules.fuzzing.pcap_replay import CaptureReplayer
+
+        # ``--list`` is a pure read-only inspection — let it run in dry-run too.
+        if not list_frames and _fuzz_dry_run_skip(
+            f"replay frames from {capture_file}",
+            target=target, protocol=protocol, mutate=mutate,
+        ):
+            return
 
         target = resolve_address(target)
         if not target:
@@ -1418,6 +1444,11 @@ def register_extra_commands(fuzz_group):
           blue-tap fuzz minimize 1 --timeout 10 --cooldown 8
           blue-tap fuzz minimize 5 -s my_session
         """
+        if _fuzz_dry_run_skip(
+            f"minimize crash {crash_id}", strategy=strategy, session=session,
+        ):
+            return
+
         from blue_tap.modules.fuzzing.crash_db import CrashDB
         from blue_tap.modules.fuzzing.minimizer import CrashMinimizer
         from blue_tap.modules.fuzzing.transport import L2CAPTransport, RFCOMMTransport
@@ -1726,6 +1757,8 @@ def register_extra_commands(fuzz_group):
           generate   Generate seed corpus from protocol builders
           list       Show corpus stats per protocol
           minimize   Deduplicate corpus entries
+          export     Bundle the corpus into a portable tarball
+          import     Merge seeds from a tarball into the corpus
         """
 
     # -------------------------------------------------------------------
@@ -1750,6 +1783,8 @@ def register_extra_commands(fuzz_group):
           blue-tap fuzz corpus generate -p sdp
           blue-tap fuzz corpus generate -o ./my_corpus
         """
+        if _fuzz_dry_run_skip("regenerate seed corpus", protocol=protocol, output=output):
+            return
         from blue_tap.modules.fuzzing.corpus import Corpus, generate_full_corpus
 
         # Determine output directory
@@ -1964,6 +1999,8 @@ def register_extra_commands(fuzz_group):
           blue-tap fuzz corpus minimize
           blue-tap fuzz corpus minimize -s my_session
         """
+        if _fuzz_dry_run_skip("minimize corpus (dedupe by SHA-256)", session=session):
+            return
         from blue_tap.modules.fuzzing.corpus import Corpus
 
         # Find corpus directory
@@ -2079,6 +2116,227 @@ def register_extra_commands(fuzz_group):
             },
         )
         log_command("fuzz_corpus_minimize", envelope, category="fuzz")
+
+    # -------------------------------------------------------------------
+    # blue-tap fuzz corpus export
+    # -------------------------------------------------------------------
+    @fuzz_corpus.command("export")
+    @click.option(
+        "--protocol", "-p", default=None,
+        help="Export only this protocol (default: all protocols).",
+    )
+    @click.option(
+        "--output", "-o", default=None,
+        help="Output tarball path (default: <session>/fuzz/corpus-<ts>.tar.gz).",
+    )
+    @click.option(
+        "--session", "-s", "session_name", default=None,
+        help="Session whose corpus to export (default: current or fuzz_adhoc).",
+    )
+    def corpus_export(protocol, output, session_name):
+        """Bundle the corpus into a portable gzipped tarball.
+
+        The output preserves the on-disk layout (protocol directories with
+        ``*.bin`` seeds and an optional ``interesting/`` subdirectory), so
+        another operator can import it on a different machine via
+        ``blue-tap fuzz corpus import``.
+
+        \b
+        Examples:
+          blue-tap fuzz corpus export -o /tmp/seeds.tar.gz
+          blue-tap fuzz corpus export -p sdp -o sdp-seeds.tar.gz
+          blue-tap fuzz corpus export -s old_session -o backup.tar.gz
+        """
+        from datetime import datetime
+        from blue_tap.modules.fuzzing.corpus import Corpus
+        from blue_tap.framework.sessions.store import (
+            Session,
+            resolve_sessions_base_dir,
+        )
+
+        # Resolve corpus directory. Honour BT_TAP_SESSIONS_DIR by going through
+        # ``Session(name).dir`` rather than building a relative path.
+        if session_name:
+            corpus_dir = os.path.join(
+                resolve_sessions_base_dir(),
+                Session.SESSIONS_DIR,
+                session_name,
+                "fuzz",
+                "corpus",
+            )
+        else:
+            active = get_session()
+            corpus_dir = (
+                os.path.join(active.dir, "fuzz", "corpus")
+                if active
+                else os.path.join(
+                    resolve_sessions_base_dir(),
+                    Session.SESSIONS_DIR,
+                    "fuzz_adhoc",
+                    "corpus",
+                )
+            )
+
+        if not Path(corpus_dir).is_dir():
+            error(f"No corpus found at {corpus_dir}")
+            raise SystemExit(1)
+
+        # Resolve output path.
+        if not output:
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            output = os.path.join(
+                os.path.dirname(corpus_dir) or ".",
+                f"corpus-{ts}.tar.gz",
+            )
+
+        corpus = Corpus(corpus_dir)
+        corpus.load_from_directory(corpus_dir)
+
+        try:
+            result = corpus.export_to_tarball(output, protocol=protocol)
+        except (FileNotFoundError, ValueError) as exc:
+            error(str(exc))
+            raise SystemExit(1)
+
+        success(
+            f"Exported {result['seeds_exported']} seeds across "
+            f"{len(result['protocols'])} protocol(s) to {result['output_path']}"
+        )
+        summary_panel("Corpus Export", {
+            "Source": corpus_dir,
+            "Output": result["output_path"],
+            "Size": _format_bytes(result["size_bytes"]),
+            "Seeds": str(result["seeds_exported"]),
+            "Protocols": ", ".join(result["protocols"]) or "(none)",
+        })
+
+        from blue_tap.framework.envelopes.fuzz import build_fuzz_operation_result
+
+        envelope = build_fuzz_operation_result(
+            module_id="fuzzing.engine",
+            target="",
+            adapter=_current_adapter(),
+            operation="fuzz_corpus_export",
+            title="Fuzz Corpus Export",
+            summary_data={
+                "operation": "fuzz_corpus_export",
+                "protocol": protocol or "all",
+                "sent": 0,
+                "crashes": 0,
+                "errors": 0,
+            },
+            observations=[
+                f"output={result['output_path']}",
+                f"size={result['size_bytes']}",
+                f"seeds={result['seeds_exported']}",
+                f"protocols={','.join(result['protocols'])}",
+            ],
+            module_data=result,
+        )
+        log_command("fuzz_corpus_export", envelope, category="fuzz")
+
+    # -------------------------------------------------------------------
+    # blue-tap fuzz corpus import
+    # -------------------------------------------------------------------
+    @fuzz_corpus.command("import")
+    @click.argument("tarball", type=click.Path(exists=True, dir_okay=False))
+    @click.option(
+        "--session", "-s", "session_name", default=None,
+        help="Session whose corpus to merge into (default: current or fuzz_adhoc).",
+    )
+    def corpus_import(tarball, session_name):
+        """Merge seeds from a tarball into the active corpus.
+
+        New seeds are deduped by SHA-256 hash; re-importing the same tarball
+        is idempotent. Existing seeds are never removed — only added to.
+        Interesting inputs (under ``<protocol>/interesting/``) are preserved
+        with their original ``reason_<hash>.bin`` filenames.
+
+        \b
+        Examples:
+          blue-tap fuzz corpus import /tmp/seeds.tar.gz
+          blue-tap fuzz corpus import shared-corpus.tar.gz -s engagement_42
+        """
+        if _fuzz_dry_run_skip("import corpus tarball", tarball=tarball, session=session_name):
+            return
+        from blue_tap.modules.fuzzing.corpus import Corpus
+        from blue_tap.framework.sessions.store import (
+            Session,
+            resolve_sessions_base_dir,
+        )
+
+        # Resolve target corpus directory (where seeds will be added).
+        if session_name:
+            corpus_dir = os.path.join(
+                resolve_sessions_base_dir(),
+                Session.SESSIONS_DIR,
+                session_name,
+                "fuzz",
+                "corpus",
+            )
+        else:
+            active = get_session()
+            corpus_dir = (
+                os.path.join(active.dir, "fuzz", "corpus")
+                if active
+                else os.path.join(
+                    resolve_sessions_base_dir(),
+                    Session.SESSIONS_DIR,
+                    "fuzz_adhoc",
+                    "corpus",
+                )
+            )
+
+        Path(corpus_dir).mkdir(parents=True, exist_ok=True)
+        corpus = Corpus(corpus_dir)
+
+        try:
+            result = corpus.import_from_tarball(tarball)
+        except (FileNotFoundError, ValueError) as exc:
+            error(str(exc))
+            raise SystemExit(1)
+        except Exception as exc:  # tarfile.ReadError and friends
+            error(f"Failed to read tarball: {exc}")
+            raise SystemExit(1)
+
+        success(
+            f"Imported {result['seeds_imported']} new seeds "
+            f"({result['duplicates_skipped']} duplicates skipped, "
+            f"{result['interesting_imported']} interesting inputs preserved)"
+        )
+        summary_panel("Corpus Import", {
+            "Source": tarball,
+            "Destination": corpus_dir,
+            "New seeds": str(result["seeds_imported"]),
+            "Duplicates skipped": str(result["duplicates_skipped"]),
+            "Interesting": str(result["interesting_imported"]),
+            "Protocols": ", ".join(result["protocols"]) or "(none)",
+        })
+
+        from blue_tap.framework.envelopes.fuzz import build_fuzz_operation_result
+
+        envelope = build_fuzz_operation_result(
+            module_id="fuzzing.engine",
+            target="",
+            adapter=_current_adapter(),
+            operation="fuzz_corpus_import",
+            title="Fuzz Corpus Import",
+            summary_data={
+                "operation": "fuzz_corpus_import",
+                "protocol": "multi",
+                "sent": 0,
+                "crashes": 0,
+                "errors": 0,
+            },
+            observations=[
+                f"tarball={tarball}",
+                f"imported={result['seeds_imported']}",
+                f"skipped={result['duplicates_skipped']}",
+                f"protocols={','.join(result['protocols'])}",
+            ],
+            module_data=dict(result, tarball=tarball, corpus_dir=corpus_dir),
+        )
+        log_command("fuzz_corpus_import", envelope, category="fuzz")
 
 
 # ---------------------------------------------------------------------------

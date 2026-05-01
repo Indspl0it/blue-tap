@@ -705,13 +705,23 @@ def _campaign_command(fuzz_group):
           blue-tap fuzz campaign --strategy targeted --capture
           blue-tap fuzz campaign --resume
         """
+        # Honor root --dry-run flag and $BLUE_TAP_DRY_RUN env var in addition
+        # to the local --dry-run option.
+        from blue_tap.interfaces.cli._module_runner import _is_dry_run
+        dry_run = bool(dry_run) or _is_dry_run()
 
         # ── Session directory ─────────────────────────────────────────
         sess = get_session()
         if sess is None:
-            error("No active session. Run with -s <name> or let auto-session create one.")
-            return
-        session_dir = sess.dir
+            if dry_run:
+                # Dry-run shouldn't depend on a session; engine writes nothing.
+                session_dir = "/tmp/blue-tap-dry-run"
+                os.makedirs(session_dir, exist_ok=True)
+            else:
+                error("No active session. Run with -s <name> or let auto-session create one.")
+                return
+        else:
+            session_dir = sess.dir
         fuzz_dir = os.path.join(session_dir, "fuzz")
         os.makedirs(fuzz_dir, exist_ok=True)
 
@@ -1376,6 +1386,12 @@ def _crash_commands(fuzz_group):
           blue-tap fuzz crashes replay 1
           blue-tap fuzz crashes replay 3 --no-capture
         """
+        from blue_tap.interfaces.cli._module_runner import _is_dry_run
+        if _is_dry_run():
+            info(f"[bt.yellow]Dry-run:[/bt.yellow] would replay crash {crash_id}"
+                 f" (session={session_name or 'current'}, capture={capture})")
+            return
+
         run_id = make_fuzz_run_id()
         session_dir = _resolve_session_dir(session_name)
         if not session_dir:
@@ -1783,7 +1799,10 @@ def _benchmark_command(fuzz_group) -> None:
           blue-tap fuzz benchmark --dry-run -t 3 -n 50 \\
               --base-seed 42 -o bench.json --csv-dir ./traj/
         """
+        from blue_tap.interfaces.cli._module_runner import _is_dry_run
         from blue_tap.modules.fuzzing.research import benchmark as run_benchmark
+        # Honor root --dry-run flag in addition to local --dry-run option.
+        dry_run = bool(dry_run) or _is_dry_run()
 
         # ── Session dir ──────────────────────────────────────────────
         sess = get_session()

@@ -205,6 +205,13 @@ _DURATION_MULTIPLIERS: dict[str, float] = {
     "d": 86400.0,
 }
 
+DRY_RUN_MAX_DURATION_SECONDS = float(
+    os.environ.get("BT_TAP_DRY_RUN_MAX_DURATION_SECONDS", "5.0")
+)
+DRY_RUN_MAX_ITERATIONS = int(
+    os.environ.get("BT_TAP_DRY_RUN_MAX_ITERATIONS", "100")
+)
+
 
 def parse_duration(s: str) -> float:
     """Parse a human-readable duration string into seconds.
@@ -410,6 +417,11 @@ class FuzzCampaign:
         self._random_bytes: Callable[[int], bytes] = random_source or os.urandom
 
         self.dry_run = bool(dry_run)
+        if self.dry_run:
+            if self.duration is None or self.duration > DRY_RUN_MAX_DURATION_SECONDS:
+                self.duration = DRY_RUN_MAX_DURATION_SECONDS
+            if self.max_iterations is None or self.max_iterations > DRY_RUN_MAX_ITERATIONS:
+                self.max_iterations = DRY_RUN_MAX_ITERATIONS
         # Trajectory: when interval > 0, snapshot stats at most once per
         # interval inside the main loop. ``None`` / non-positive disables
         # recording entirely (no overhead).

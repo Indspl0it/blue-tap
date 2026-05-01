@@ -59,6 +59,9 @@ class FuzzCampaignModule(Module):
     schema_prefix = "blue_tap.fuzz.result"
     has_report_adapter = True
     references = ()
+    # Rich dry-run via MockTransport — opt out of the framework short-circuit
+    # so the engine's deterministic seed-replay path still runs.
+    supports_dry_run = True
     options = (
         OptAddress("RHOST", required=True, description="Target Bluetooth address"),
         OptString("PROTOCOLS", default="l2cap", description=f"Comma-separated protocols to fuzz ({', '.join(PROTOCOLS)})"),
@@ -130,6 +133,7 @@ class FuzzCampaignModule(Module):
                 cooldown=cooldown,
                 run_id=ctx.run_id,
                 transport_overrides=transport_overrides,
+                dry_run=ctx.dry_run,
             )
 
         interrupted = False
