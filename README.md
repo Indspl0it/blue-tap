@@ -9,7 +9,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/python-3.10%2B-blue" alt="Python 3.10+"/>
   <img src="https://img.shields.io/badge/license-GPL--3.0-green" alt="License GPL-3.0"/>
-  <img src="https://img.shields.io/badge/version-2.6.4-orange" alt="Version 2.6.4"/>
+  <img src="https://img.shields.io/badge/version-2.6.5-orange" alt="Version 2.6.5"/>
   <img src="https://img.shields.io/badge/modules-101-cyan" alt="101 Modules"/>
   <img src="https://img.shields.io/badge/CVEs-37-red" alt="37 CVEs"/>
   <img src="https://img.shields.io/badge/platform-Linux%20(Kali)-557C94" alt="Linux"/>
@@ -72,7 +72,7 @@ pip install -e .
 ### Verify Installation
 
 ```bash
-blue-tap --version          # prints 'blue-tap, version 2.6.4'
+blue-tap --version          # print Blue-Tap version
 blue-tap doctor             # check prerequisites — no root, no hardware needed
 blue-tap session list       # list past sessions — no root, no hardware needed
 blue-tap demo               # full pipeline against simulated data — no hardware needed
@@ -112,6 +112,8 @@ sudo blue-tap extract 4C:4F:EE:17:3A:89 contacts --all
 blue-tap report --format html --output report.html
 ```
 
+Prefix any command with `--dry-run` (or set `BLUE_TAP_DRY_RUN=1`) to print the resolved plan without touching hardware or sending packets — useful for previewing destructive operations and for CI pipelines.
+
 ### Automation
 
 ```bash
@@ -131,11 +133,11 @@ sudo blue-tap run-playbook --playbook ivi-attack 4C:4F:EE:17:3A:89
 # Multi-protocol fuzzing campaign (needs hardware)
 sudo blue-tap fuzz campaign 4C:4F:EE:17:3A:89 -p sdp -p rfcomm --duration 2h
 
-# Reproducible CI smoke (v2.6.4+ — no hardware, no root)
+# Reproducible CI smoke (no hardware, no root)
 BLUE_TAP_FUZZ_SEED=42 blue-tap fuzz campaign --dry-run --strategy random \
     -p sdp -n 200 --cooldown 0
 
-# Variance benchmarks for research (v2.6.4+)
+# Variance benchmarks for research
 blue-tap fuzz benchmark --dry-run --strategy random -p sdp -t 5 -n 500 \
     --base-seed 42 --trajectory-interval 0.5 \
     -o bench.json --csv-dir traj/

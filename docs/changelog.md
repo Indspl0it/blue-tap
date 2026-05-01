@@ -5,6 +5,69 @@ All notable changes to Blue-Tap are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.5] - 2026-05-01
+
+### Summary
+
+Blue-Tap 2.6.5 brings a global, modular **dry-run** capability across every command. A single root-level `--dry-run` flag (or `$BLUE_TAP_DRY_RUN=1`) makes any command print the resolved plan and exit without touching hardware or sending packets — destructive modules are previewed without their CONFIRM=yes gate and session writes are skipped. Future modules inherit this for free: the framework `Invoker` short-circuits any module that doesn't opt into a richer dry-run path. The fuzzer's existing seed-replay dry-run is preserved (it remains the canonical opt-in via `supports_dry_run = True`). The release also ships a TOML-based user config loader, a static dependency graph for registered modules, three new bundled playbooks, a third-party plugin template, OBEX-style import/export for the on-disk fuzz corpus, and copy-paste remediation hints in `blue-tap doctor`.
+
+### Added — Global dry-run
+
+- **Root `--dry-run` flag** on `blue-tap`. Honored by every workflow command (`discover`, `recon`, `vulnscan`, `exploit`, `dos`, `extract`, `fuzz`, `auto`, `fleet`, `run-playbook`, `run`).
+- **`$BLUE_TAP_DRY_RUN=1`** environment-variable equivalent for CI usage and to scope dry-run across `run-playbook` step re-invocations.
+- **`RunContext.dry_run`** field threaded from `Invoker.invoke(..., dry_run=True)` into every module call. Single source of truth — modules read `ctx.dry_run`, never raw flags.
+- **`Module.supports_dry_run`** class attribute (default `False`). When `False`, `Invoker` short-circuits with a synthesized "planned" envelope (`module_outcome="not_applicable"`, `module_data["dry_run"]=True`) before instantiating the module — so every existing module inherits dry-run automatically. When a module sets it to `True`, the `Invoker` calls `run()` with `ctx.dry_run=True` and the module owns the dry-run path (e.g. `fuzzing.engine` uses MockTransport).
+- **Destructive-gate bypass in dry-run.** Destructive modules (KNOB, BIAS, BLUFFS, CTKD, all DoS checks, fuzzing) preview cleanly without `CONFIRM=yes` — the synthesized envelope still surfaces `destructive=true` so the operator sees the danger label.
+- **Session-write skipping.** `Invoker.invoke_with_logging(..., dry_run=True)` no longer persists the run envelope to the session log — a no-op preview is not worth saving.
+- **`dry_run_planned`** added to the canonical CLI event taxonomy.
+- **Hardware-direct command guards** for every command that bypasses `Invoker`: `adapter list/info/up/down/reset/set-name/set-class/firmware-install/firmware-init/firmware-spoof/firmware-set/firmware-status/firmware-dump/connection-inspect/connections`, `spoof`, `doctor`, `report`, `fuzz cve`, `fuzz replay`, `fuzz minimize`, `fuzz corpus generate/minimize/import`, and `fuzz crashes replay`. Each prints "would do X" and exits cleanly without opening raw HCI sockets, probing the environment, or writing seed files.
+- **Playbook executor propagation.** `run-playbook` scopes `BLUE_TAP_DRY_RUN=1` across each step's re-entered `make_context` call (try/finally so the prior value is always restored). Target/HCI resolution is short-circuited to a placeholder so dry-run never blocks on the interactive picker.
+- **Fuzz back-compat.** `fuzz campaign --dry-run` and `fuzz benchmark --dry-run` keep working with their existing semantics; both now also OR-honor the root flag and env var. Seed-replay byte-level reproducibility invariant preserved.
+- **Per-protocol fuzz dry-run.** `fuzz sdp-deep`, `l2cap-sig`, `rfcomm-raw`, `ble-att`, `ble-smp`, `bnep`, `obex`, and `at-deep` route through a single `_run_via_engine()` seam that swaps the real transport for `MockTransport` when dry-run is active — adding a new per-protocol subcommand inherits dry-run without further wiring.
+- **Dry-run wall-clock cap.** `fuzz campaign --duration 1h --dry-run` would otherwise loop `MockTransport` for the full hour. The engine now caps dry-run runs to **5 seconds** and **100 iterations** (whichever comes first). Both caps are env-overridable via `BT_TAP_DRY_RUN_MAX_DURATION_SECONDS` and `BT_TAP_DRY_RUN_MAX_ITERATIONS` for CI tuning.
+
+### Added — User config loader
+
+- **`~/.config/blue-tap/config.toml`** — operators no longer have to repeat `--hci hci0 -s mysession` on every invocation. Resolution order: `--config /path/to/file.toml` → `$BLUE_TAP_CONFIG` → `$XDG_CONFIG_HOME/blue-tap/config.toml` → `~/.config/blue-tap/config.toml`. CLI flags always override config values (Click's `default_map` precedence). No file present → behaviour identical to prior versions.
+- **Schema (minimal):** `[default]` section with `hci` and `session` keys. Unknown sections or keys raise `ConfigError` at load time with the offending path and key name in the message — no silent typos. Validation lives at the file boundary; the rest of the CLI consumes the parsed `BlueTapConfig` dataclass.
+
+### Added — Module dependency graph
+
+- **`blue_tap.framework.registry.dependency_graph`** — best-effort static graph of which other registered modules each module imports, computed lazily from the `entry_point`-referenced source file plus every `.py` in the same package. `blue-tap info <module>` is the first consumer and now lists `Depends on:` and `Used by:` per module.
+- **Detection limits surfaced in code, not hidden.** Only `from blue_tap.modules.<family>.<name>[.subpath]` imports count; string-based dispatch (`importlib.import_module`, entry points, `getattr`) is invisible. `try/except ImportError` and `if TYPE_CHECKING` imports still count as *potential* runtime dependencies. Self-imports inside the same package are excluded.
+
+### Added — Plugin template
+
+- **`examples/plugin-template/`** — minimal working example of a third-party Blue-Tap plugin. Copy the directory, rename the package, edit the module body, and `pip install .` to register an out-of-tree module. Demonstrates the `blue_tap.modules` entry-point group, the `Module` subclass shape, family/outcome wiring, and the `RunEnvelope` return contract. `pyproject.toml` pins `blue-tap >= 2.6.5` so plugin authors get a clear failure if they install against an older release.
+
+### Added — Bundled playbooks
+
+- **`ble-assessment.yaml`** — BLE-only sweep. Advertisement scan → GATT enumeration → BLE-specific CVE checks. ~5 minutes, low risk (active GATT probing only after a target is selected).
+- **`dos-campaign.yaml`** — Structured denial-of-service and resilience testing. Discovery → vulnscan → full DoS check series with per-check recovery wait. ~10 minutes, **high risk** (may render target unresponsive; requires `--yes`).
+- **`post-exploit-data.yaml`** — Post-pairing extraction. Re-enumerate SDP → pull contacts (PBAP) → pull messages (MAP) → pull files (OPP/OBEX) → AT-channel responses. ~15 minutes, medium risk (requires existing bond).
+
+### Added — Fuzz corpus archive support
+
+- **`Corpus.export_to_tarball(output_path, protocol=None)`** — bundles the on-disk corpus into a gzipped tarball whose layout mirrors `base_dir` exactly (top-level entries are protocol directories, each with `*.bin` seeds and an optional `interesting/` subdirectory). Raises `FileNotFoundError` if the corpus directory doesn't exist; `ValueError` if a non-existent protocol is requested. Returns `{output_path, size_bytes, seeds_exported, protocols}`.
+- **`Corpus.import_from_tarball(tarball_path)`** — counterpart importer. Rejects path-traversal entries (`..`, absolute paths) before extraction and uses `tarfile`'s `filter="data"` mode as defence-in-depth. Returns `{seeds_imported, protocols, size_bytes}`.
+- **`fuzz corpus export TARBALL [-p PROTOCOL]` and `fuzz corpus import TARBALL`** — CLI surfaces for the above. Both honour `--dry-run` (preview the operation without writing or extracting). Failed seed-generation passes now log via the standard `logging` channel instead of swallowing the exception silently.
+
+### Added — `blue-tap doctor` remediation hints
+
+- **`→ fix:` lines** under every missing tool, service, or capability limitation. The hint is a copy-paste shell command (`sudo apt install bluez bluez-tools`, `sudo systemctl enable --now bluetooth`, `systemctl --user enable --now pipewire pipewire-pulse`, etc.). Hint dictionaries (`TOOL_FIX_HINTS`, `SERVICE_FIX_HINTS`) live alongside the detector so adding a new check naturally pairs with adding its remediation.
+- **`limitation_hints` dict** added to `detect_profile_environment()` output (alongside the existing `tools`, `services`, `adapters`, `obex`, `summary` keys — backward compatible). Each capability limitation message maps to its remediation command (empty string when no automatic fix is meaningful).
+
+### Tests
+
+- **`tests/test_dry_run_rollout.py`** (17 tests) — framework hooks, `Invoker` short-circuit, destructive-gate bypass, `supports_dry_run` opt-in, env-var propagation, per-family smoke tests across discovery / reconnaissance / assessment / exploitation / fuzzing.
+- **`tests/test_config_loader.py`** — TOML loader: precedence chain, unknown-key rejection with path in error message, malformed TOML, missing file, env-var override.
+- **`tests/test_dependency_graph.py`** — graph builder: known-good imports counted, string-based dispatch ignored, self-imports excluded, lazy build, cache stability.
+- **`tests/test_fuzz_corpus_io.py`** — tarball round-trip: layout preservation, path-traversal rejection, single-protocol filter, missing-source error.
+- **`tests/test_doctor_fix_hints.py`** — every documented tool/service has a hint; hints are non-empty strings; `limitation_hints` dict shape.
+- **`tests/test_playbook_dispatch.py`** — three new bundled playbooks parse cleanly, list under `run-playbook --list`, and dispatch the expected step sequence.
+- **`tests/test_plugin_template_smoke.py`** — the bundled plugin template installs, registers its module, and produces a valid `RunEnvelope`.
+- **Test counts:** 456 → 581 passing, 0 failing. Lint (`ruff`) clean.
+
 ## [2.6.4] - 2026-04-30
 
 ### Summary
@@ -874,6 +937,7 @@ This release extends Blue-Tap below the HCI boundary with a custom firmware plat
 - 4 fuzzing strategies, crash database, minimization
 - Session management, HTML/JSON reports, auto pentest, playbooks
 
+[2.6.5]: https://github.com/Indspl0it/blue-tap/compare/v2.6.4...v2.6.5
 [2.6.4]: https://github.com/Indspl0it/blue-tap/compare/v2.6.3...v2.6.4
 [2.6.3]: https://github.com/Indspl0it/blue-tap/compare/v2.6.2...v2.6.3
 [2.6.2]: https://github.com/Indspl0it/blue-tap/compare/v2.6.1...v2.6.2

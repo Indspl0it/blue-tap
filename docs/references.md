@@ -14,7 +14,7 @@ If you use Blue-Tap in academic research, security assessments, or publications,
 @software{bluetap2026,
   author       = {Ballikonda, Santhosh},
   title        = {{Blue-Tap}: Bluetooth/BLE Penetration Testing Toolkit for Automotive IVI Systems},
-  version      = {2.6.4},
+  version      = {2.6.5},
   year         = {2026},
   publisher    = {Zenodo},
   doi          = {10.5281/zenodo.19897655},
@@ -25,11 +25,11 @@ If you use Blue-Tap in academic research, security assessments, or publications,
 
 ### Plain Text
 
-> Ballikonda, S. *Blue-Tap: Bluetooth/BLE Penetration Testing Toolkit for Automotive IVI Systems* (v2.6.4). Zenodo, 2026. DOI: [10.5281/zenodo.19897655](https://doi.org/10.5281/zenodo.19897655)
+> Ballikonda, S. *Blue-Tap: Bluetooth/BLE Penetration Testing Toolkit for Automotive IVI Systems* (v2.6.5). Zenodo, 2026. DOI: [10.5281/zenodo.19897655](https://doi.org/10.5281/zenodo.19897655)
 
 ### IEEE Style
 
-> S. Ballikonda, "Blue-Tap: Bluetooth/BLE Penetration Testing Toolkit for Automotive IVI Systems," version 2.6.4, Zenodo, 2026. DOI: 10.5281/zenodo.19897655. [Online]. Available: https://doi.org/10.5281/zenodo.19897655
+> S. Ballikonda, "Blue-Tap: Bluetooth/BLE Penetration Testing Toolkit for Automotive IVI Systems," version 2.6.5, Zenodo, 2026. DOI: 10.5281/zenodo.19897655. [Online]. Available: https://doi.org/10.5281/zenodo.19897655
 
 ---
 

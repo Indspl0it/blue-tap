@@ -164,8 +164,9 @@ The `-e` (editable) flag means changes to the source code take effect immediatel
 
 ```bash
 $ blue-tap --version
-blue-tap, version 2.6.4
 ```
+
+Prints the installed Blue-Tap version.
 
 If this command fails with `command not found`, ensure the pip install location is on your `$PATH`. On Kali, pip installs to `/usr/local/bin/` by default; on other distributions, it may install to `~/.local/bin/`.
 
