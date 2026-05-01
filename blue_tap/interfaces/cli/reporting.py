@@ -155,8 +155,15 @@ def report_cmd(dump_dir, fmt, output):
       blue-tap -s mytest report                    # named session
       blue-tap report ./hijack_output              # specific directory
     """
+    from blue_tap.interfaces.cli._module_runner import _is_dry_run
     from blue_tap.interfaces.reporting.generator import ReportGenerator
     from blue_tap.framework.sessions.store import get_session
+
+    if _is_dry_run():
+        info(f"[bt.yellow]Dry-run:[/bt.yellow] would generate {fmt} report"
+             f" from {dump_dir or 'active session'}"
+             f"{' → ' + output if output else ''}")
+        return
 
     report = ReportGenerator()
     session = get_session()
@@ -320,17 +327,23 @@ def run_playbook_cmd(commands, playbook, list_playbooks_flag):
 
     # Resolve TARGET / {target} / {hci} placeholders
     from blue_tap.hardware.adapter import resolve_active_hci
+    from blue_tap.interfaces.cli._module_runner import _is_dry_run
+    dry_run = _is_dry_run()
     target_addr = None
-    hci_adapter = resolve_active_hci()
+    hci_adapter = "hci0" if dry_run else resolve_active_hci()
     has_target_placeholder = any(
         "TARGET" in cmd.upper() or "{target}" in cmd for cmd in commands
     )
 
     if has_target_placeholder:
-        target_addr = resolve_address(None, prompt="Select target for workflow")
-        if not target_addr:
-            error("Target selection cancelled")
-            sys.exit(1)
+        if dry_run:
+            # Skip the interactive scan/picker — preview should never block on hardware.
+            target_addr = "AA:BB:CC:DD:EE:FF"
+        else:
+            target_addr = resolve_address(None, prompt="Select target for workflow")
+            if not target_addr:
+                error("Target selection cancelled")
+                sys.exit(1)
 
     from blue_tap.framework.runtime.cli_events import emit_cli_event
     from blue_tap.framework.contracts.result_schema import (
@@ -409,9 +422,21 @@ def run_playbook_cmd(commands, playbook, list_playbooks_flag):
                 continue
             # Import main lazily to avoid circular imports at module load time
             from blue_tap.interfaces.cli.main import cli as main_cli
-            ctx = main_cli.make_context("blue-tap", session_prefix + list(args), parent=click.get_current_context())
-            with ctx:
-                main_cli.invoke(ctx)
+            # Scope BLUE_TAP_DRY_RUN to this re-entered context — make_context
+            # re-runs the root callback which only sees CLI flags from ``args``,
+            # so without this env-var bridge the dry-run signal is lost.
+            _prev_env = os.environ.get("BLUE_TAP_DRY_RUN")
+            if dry_run:
+                os.environ["BLUE_TAP_DRY_RUN"] = "1"
+            try:
+                ctx = main_cli.make_context("blue-tap", session_prefix + list(args), parent=click.get_current_context())
+                with ctx:
+                    main_cli.invoke(ctx)
+            finally:
+                if _prev_env is None:
+                    os.environ.pop("BLUE_TAP_DRY_RUN", None)
+                else:
+                    os.environ["BLUE_TAP_DRY_RUN"] = _prev_env
             step_completed_at = now_iso()
             emit_cli_event(
                 event_type="execution_result",

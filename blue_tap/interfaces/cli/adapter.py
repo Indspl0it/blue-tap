@@ -12,6 +12,17 @@ from blue_tap.utils.output import (
 )
 
 
+def _dry_run_guard(operation: str, hci: str | None = None, **details) -> bool:
+    """Return True and print plan when dry-run active; caller should ``return``."""
+    from blue_tap.interfaces.cli._module_runner import _is_dry_run
+    if not _is_dry_run():
+        return False
+    bits = [f"{k}={v}" for k, v in details.items() if v is not None]
+    suffix = f" ({', '.join(bits)})" if bits else ""
+    info(f"[bt.yellow]Dry-run:[/bt.yellow] would {operation} on hci={hci or '(active)'}{suffix}")
+    return True
+
+
 def _resolve_df_hci(hci: str | None) -> str | None:
     """Resolve the DarkFirmware HCI device.
 
@@ -41,6 +52,8 @@ def adapter():
 @adapter.command("list")
 def adapter_list():
     """List available Bluetooth adapters with chipset and capability info."""
+    if _dry_run_guard("list adapters (probes raw HCI sockets)"):
+        return
     from blue_tap.hardware.adapter import list_adapters, recommend_adapter_roles
 
     adapters = list_adapters()
@@ -79,6 +92,8 @@ def adapter_list():
 @click.option("--hci", default=None, help="HCI device (auto-detected when omitted)")
 def adapter_info(hci):
     """Show detailed adapter info: chipset, features, capabilities."""
+    if _dry_run_guard("show adapter info (probes raw HCI sockets)", hci=hci):
+        return
     from blue_tap.hardware.adapter import get_adapter_info, _adapter_exists
     hci = _resolve_df_hci(hci) or resolve_active_hci()
     if not hci:
@@ -106,6 +121,8 @@ def adapter_info(hci):
 @click.option("--hci", default=None, help="HCI device (auto-detected when omitted)")
 def up(hci):
     """Bring adapter up."""
+    if _dry_run_guard("bring adapter up", hci=hci):
+        return
     hci = _resolve_df_hci(hci) or resolve_active_hci()
     from blue_tap.hardware.adapter import adapter_up
     from blue_tap.framework.contracts.result_schema import build_run_envelope, make_run_id, now_iso
@@ -154,6 +171,8 @@ def up(hci):
 @click.option("--hci", default=None, help="HCI device (auto-detected when omitted)")
 def down(hci):
     """Bring adapter down."""
+    if _dry_run_guard("bring adapter down", hci=hci):
+        return
     hci = _resolve_df_hci(hci) or resolve_active_hci()
     from blue_tap.hardware.adapter import adapter_down
     from blue_tap.framework.contracts.result_schema import build_run_envelope, make_run_id, now_iso
@@ -202,6 +221,8 @@ def down(hci):
 @click.option("--hci", default=None, help="HCI device (auto-detected when omitted)")
 def reset(hci):
     """Reset adapter."""
+    if _dry_run_guard("reset adapter", hci=hci):
+        return
     hci = _resolve_df_hci(hci) or resolve_active_hci()
     from blue_tap.hardware.adapter import adapter_reset
     from blue_tap.framework.contracts.result_schema import build_run_envelope, make_run_id, now_iso
@@ -251,6 +272,8 @@ def reset(hci):
 @click.option("--hci", default=None, help="HCI device (auto-detected when omitted)")
 def set_name(name, hci):
     """Set adapter Bluetooth name (for impersonation)."""
+    if _dry_run_guard("set adapter name", hci=hci, name=name):
+        return
     hci = _resolve_df_hci(hci) or resolve_active_hci()
     from blue_tap.hardware.adapter import set_device_name
     from blue_tap.framework.contracts.result_schema import build_run_envelope, make_run_id, now_iso
@@ -362,6 +385,8 @@ def set_class(device_class, hci):
     hci = _resolve_df_hci(hci) or resolve_active_hci()
     # Resolve preset name to hex
     device_class = _DEVICE_CLASS_PRESETS.get(device_class.lower(), device_class)
+    if _dry_run_guard("set device class", hci=hci, device_class=device_class):
+        return
     from blue_tap.hardware.adapter import set_device_class
     from blue_tap.framework.contracts.result_schema import build_run_envelope, make_run_id, now_iso
     from blue_tap.framework.sessions.store import log_command
@@ -422,6 +447,8 @@ def set_class(device_class, hci):
 @click.option("--hci", default=None, help="HCI device (auto-detected when omitted)")
 def adapter_firmware_status(hci):
     """Check DarkFirmware status on RTL8761B adapter."""
+    if _dry_run_guard("query firmware status (reads HCI VSC)", hci=hci):
+        return
     from blue_tap.hardware.firmware import DarkFirmwareManager
     from blue_tap.framework.envelopes.firmware import build_firmware_status_result, make_firmware_run_id
     from blue_tap.framework.contracts.result_schema import now_iso
@@ -485,6 +512,11 @@ def adapter_firmware_install(source, restore, hci):
       sudo blue-tap adapter firmware-install           # install bundled DarkFirmware
       sudo blue-tap adapter firmware-install --restore  # revert to stock Realtek
     """
+    if _dry_run_guard(
+        "restore stock Realtek firmware" if restore else "install DarkFirmware",
+        hci=hci, source=source,
+    ):
+        return
     from blue_tap.hardware.firmware import DarkFirmwareManager
     from blue_tap.framework.envelopes.firmware import build_firmware_operation_result, make_firmware_run_id
     from blue_tap.framework.contracts.result_schema import now_iso
@@ -618,6 +650,8 @@ def adapter_firmware_init(hci):
     This runs automatically at startup.  Use this command manually if you
     plugged in the adapter after Blue-Tap started.
     """
+    if _dry_run_guard("initialize DarkFirmware hooks", hci=hci):
+        return
     from blue_tap.hardware.firmware import DarkFirmwareManager
     from blue_tap.framework.envelopes.firmware import build_firmware_operation_result, make_firmware_run_id
     from blue_tap.framework.contracts.result_schema import now_iso
@@ -693,6 +727,11 @@ def adapter_firmware_init(hci):
 @click.option("--interval", type=float, default=3.0, help="Watch interval (seconds)")
 @click.option("--hci", default=None, hidden=True, help="HCI device (auto-detected)")
 def adapter_connection_inspect(conn, watch, interval, hci):
+    if _dry_run_guard(
+        "inspect live connections (reads controller RAM)",
+        hci=hci, conn=conn, watch=watch,
+    ):
+        return
     """Inspect live connection security state from controller RAM.
 
     \b
@@ -843,6 +882,11 @@ def adapter_firmware_spoof(address, restore, hci):
       sudo blue-tap adapter firmware-spoof AA:BB:CC:DD:EE:FF  # direct
       sudo blue-tap adapter firmware-spoof --restore          # revert to original
     """
+    if _dry_run_guard(
+        "restore original BDADDR" if restore else f"spoof BDADDR to {address}",
+        hci=hci, address=address,
+    ):
+        return
     import pathlib
     from blue_tap.hardware.firmware import DarkFirmwareManager
     from blue_tap.framework.envelopes.firmware import build_firmware_operation_result, make_firmware_run_id
@@ -951,6 +995,8 @@ def adapter_firmware_set(setting, value, hci):
       blue-tap adapter firmware-set lmp-slot 0      # target first connection
       blue-tap adapter firmware-set lmp-slot 2      # target third connection
     """
+    if _dry_run_guard(f"set firmware param {setting}", hci=hci, value=value):
+        return
     from blue_tap.hardware.firmware import DarkFirmwareManager
     from blue_tap.framework.envelopes.firmware import build_firmware_operation_result, make_firmware_run_id
     from blue_tap.framework.contracts.result_schema import now_iso
@@ -1029,6 +1075,11 @@ def adapter_firmware_set(setting, value, hci):
 @click.option("-o", "--output", required=True, help="Output file path")
 @click.option("--hci", default=None, hidden=True, help="HCI device (auto-detected)")
 def adapter_firmware_dump(start, end, region, output, hci):
+    if _dry_run_guard(
+        "dump firmware memory (reads RAM via VSC)",
+        hci=hci, region=region, start=start, end=end, output=output,
+    ):
+        return
     """Dump RTL8761B controller memory to file.
 
     \b
@@ -1145,6 +1196,11 @@ def adapter_firmware_dump(start, end, region, output, hci):
 @click.option("-o", "--output", default=None, help="Save raw dump to file")
 @click.option("--hci", default=None, hidden=True, help="HCI device (auto-detected)")
 def adapter_connections(dump, slot, output, hci):
+    if _dry_run_guard(
+        "inspect firmware connection table (reads controller RAM)",
+        hci=hci, slot=slot, dump=dump,
+    ):
+        return
     """Inspect firmware connection table (12 slots).
 
     \b

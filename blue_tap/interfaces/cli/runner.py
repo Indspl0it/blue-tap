@@ -31,7 +31,8 @@ __all__ = ["run_cmd", "show_options_cmd", "search_cmd", "info_cmd"]
 @click.option("--hci", "-a", help="HCI adapter (alias for HCI option)")
 @click.option("--session", "-s", "session_name", default=None, help="Session name")
 @click.option("--yes", "confirm", is_flag=True, help="Bypass destructive confirmation")
-def run_cmd(module_id: str, options: tuple[str, ...], rhost: str | None, hci: str | None,
+@click.pass_context
+def run_cmd(ctx, module_id: str, options: tuple[str, ...], rhost: str | None, hci: str | None,
             session_name: str | None, confirm: bool) -> None:
     """Run a module by ID with KEY=VALUE options.
 
@@ -60,6 +61,9 @@ def run_cmd(module_id: str, options: tuple[str, ...], rhost: str | None, hci: st
     from blue_tap.framework.sessions.store import get_session, set_session
     from blue_tap.hardware.adapter import resolve_active_hci
 
+    # Resolve dry-run from root flag (set in main.py callback into ctx.obj).
+    dry_run = bool((ctx.find_object(dict) or {}).get("dry_run"))
+
     # Parse KEY=VALUE options
     raw_options = {}
     for opt in options:
@@ -75,9 +79,9 @@ def run_cmd(module_id: str, options: tuple[str, ...], rhost: str | None, hci: st
     if confirm:
         raw_options["CONFIRM"] = "yes"
 
-    # Get or create session
-    session = get_session()
-    if not session and session_name:
+    # Get or create session — skip for dry-run (no-op preview, nothing to log)
+    session = None if dry_run else get_session()
+    if not session and session_name and not dry_run:
         session = Session(session_name)
         set_session(session)
 
@@ -93,23 +97,31 @@ def run_cmd(module_id: str, options: tuple[str, ...], rhost: str | None, hci: st
     if "RHOST" not in raw_options:
         _target_requires = {"classic_target", "ble_target", "target"}
         if _target_requires & set(descriptor.requires):
-            from blue_tap.utils.interactive import resolve_address
-            _hci = raw_options.get("HCI") or hci or resolve_active_hci()
-            resolved = resolve_address(None, prompt=f"Select target for {descriptor.name}", hci=_hci)
-            if not resolved:
-                return
-            raw_options["RHOST"] = resolved
+            if dry_run:
+                raw_options["RHOST"] = "AA:BB:CC:DD:EE:FF"
+            else:
+                from blue_tap.utils.interactive import resolve_address
+                _hci = raw_options.get("HCI") or hci or resolve_active_hci()
+                resolved = resolve_address(None, prompt=f"Select target for {descriptor.name}", hci=_hci)
+                if not resolved:
+                    return
+                raw_options["RHOST"] = resolved
 
     # Show what we're running
-    info(f"Running module: [bold cyan]{descriptor.name}[/bold cyan] ({module_id})")
-    if descriptor.destructive and not confirm and raw_options.get("CONFIRM") != "yes":
+    if dry_run:
+        info(f"[bt.yellow]Dry-run:[/bt.yellow] would run [bold cyan]{descriptor.name}[/bold cyan] ({module_id})")
+    else:
+        info(f"Running module: [bold cyan]{descriptor.name}[/bold cyan] ({module_id})")
+    if descriptor.destructive and not confirm and raw_options.get("CONFIRM") != "yes" and not dry_run:
         warning("[bt.red]Destructive module![/bt.red] Add CONFIRM=yes to proceed.")
         raise SystemExit(1)
 
     # Invoke the module
-    invoker = Invoker(safety_override=confirm)
+    invoker = Invoker(safety_override=confirm or dry_run)
     try:
-        envelope = invoker.invoke_with_logging(module_id, raw_options, session=session)
+        envelope = invoker.invoke_with_logging(
+            module_id, raw_options, session=session, dry_run=dry_run,
+        )
 
         # Show summary
         summary = envelope.get("summary", {})
@@ -367,6 +379,26 @@ def info_cmd(module_id: str) -> None:
     key_width = 16
     for key, val in rows:
         console.print(f"  [bt.dim]{key.ljust(key_width)}[/bt.dim]  {val}")
+
+    # Dependency graph — built lazily on first call. Best-effort static
+    # analysis only; misses dynamic imports (importlib, getattr, etc.).
+    from blue_tap.framework.registry.dependency_graph import get_dependencies
+
+    edges = get_dependencies(descriptor.module_id)
+    if edges.depends_on or edges.used_by:
+        console.print()
+        if edges.depends_on:
+            console.print("  [bt.dim]Depends on (static analysis):[/bt.dim]")
+            for dep in edges.depends_on:
+                dep_descriptor = registry.try_get(dep)
+                label = dep_descriptor.name if dep_descriptor else dep
+                console.print(f"    • [bt.cyan]{dep}[/bt.cyan]  [bt.dim]{label}[/bt.dim]")
+        if edges.used_by:
+            console.print("  [bt.dim]Used by:[/bt.dim]")
+            for user in edges.used_by:
+                user_descriptor = registry.try_get(user)
+                label = user_descriptor.name if user_descriptor else user
+                console.print(f"    • [bt.cyan]{user}[/bt.cyan]  [bt.dim]{label}[/bt.dim]")
 
     console.print()
     console.print(f"  [bt.dim]run:[/bt.dim]  blue-tap run {descriptor.module_id} RHOST=...")

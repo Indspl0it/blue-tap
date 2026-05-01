@@ -41,8 +41,10 @@ def auto(target, hci, skip, confirm):
       blue-tap auto AA:BB:CC:DD:EE:FF --yes
       blue-tap auto AA:BB:CC:DD:EE:FF --skip exploit --skip extract
     """
+    from blue_tap.interfaces.cli._module_runner import _is_dry_run
     from blue_tap.utils.output import info, error, success
 
+    dry_run = _is_dry_run()
     skip_set = set(skip)
     base_opts: dict[str, str] = {"RHOST": target}
     if hci:
@@ -64,7 +66,11 @@ def auto(target, hci, skip, confirm):
         if result is None:
             logger.warning("Phase %s returned no result", phase_name)
 
-    # Generate report
+    # Generate report — skip in dry-run since no real session data was produced.
+    if dry_run:
+        info("[bt.yellow]Dry-run:[/bt.yellow] would generate HTML report from session.")
+        return
+
     info("[bold]Generating report...[/bold]")
     try:
         import os

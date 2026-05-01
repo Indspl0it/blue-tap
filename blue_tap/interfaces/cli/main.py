@@ -120,8 +120,14 @@ def _subcommand_needs_hw(invoked: str) -> bool:
               help="Increase verbosity: pass -v for verbose, -vv for debug.")
 @click.option("-s", "--session", "session_name", default=None,
               help="Session name (default: auto-generated). Use to resume a session.")
+@click.option("--config", "config_path", default=None,
+              type=click.Path(dir_okay=False),
+              help="Path to a blue-tap TOML config file (overrides $BLUE_TAP_CONFIG and ~/.config/blue-tap/config.toml).")
+@click.option("--dry-run", "dry_run", is_flag=True, default=False,
+              help="Print the resolved plan and exit without touching hardware or sending packets. "
+                   "Honors $BLUE_TAP_DRY_RUN=1 as an alternative.")
 @click.pass_context
-def cli(ctx, verbose, session_name):
+def cli(ctx, verbose, session_name, config_path, dry_run):
     """Blue-Tap: Bluetooth Security Toolkit for Automotive & IoT.
 
     \b
@@ -142,6 +148,39 @@ def cli(ctx, verbose, session_name):
     from blue_tap.utils.output import set_verbosity
     set_verbosity(verbose)
 
+    # Dry-run: root flag OR $BLUE_TAP_DRY_RUN=1. Stored in ctx.obj so every
+    # subcommand reads from a single place. Env-var honoring lets the playbook
+    # executor scope dry-run across re-entered ``make_context`` calls without
+    # leaking process-wide state between independent invocations.
+    dry_run = bool(dry_run) or os.environ.get("BLUE_TAP_DRY_RUN", "").lower() in ("1", "true", "yes")
+    ctx.ensure_object(dict)
+    ctx.obj["dry_run"] = dry_run
+    if dry_run:
+        info("[bt.yellow]Dry-run mode[/bt.yellow] — no hardware will be touched.")
+
+    # Load user config (~/.config/blue-tap/config.toml etc). Failures are
+    # surfaced loudly so a typo never silently disables the override.
+    from blue_tap.framework.config import (
+        ConfigError,
+        build_default_map,
+        load_config,
+    )
+    try:
+        user_cfg = load_config(config_path)
+    except ConfigError as cfg_exc:
+        error(str(cfg_exc))
+        sys.exit(2)
+
+    if user_cfg is not None:
+        # ``[default].session`` covers the root ``-s/--session`` option,
+        # which is parsed before the subcommand context exists — Click's
+        # ``default_map`` cannot reach back to it. Apply manually.
+        if session_name is None and "session" in user_cfg.default:
+            session_name = user_cfg.default["session"]
+        # Subcommand options (``--hci`` on every subcommand that has it,
+        # etc.) flow naturally through ``ctx.default_map``.
+        ctx.default_map = build_default_map(cli, user_cfg)
+
     invoked = ctx.invoked_subcommand or ""
     if not invoked:
         return
@@ -158,6 +197,12 @@ def cli(ctx, verbose, session_name):
     # gates share one skip predicate: if the subcommand path doesn't touch
     # Bluetooth hardware, it doesn't need root either (both gates exist for
     # raw-HCI access).
+    # Dry-run skips the privilege + RTL dongle gates: the whole point is to
+    # preview without touching hardware, so root and a present dongle are not
+    # prerequisites.
+    if dry_run:
+        return
+
     if _subcommand_needs_hw(invoked):
         if not _check_privileges():
             error(

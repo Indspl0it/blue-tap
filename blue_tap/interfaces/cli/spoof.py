@@ -23,7 +23,14 @@ def spoof(new_mac, hci, method):
     """
     from blue_tap.hardware.adapter import resolve_active_hci
     from blue_tap.hardware.spoofer import spoof_address
+    from blue_tap.interfaces.cli._module_runner import _is_dry_run
     from blue_tap.utils.output import info, error, success
+
+    if _is_dry_run():
+        _hci = hci or "(active HCI)"
+        info(f"[bt.yellow]Dry-run:[/bt.yellow] would spoof {_hci} → [bold]{new_mac}[/bold]"
+             f" via method={method or 'auto'}")
+        return
 
     _hci = hci or resolve_active_hci()
     kwargs = {"hci": _hci, "target_mac": new_mac}

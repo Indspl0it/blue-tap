@@ -12,7 +12,7 @@ YAML format::
     duration: ~2 minutes
     risk: none
     steps:
-      - command: scan classic -d 10
+      - command: discover classic -d 10
         description: Discover nearby Classic devices
       - command: vulnscan {target}
       - module: reconnaissance.campaign
@@ -20,7 +20,7 @@ YAML format::
 
 Plain-text format (one command per line, ``#`` comments ignored)::
 
-    scan classic -d 10
+    discover classic -d 10
     vulnscan {target}
 
 Usage::
@@ -46,7 +46,7 @@ _MODULE_TO_CLI: dict[str, str] = {
     "assessment.vuln_scanner": "vulnscan",
     "assessment.fleet": "fleet",
     "reconnaissance.campaign": "recon auto",
-    "discovery.scanner": "scan all",
+    "discovery.scanner": "discover all",
 }
 
 _FAMILY_PREFIXES = (
