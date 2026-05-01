@@ -9,10 +9,13 @@ discovered during fuzzing are saved separately for triage.
 from __future__ import annotations
 
 import hashlib
+import logging
 import random
 from collections.abc import Generator
 from dataclasses import dataclass, field
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -250,8 +253,178 @@ class Corpus:
         )
 
     # ------------------------------------------------------------------
-    # Deduplication
+    # Tarball import/export
     # ------------------------------------------------------------------
+
+    def export_to_tarball(
+        self,
+        output_path: str,
+        protocol: str | None = None,
+    ) -> dict:
+        """Bundle the on-disk corpus into a gzipped tarball.
+
+        Archive layout matches ``base_dir`` exactly: top-level entries are
+        protocol directories, each containing ``*.bin`` seed files and an
+        optional ``interesting/`` subdirectory.
+
+        Args:
+            output_path: Destination path for the tarball (``.tar.gz`` recommended).
+            protocol: If given, archive only that protocol's directory.
+                When ``None``, all protocol subdirectories of ``base_dir`` are
+                archived.
+
+        Returns:
+            Dict with ``output_path``, ``size_bytes``, ``seeds_exported``,
+            and ``protocols`` (list of protocols included).
+
+        Raises:
+            FileNotFoundError: ``base_dir`` does not exist on disk.
+            ValueError: ``protocol`` was given but no directory exists for it.
+        """
+        import tarfile
+
+        base = Path(self.base_dir)
+        if not base.is_dir():
+            raise FileNotFoundError(
+                f"Corpus base directory does not exist: {self.base_dir}"
+            )
+
+        if protocol:
+            proto_dir = base / protocol
+            if not proto_dir.is_dir():
+                raise ValueError(
+                    f"No corpus directory for protocol {protocol!r} under {self.base_dir}"
+                )
+            sources = [(proto_dir, protocol)]
+        else:
+            sources = [
+                (p, p.name)
+                for p in sorted(base.iterdir())
+                if p.is_dir()
+            ]
+
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(output_path, "w:gz") as tar:
+            for proto_dir, arcname in sources:
+                tar.add(str(proto_dir), arcname=arcname)
+
+        seeds_exported = 0
+        protocols_exported: list[str] = []
+        for proto_dir, arcname in sources:
+            protocols_exported.append(arcname)
+            seeds_exported += sum(1 for _ in proto_dir.rglob("*.bin"))
+
+        return {
+            "output_path": str(Path(output_path).resolve()),
+            "size_bytes": Path(output_path).stat().st_size,
+            "seeds_exported": seeds_exported,
+            "protocols": sorted(protocols_exported),
+        }
+
+    def import_from_tarball(self, tarball_path: str) -> dict:
+        """Merge seeds from a gzipped tarball into this corpus.
+
+        The tarball must follow the export layout (protocol-named top-level
+        directories of ``*.bin`` files, with optional ``interesting/``
+        subdirectories). Existing seeds are preserved; new seeds are deduped
+        by SHA-256 content hash so re-importing the same tarball is a no-op.
+
+        Args:
+            tarball_path: Path to the ``.tar.gz`` file to import.
+
+        Returns:
+            Dict with ``seeds_imported``, ``duplicates_skipped``,
+            ``interesting_imported``, and ``protocols`` (list of protocols
+            seen in the archive).
+
+        Raises:
+            FileNotFoundError: ``tarball_path`` does not exist.
+            tarfile.ReadError: archive cannot be opened or is malformed.
+        """
+        import tarfile
+        import tempfile
+
+        archive = Path(tarball_path)
+        if not archive.is_file():
+            raise FileNotFoundError(f"Tarball does not exist: {tarball_path}")
+
+        # Pre-load existing seeds from disk so dedup works against the live
+        # corpus, not just whatever happens to be in self.seeds at call time.
+        self.load_from_directory(self.base_dir)
+        existing_hashes: dict[str, set[str]] = {
+            proto: {hashlib.sha256(s).hexdigest() for s in seeds}
+            for proto, seeds in self.seeds.items()
+        }
+
+        seeds_imported = 0
+        duplicates_skipped = 0
+        interesting_imported = 0
+        protocols_seen: set[str] = set()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_root = Path(tmp)
+            with tarfile.open(tarball_path, "r:gz") as tar:
+                # Reject path-traversal entries — never trust archive contents
+                # to stay inside the temp dir.
+                for member in tar.getmembers():
+                    name = member.name
+                    if name.startswith("/") or ".." in Path(name).parts:
+                        continue
+                    # ``filter="data"`` rejects symlinks, hardlinks, and
+                    # special files at extract time — defence in depth on top
+                    # of the path-traversal check above. Required to silence
+                    # the Python 3.14 default-filter warning.
+                    tar.extract(member, tmp_root, filter="data")
+
+            for proto_dir in sorted(tmp_root.iterdir()):
+                if not proto_dir.is_dir():
+                    continue
+                protocol = proto_dir.name
+                if protocol == "interesting":
+                    # Top-level "interesting" with no protocol context — skip.
+                    continue
+                protocols_seen.add(protocol)
+                seen = existing_hashes.setdefault(protocol, set())
+
+                for bin_file in sorted(proto_dir.glob("*.bin")):
+                    try:
+                        data = bin_file.read_bytes()
+                    except OSError:
+                        continue
+                    if not data:
+                        continue
+                    h = hashlib.sha256(data).hexdigest()
+                    if h in seen:
+                        duplicates_skipped += 1
+                        continue
+                    seen.add(h)
+                    self.add_seed(protocol, data)
+                    seeds_imported += 1
+
+                interesting_src = proto_dir / "interesting"
+                if interesting_src.is_dir():
+                    for bin_file in sorted(interesting_src.glob("*.bin")):
+                        try:
+                            data = bin_file.read_bytes()
+                        except OSError:
+                            continue
+                        if not data:
+                            continue
+                        # Reason is the part of the filename before the
+                        # trailing ``_<hash>`` segment that ``save_interesting``
+                        # writes; fall back to ``imported`` when the layout is
+                        # unfamiliar so we never lose the seed.
+                        stem = bin_file.stem
+                        reason = stem.rsplit("_", 1)[0] if "_" in stem else "imported"
+                        self.save_interesting(protocol, data, reason)
+                        interesting_imported += 1
+
+        return {
+            "seeds_imported": seeds_imported,
+            "duplicates_skipped": duplicates_skipped,
+            "interesting_imported": interesting_imported,
+            "protocols": sorted(protocols_seen),
+        }
 
     def minimize(self) -> int:
         """Deduplicate seeds by SHA-256 content hash.
@@ -384,6 +557,7 @@ def generate_full_corpus(
                         progress.update(task, current="[interrupted]")
                         break
                     except Exception:
+                        logger.warning("seed generation failed for %s", proto, exc_info=True)
                         results[proto] = 0
                     progress.advance(task)
 
@@ -399,6 +573,7 @@ def generate_full_corpus(
                 except KeyboardInterrupt:
                     break
                 except Exception:
+                    logger.warning("seed generation failed for %s", proto, exc_info=True)
                     results[proto] = 0
     else:
         for proto in needed:
@@ -407,6 +582,7 @@ def generate_full_corpus(
             except KeyboardInterrupt:
                 break
             except Exception:
+                logger.warning("seed generation failed for %s", proto, exc_info=True)
                 results[proto] = 0
 
     return results
