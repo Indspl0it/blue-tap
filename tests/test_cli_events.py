@@ -25,6 +25,7 @@ _EXPECTED_CANONICAL = {
     "run_completed",
     "run_aborted",
     "run_error",
+    "dry_run_planned",
 }
 
 

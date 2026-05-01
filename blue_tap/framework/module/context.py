@@ -44,6 +44,7 @@ class RunContext:
     logger: logging.Logger
     module_id: str = ""
     target: str = ""
+    dry_run: bool = False
     _events: list[dict[str, Any]] = field(default_factory=list)
 
     @classmethod
@@ -54,6 +55,7 @@ class RunContext:
         session: Session | None = None,
         adapter: str = "",
         target: str = "",
+        dry_run: bool = False,
     ) -> RunContext:
         """Create a RunContext with auto-generated run_id and timestamp."""
         return cls(
@@ -65,6 +67,7 @@ class RunContext:
             logger=logging.getLogger(module_id or "blue_tap.module"),
             module_id=module_id,
             target=target,
+            dry_run=dry_run,
         )
 
     def emit_event(

@@ -15,6 +15,7 @@ Canonical event types (all modules must use only these):
     run_completed          — emitted once when a run finishes successfully
     run_aborted            — emitted when a run is intentionally stopped early
     run_error              — emitted on unrecoverable module/tool/runtime error
+    dry_run_planned        — emitted when ``--dry-run`` short-circuits a module
 
 Non-canonical event_type strings trigger a logger.warning at runtime.
 """
@@ -44,6 +45,7 @@ CANONICAL_EVENT_TYPES: frozenset[str] = frozenset({
     "run_completed",
     "run_aborted",
     "run_error",
+    "dry_run_planned",
 })
 
 

@@ -60,6 +60,10 @@ class Module(ABC):
     category: str | None = None  # Sub-category within family
     report_adapter_path: str | None = None  # Custom adapter class path
 
+    # Set True to handle ctx.dry_run inside run(); default False short-circuits
+    # in Invoker before the module is invoked.
+    supports_dry_run: bool = False
+
     # Mark abstract base classes with _abstract = True to skip registration
     _abstract: bool = False
 

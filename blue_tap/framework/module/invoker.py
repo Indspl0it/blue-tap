@@ -101,6 +101,7 @@ class Invoker:
         raw_options: dict[str, Any] | None = None,
         *,
         session: Any = None,
+        dry_run: bool = False,
     ) -> dict:
         """Invoke a module by ID.
 
@@ -108,6 +109,11 @@ class Invoker:
             module_id: Module identifier (e.g., "exploitation.knob").
             raw_options: Dict of option values (strings from CLI or native types).
             session: Optional Session for artifact storage.
+            dry_run: If True, return a synthesized "planned" envelope without
+                executing the module's run() (unless the module sets
+                ``supports_dry_run = True``, in which case run() is invoked
+                with ``ctx.dry_run = True`` and the module is responsible for
+                honoring it).
 
         Returns:
             RunEnvelope dict produced by the module's ``run()``.
@@ -117,6 +123,7 @@ class Invoker:
             EntryPointResolutionError: If entry_point cannot be resolved.
             NotAModule: If resolved class is not a Module.
             DestructiveConfirmationRequired: If destructive without CONFIRM=yes.
+                Bypassed when ``dry_run=True``.
             OptionError: If option validation fails.
         """
         from blue_tap.framework.module.context import RunContext
@@ -130,8 +137,8 @@ class Invoker:
         if desc is None:
             raise ModuleNotFound(module_id)
 
-        # Destructive safety gate
-        if desc.destructive and not self.safety_override:
+        # Destructive safety gate — bypassed in dry-run since the run is a no-op.
+        if desc.destructive and not self.safety_override and not dry_run:
             confirm = str(raw_options.get("CONFIRM", "")).lower()
             if confirm not in ("yes", "true", "1"):
                 raise DestructiveConfirmationRequired(module_id)
@@ -139,7 +146,8 @@ class Invoker:
         # Inject the active HCI (RTL8761B / DarkFirmware-aware) into raw_options
         # when the caller didn't pass one. Module-level OptString defaults are
         # now empty, so the real dongle HCI (e.g. hci4) is injected here.
-        if not raw_options.get("HCI"):
+        # Skip in dry-run — synthesized envelope shouldn't probe hardware.
+        if not raw_options.get("HCI") and not dry_run:
             raw_options["HCI"] = resolve_active_hci()
 
         # Resolve and instantiate
@@ -150,7 +158,7 @@ class Invoker:
         # (e.g. CLASSIC_HCI in reconnaissance.prerequisites).
         schema_names = {opt.name for opt in getattr(instance, "options", ())}
         if "CLASSIC_HCI" in schema_names and not raw_options.get("CLASSIC_HCI"):
-            raw_options["CLASSIC_HCI"] = raw_options["HCI"]
+            raw_options["CLASSIC_HCI"] = raw_options.get("HCI", "")
 
         # Build options container and validate
         options = OptionsContainer.from_schema(instance.options)
@@ -165,7 +173,20 @@ class Invoker:
             session=session,
             adapter=str(adapter),
             target=str(target),
+            dry_run=dry_run,
         )
+
+        # Default-modular dry-run: short-circuit modules that haven't opted in
+        # to ``supports_dry_run``. Synthesize a "planned" envelope from the
+        # descriptor + resolved options. The module is never executed.
+        if dry_run and not getattr(instance, "supports_dry_run", False):
+            envelope = _build_planned_envelope(desc, ctx, raw_options)
+            ctx.emit_event(
+                "dry_run_planned",
+                f"Dry-run: would invoke {module_id}",
+                details={"module_id": module_id, "destructive": desc.destructive},
+            )
+            return envelope
 
         ctx.emit_run_started()
         try:
@@ -187,11 +208,16 @@ class Invoker:
         raw_options: dict[str, Any] | None = None,
         *,
         session: Any = None,
+        dry_run: bool = False,
     ) -> dict:
-        """Invoke a module and log the result to the session."""
-        envelope = self.invoke(module_id, raw_options, session=session)
+        """Invoke a module and log the result to the session.
 
-        if session and envelope:
+        Session logging is skipped entirely when ``dry_run=True`` — a no-op
+        preview is not worth persisting to artefact storage.
+        """
+        envelope = self.invoke(module_id, raw_options, session=session, dry_run=dry_run)
+
+        if session and envelope and not dry_run:
             try:
                 from blue_tap.framework.sessions.store import get_session, set_session
 
@@ -211,6 +237,73 @@ class Invoker:
                 logger.warning("Failed to log command: %s", e)
 
         return envelope
+
+
+def _build_planned_envelope(desc: Any, ctx: Any, raw_options: dict[str, Any]) -> dict:
+    """Synthesize a planned envelope (outcome=not_applicable) for default-modular dry-run."""
+    from blue_tap.framework.contracts.result_schema import (
+        build_run_envelope,
+        make_evidence,
+        make_execution,
+    )
+
+    # Hide CONFIRM and any value containing "secret"/"password"/"key" from logs.
+    safe_options = {
+        k: v for k, v in raw_options.items()
+        if k.upper() not in {"CONFIRM"}
+        and not any(s in k.lower() for s in ("secret", "password", "passwd"))
+    }
+
+    schema_prefix = desc.schema_prefix or f"blue_tap.{desc.family.value}.result"
+    module_short = desc.module_id.split(".", 1)[-1]
+
+    execution = make_execution(
+        kind="phase",
+        id="dry_run",
+        title=f"Planned invocation of {desc.name}",
+        module=module_short,
+        module_id=desc.module_id,
+        protocol=desc.protocols[0] if desc.protocols else "",
+        execution_status="skipped",
+        module_outcome="not_applicable",
+        evidence=make_evidence(
+            summary=f"Dry-run: {desc.name} would have been invoked.",
+            confidence="high",
+            observations=[
+                f"target={ctx.target or '(none)'}",
+                f"adapter={ctx.adapter or '(none)'}",
+                f"destructive={desc.destructive}",
+                f"requires_pairing={desc.requires_pairing}",
+            ],
+            module_evidence={"resolved_options": safe_options},
+        ),
+        destructive=desc.destructive,
+        requires_pairing=desc.requires_pairing,
+        started_at=ctx.started_at,
+    )
+
+    return build_run_envelope(
+        schema=schema_prefix,
+        module=module_short,
+        module_id=desc.module_id,
+        target=ctx.target,
+        adapter=ctx.adapter,
+        operator_context={"dry_run": True},
+        summary={
+            "outcome": "not_applicable",
+            "dry_run": True,
+            "destructive": desc.destructive,
+        },
+        executions=[execution],
+        artifacts=[],
+        module_data={
+            "dry_run": True,
+            "module_id": desc.module_id,
+            "family": desc.family.value,
+        },
+        run_id=ctx.run_id,
+        started_at=ctx.started_at,
+    )
 
 
 def _infer_log_category(envelope: dict) -> str:
