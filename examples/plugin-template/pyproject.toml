@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bluetap-example-plugin"
+version = "0.1.0"
+description = "Example Blue-Tap plugin — minimal template for third-party modules"
+requires-python = ">=3.11"
+authors = [{ name = "Plugin Author" }]
+license = "MIT"
+dependencies = [
+    "blue-tap>=2.6.5",
+]
+
+# This is what makes ``blue-tap plugins list`` discover the plugin. The
+# ``blue_tap.modules`` group is read by ``blue_tap.framework.module.loader``
+# at startup; the right-hand value is a Python module path that, when
+# imported, defines one or more ``Module`` subclasses. Their
+# ``__init_subclass__`` hooks register them with the global registry.
+[project.entry-points."blue_tap.modules"]
+bluetap_example_plugin = "bluetap_example_plugin"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["bluetap_example_plugin*"]
