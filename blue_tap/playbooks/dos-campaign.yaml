@@ -1,0 +1,19 @@
+name: DoS Resilience Campaign
+description: Structured denial-of-service and resilience testing — discovery, vulnscan, then full DoS check sweep
+duration: ~10 minutes
+risk: high (may render target unresponsive; per-check recovery wait is enforced)
+requires:
+  - Operator confirmation (--yes) — DoS checks are destructive
+
+steps:
+  - command: discover classic -d 10
+    description: Inventory nearby targets
+
+  - command: vulnscan {target}
+    description: Baseline vulnerability snapshot before stressing the target
+
+  - command: dos {target} --yes
+    description: Run the full DoS check series with default recovery timeouts
+
+  - command: report -o dos_campaign.html
+    description: Generate DoS campaign report

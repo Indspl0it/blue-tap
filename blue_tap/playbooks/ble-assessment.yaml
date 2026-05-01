@@ -1,0 +1,20 @@
+name: BLE Security Assessment
+description: BLE-only posture sweep — advertisement scan, GATT enumeration, BLE-specific CVE checks
+duration: ~5 minutes
+risk: low (active GATT probing only after a target is selected)
+
+steps:
+  - command: discover ble -d 15
+    description: Active BLE advertisement scan
+
+  - command: recon {target} gatt
+    description: Enumerate services, characteristics, descriptors
+
+  - command: vulnscan {target} --cve CVE-2020-26558
+    description: BLE Method Confusion (Pairing) — CVE-2020-26558
+
+  - command: vulnscan {target} --cve CVE-2019-2225
+    description: BLE pairing posture — CVE-2019-2225
+
+  - command: report -o ble_assessment.html
+    description: Generate BLE assessment report
