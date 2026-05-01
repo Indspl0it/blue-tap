@@ -387,7 +387,7 @@ print(f'Found: {desc}')
 pytest tests/ -v
 
 # Run the check against a target
-sudo blue-tap vulnscan AA:BB:CC:DD:EE:FF --checks ivi_diag_check
+sudo blue-tap vulnscan AA:BB:CC:DD:EE:FF --cve ivi_diag_check
 ```
 
 ---

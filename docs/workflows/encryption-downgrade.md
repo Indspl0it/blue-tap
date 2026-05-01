@@ -323,7 +323,7 @@ $ sudo blue-tap adapter firmware-status
 | BLUFFS fails to negotiate | Target patched for CVE-2023-24023 | Note "not vulnerable" in report; try KNOB independently |
 | Key size stays at 16 | Target enforces minimum key size | Note KNOB mitigation is in place; this is a positive finding |
 | DarkFirmware not loading | Wrong adapter chipset | Verify RTL8761B with `lsusb | grep -i realtek` |
-| DarkFirmware loaded but LMP fails | Firmware version mismatch | Check `sudo blue-tap firmware status` for capability list |
+| DarkFirmware loaded but LMP fails | Firmware version mismatch | Check `sudo blue-tap adapter firmware-status` for capability list |
 | Target disconnects during BLUFFS | MITM setup disrupted existing link | Expected -- reconnection happens automatically |
 
 ---

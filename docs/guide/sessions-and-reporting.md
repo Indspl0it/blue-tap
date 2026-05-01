@@ -13,12 +13,12 @@ Every command you run --- discovery, recon, vulnscan, extraction, fuzzing, DoS -
 ```
 sessions/
   my-assessment/
-    session.json              # Session metadata (name, targets, command log)
-    001_scan_classic.json     # Command output #1 (RunEnvelope wrapper)
-    002_recon_sdp.json        # Command output #2
-    003_vulnscan.json         # Command output #3
-    004_dos.json              # Command output #4
-    005_fuzz_ble-att.json     # Command output #5
+    session.json                          # Session metadata (name, targets, command log)
+    001_run_discovery.scanner.json        # Command output #1 (RunEnvelope wrapper)
+    002_run_reconnaissance.sdp.json       # Command output #2
+    003_run_assessment.vuln_scanner.json  # Command output #3
+    004_run_exploitation.dos.json         # Command output #4
+    005_run_fuzzing.campaign.json         # Command output #5
     fuzz/                     # Fuzzing artifacts
       crashes.db              # Crash database (SQLite)
       corpus/                 # Seed corpus by protocol
@@ -47,27 +47,27 @@ The `session.json` file is the session's metadata record. It tracks what was don
   "commands": [
     {
       "seq": 1,
-      "command": "scan_classic",
+      "command": "run discovery.scanner",
       "category": "scan",
       "target": "",
       "timestamp": "2026-04-16T14:30:22.705014+00:00",
-      "file": "001_scan_classic.json"
+      "file": "001_run_discovery.scanner.json"
     },
     {
       "seq": 2,
-      "command": "recon_sdp",
+      "command": "run reconnaissance.sdp",
       "category": "recon",
       "target": "AA:BB:CC:DD:EE:FF",
       "timestamp": "2026-04-16T14:31:02.112340+00:00",
-      "file": "002_recon_sdp.json"
+      "file": "002_run_reconnaissance.sdp.json"
     },
     {
       "seq": 3,
-      "command": "vulnscan",
+      "command": "run assessment.vuln_scanner",
       "category": "vuln",
       "target": "AA:BB:CC:DD:EE:FF",
       "timestamp": "2026-04-16T14:34:00.881523+00:00",
-      "file": "003_vulnscan.json"
+      "file": "003_run_assessment.vuln_scanner.json"
     }
   ],
   "files": [
@@ -194,11 +194,11 @@ Session Details
 
 
 Command Log:
-  2026-04-25T13:42:20  fuzz_at_deep  (fuzz)  AA:BB:CC:DD:EE:FF
-  2026-04-25T13:42:20  fuzz_sdp  (fuzz)  AA:BB:CC:DD:EE:FF
-  2026-04-25T13:42:20  fuzz_sdp  (fuzz)  AA:BB:CC:DD:EE:FF
-  2026-04-25T13:42:22  fuzz_sdp  (fuzz)  AA:BB:CC:DD:EE:FF
-  2026-04-25T13:42:22  fuzz_l2cap-sig  (fuzz)  AA:BB:CC:DD:EE:FF
+  2026-04-25T13:42:05  run discovery.scanner  (scan)
+  2026-04-25T13:42:09  run reconnaissance.sdp  (recon)  AA:BB:CC:DD:EE:FF
+  2026-04-25T13:42:14  run assessment.vuln_scanner  (vuln)  AA:BB:CC:DD:EE:FF
+  2026-04-25T13:42:20  run fuzzing.campaign  (fuzz)  AA:BB:CC:DD:EE:FF
+  2026-04-25T13:42:22  run reporting.generator  (report)
 ```
 
 ---

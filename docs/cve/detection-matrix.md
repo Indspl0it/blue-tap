@@ -286,15 +286,15 @@ Intrusive checks via `blue-tap dos TARGET --checks <id>`. See the [DoS Matrix](d
 
 | CVE | Name | Protocol | Severity | CLI |
 |-----|------|----------|----------|-----|
-| CVE-2017-0781 | BlueBorne BNEP Heap Overflow | BNEP | Critical | `dos TARGET --checks dos_cve_2017_0781_bnep_heap` |
-| CVE-2017-0782 | BlueBorne BNEP Underflow | BNEP | Critical | `dos TARGET --checks dos_cve_2017_0782_bnep_underflow` |
-| CVE-2019-19192 | SweynTooth ATT Deadlock | BLE ATT | High | `dos TARGET --checks dos_cve_2019_19192_att_deadlock` |
-| CVE-2019-19196 | SweynTooth SMP Key Overflow | BLE SMP | High | `dos TARGET --checks dos_cve_2019_19196_key_size` |
-| CVE-2020-0022 | BlueFrag ACL Crash | Raw ACL | Critical | `dos TARGET --checks dos_cve_2020_0022_bluefrag` |
-| CVE-2022-39177 | AVDTP SETCONF Crash | AVDTP | High | `dos TARGET --checks dos_cve_2022_39177_avdtp_setconf` |
-| CVE-2023-27349 | AVRCP Event OOB Crash | AVRCP | Critical | `dos TARGET --checks dos_cve_2023_27349_avrcp_event` |
-| CVE-2025-0084 | SDP Double-Connection Race | SDP | High | `dos TARGET --checks dos_cve_2025_0084_sdp_race` |
-| CVE-2025-48593 | HFP Rapid Reconnect Race | HFP | High | `dos TARGET --checks dos_cve_2025_48593_hfp_reconnect` |
+| CVE-2017-0781 | BlueBorne BNEP Heap Overflow | BNEP | Critical | `dos TARGET --checks cve_2017_0781_bnep_heap` |
+| CVE-2017-0782 | BlueBorne BNEP Underflow | BNEP | Critical | `dos TARGET --checks cve_2017_0782_bnep_underflow` |
+| CVE-2019-19192 | SweynTooth ATT Deadlock | BLE ATT | High | `dos TARGET --checks cve_2019_19192_att_deadlock` |
+| CVE-2019-19196 | SweynTooth SMP Key Overflow | BLE SMP | High | `dos TARGET --checks cve_2019_19196_key_size` |
+| CVE-2020-0022 | BlueFrag ACL Crash | Raw ACL | Critical | `dos TARGET --checks cve_2020_0022_bluefrag` |
+| CVE-2022-39177 | AVDTP SETCONF Crash | AVDTP | High | `dos TARGET --checks cve_2022_39177_avdtp_setconf` |
+| CVE-2023-27349 | AVRCP Event OOB Crash | AVRCP | Critical | `dos TARGET --checks cve_2023_27349_avrcp_event` |
+| CVE-2025-0084 | SDP Double-Connection Race | SDP | High | `dos TARGET --checks cve_2025_0084_sdp_race` |
+| CVE-2025-48593 | HFP Rapid Reconnect Race | HFP | High | `dos TARGET --checks cve_2025_48593_hfp_reconnect` |
 
 ### Cross-Module Summary
 

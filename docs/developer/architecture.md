@@ -516,10 +516,10 @@ Sessions are managed by `blue_tap.framework.sessions.store`. All writes are atom
 
 ```
 sessions/<session_name>/
-    session.json              # Metadata (name, targets, command log, files)
-    001_scan_classic.json     # Command output #1 (envelope wrapper)
-    002_recon_sdp.json        # Command output #2
-    003_vulnscan.json         # Command output #3
+    session.json                          # Metadata (name, targets, command log, files)
+    001_run_discovery.scanner.json        # Command output #1 (envelope wrapper)
+    002_run_reconnaissance.sdp.json       # Command output #2
+    003_run_assessment.vuln_scanner.json  # Command output #3
     fuzz/                     # Fuzzing artifacts (crashes.db, corpus/)
     report.html               # Generated report
 ```
@@ -533,7 +533,7 @@ Each command writes its envelope through the atomic write pipeline: content goes
 ```mermaid
 flowchart TD
     subgraph commands["Commands (sequential)"]
-        scan["blue-tap scan"]
+        scan["blue-tap discover"]
         recon["blue-tap recon sdp"]
         vuln["blue-tap vulnscan"]
         dos["blue-tap dos"]
@@ -549,11 +549,11 @@ flowchart TD
 
     subgraph session_dir["sessions/my-assessment/"]
         meta["session.json<br/>(metadata, command log)"]
-        f1["001_scan_classic.json"]
-        f2["002_recon_sdp.json"]
-        f3["003_vulnscan.json"]
-        f4["004_dos_runner.json"]
-        f5["005_exploit.json"]
+        f1["001_run_discovery.scanner.json"]
+        f2["002_run_reconnaissance.sdp.json"]
+        f3["003_run_assessment.vuln_scanner.json"]
+        f4["004_run_exploitation.dos.json"]
+        f5["005_run_exploitation.knob.json"]
         artifacts["fuzz/ pbap/ map/ audio/"]
     end
 

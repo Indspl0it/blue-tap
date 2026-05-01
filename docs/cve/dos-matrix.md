@@ -13,16 +13,16 @@ These target the Classic Bluetooth (BR/EDR) stack. Most require only an L2CAP co
 
 | Check ID | CVE | Protocol | Severity | Description |
 |----------|-----|----------|----------|-------------|
-| dos_cve_2017_0781_bnep_heap | CVE-2017-0781 | BNEP | :material-alert-circle:{ .critical } Critical | BNEP heap overflow via oversized control frame with uuid_size=0x10 |
-| dos_cve_2017_0782_bnep_underflow | CVE-2017-0782 | BNEP | :material-alert-circle:{ .critical } Critical | BNEP integer underflow via Filter Net Type Set with list_len=0xFFFF |
-| dos_cve_2022_39177_avdtp_setconf | CVE-2022-39177 | AVDTP | :material-alert:{ .high } High | Malformed AVDTP SET_CONFIGURATION with invalid MEDIA_CODEC capability length |
-| dos_cve_2023_27349_avrcp_event | CVE-2023-27349 | AVRCP | :material-alert-circle:{ .critical } Critical | REGISTER_NOTIFICATION with out-of-range event ID (0x0E); crashes bluetoothd |
-| dos_cve_2025_0084_sdp_race | CVE-2025-0084 | SDP | :material-alert:{ .high } High | SDP service search race condition via double SDP connection |
-| dos_cve_2025_48593_hfp_reconnect | CVE-2025-48593 | HFP | :material-alert:{ .high } High | HFP callback init UAF on rapid RFCOMM reconnect (requires existing bond) |
-| dos_l2ping_flood | -- | L2CAP | :material-information:{ .low } Low | L2CAP Echo Request flood |
-| dos_pair_flood | -- | Pairing | :material-alert-outline:{ .medium } Medium | Rapid pairing request flood |
-| dos_name_flood | -- | Classic | :material-information:{ .low } Low | Oversized/rapid remote name request flood |
-| dos_rate_test | -- | Classic | :material-information:{ .info } Info | Rate limiting detection (baseline measurement) |
+| cve_2017_0781_bnep_heap | CVE-2017-0781 | BNEP | :material-alert-circle:{ .critical } Critical | BNEP heap overflow via oversized control frame with uuid_size=0x10 |
+| cve_2017_0782_bnep_underflow | CVE-2017-0782 | BNEP | :material-alert-circle:{ .critical } Critical | BNEP integer underflow via Filter Net Type Set with list_len=0xFFFF |
+| cve_2022_39177_avdtp_setconf | CVE-2022-39177 | AVDTP | :material-alert:{ .high } High | Malformed AVDTP SET_CONFIGURATION with invalid MEDIA_CODEC capability length |
+| cve_2023_27349_avrcp_event | CVE-2023-27349 | AVRCP | :material-alert-circle:{ .critical } Critical | REGISTER_NOTIFICATION with out-of-range event ID (0x0E); crashes bluetoothd |
+| cve_2025_0084_sdp_race | CVE-2025-0084 | SDP | :material-alert:{ .high } High | SDP service search race condition via double SDP connection |
+| cve_2025_48593_hfp_reconnect | CVE-2025-48593 | HFP | :material-alert:{ .high } High | HFP callback init UAF on rapid RFCOMM reconnect (requires existing bond) |
+| l2ping_flood | -- | L2CAP | :material-information:{ .low } Low | L2CAP Echo Request flood |
+| pair_flood | -- | Pairing | :material-alert-outline:{ .medium } Medium | Rapid pairing request flood |
+| name_flood | -- | Classic | :material-information:{ .low } Low | Oversized/rapid remote name request flood |
+| rate_test | -- | Classic | :material-information:{ .info } Info | Rate limiting detection (baseline measurement) |
 
 ## BLE Checks (2)
 
@@ -30,8 +30,8 @@ These target BLE (Bluetooth Low Energy) SoC firmware, primarily from the SweynTo
 
 | Check ID | CVE | Protocol | Severity | Description |
 |----------|-----|----------|----------|-------------|
-| dos_cve_2019_19192_att_deadlock | CVE-2019-19192 | BLE ATT | :material-alert:{ .high } High | SweynTooth ATT sequential deadlock via duplicate MTU exchange + abrupt disconnect |
-| dos_cve_2019_19196_key_size | CVE-2019-19196 | BLE SMP | :material-alert:{ .high } High | SweynTooth key size overflow via SM_Pairing_Request with max_key_size=253 |
+| cve_2019_19192_att_deadlock | CVE-2019-19192 | BLE ATT | :material-alert:{ .high } High | SweynTooth ATT sequential deadlock via duplicate MTU exchange + abrupt disconnect |
+| cve_2019_19196_key_size | CVE-2019-19196 | BLE SMP | :material-alert:{ .high } High | SweynTooth key size overflow via SM_Pairing_Request with max_key_size=253 |
 
 ## Raw ACL Checks (1)
 
@@ -39,7 +39,7 @@ These operate below the L2CAP layer, injecting malformed ACL fragments directly.
 
 | Check ID | CVE | Protocol | Severity | Description |
 |----------|-----|----------|----------|-------------|
-| dos_cve_2020_0022_bluefrag | CVE-2020-0022 | Raw ACL | :material-alert-circle:{ .critical } Critical | BlueFrag fragmentation boundary crash (requires DarkFirmware adapter) |
+| cve_2020_0022_bluefrag | CVE-2020-0022 | Raw ACL | :material-alert-circle:{ .critical } Critical | BlueFrag fragmentation boundary crash (requires DarkFirmware adapter) |
 
 ## Protocol Checks (17)
 
@@ -47,22 +47,22 @@ These are protocol-level stress tests that target common implementation weakness
 
 | Check ID | CVE | Protocol | Severity | Description |
 |----------|-----|----------|----------|-------------|
-| dos_hfp_at_flood | -- | HFP | :material-alert-outline:{ .medium } Medium | AT command flood over established HFP connection |
-| dos_hfp_slc_confuse | -- | HFP | :material-alert-outline:{ .medium } Medium | SLC renegotiation loop (Service Level Connection state confusion) |
-| dos_l2cap_cid_exhaust | -- | L2CAP | :material-alert-outline:{ .medium } Medium | Channel ID exhaustion via rapid L2CAP connection requests |
-| dos_l2cap_data_flood | -- | L2CAP | :material-alert-outline:{ .medium } Medium | Data packet flood on established L2CAP channel |
-| dos_l2cap_storm | -- | L2CAP | :material-alert-outline:{ .medium } Medium | Configuration option bomb (repeated CONF_REQ with unusual options) |
-| dos_lmp_detach_flood | -- | LMP | :material-alert:{ .high } High | LMP_DETACH flood (requires DarkFirmware for LMP injection) |
-| dos_lmp_encryption_toggle | -- | LMP | :material-alert:{ .high } High | Rapid encryption on/off toggle via LMP |
-| dos_lmp_features_flood | -- | LMP | :material-alert-outline:{ .medium } Medium | LMP features request flood |
-| dos_lmp_invalid_opcode | -- | LMP | :material-alert:{ .high } High | Invalid LMP opcode injection |
-| dos_lmp_switch_storm | -- | LMP | :material-alert:{ .high } High | Role switch storm via rapid LMP role-switch requests |
-| dos_lmp_timing_flood | -- | LMP | :material-alert-outline:{ .medium } Medium | Timing accuracy request flood |
-| dos_obex_connect_flood | -- | OBEX | :material-information:{ .low } Low | OBEX CONNECT request flood |
-| dos_rfcomm_mux_flood | -- | RFCOMM | :material-alert-outline:{ .medium } Medium | RFCOMM multiplexer flood |
-| dos_rfcomm_sabm_flood | -- | RFCOMM | :material-alert-outline:{ .medium } Medium | RFCOMM SABM (Set Asynchronous Balanced Mode) flood |
-| dos_sdp_continuation | -- | SDP | :material-alert-outline:{ .medium } Medium | SDP continuation state exhaustion (also CVE-2021-41229 attribution) |
-| dos_sdp_des_bomb | -- | SDP | :material-alert-outline:{ .medium } Medium | Nested Data Element Sequence bomb (deeply recursive DES structure) |
+| hfp_at_flood | -- | HFP | :material-alert-outline:{ .medium } Medium | AT command flood over established HFP connection |
+| hfp_slc_confuse | -- | HFP | :material-alert-outline:{ .medium } Medium | SLC renegotiation loop (Service Level Connection state confusion) |
+| l2cap_cid_exhaust | -- | L2CAP | :material-alert-outline:{ .medium } Medium | Channel ID exhaustion via rapid L2CAP connection requests |
+| l2cap_data_flood | -- | L2CAP | :material-alert-outline:{ .medium } Medium | Data packet flood on established L2CAP channel |
+| l2cap_storm | -- | L2CAP | :material-alert-outline:{ .medium } Medium | Configuration option bomb (repeated CONF_REQ with unusual options) |
+| lmp_detach_flood | -- | LMP | :material-alert:{ .high } High | LMP_DETACH flood (requires DarkFirmware for LMP injection) |
+| lmp_encryption_toggle | -- | LMP | :material-alert:{ .high } High | Rapid encryption on/off toggle via LMP |
+| lmp_features_flood | -- | LMP | :material-alert-outline:{ .medium } Medium | LMP features request flood |
+| lmp_invalid_opcode | -- | LMP | :material-alert:{ .high } High | Invalid LMP opcode injection |
+| lmp_switch_storm | -- | LMP | :material-alert:{ .high } High | Role switch storm via rapid LMP role-switch requests |
+| lmp_timing_flood | -- | LMP | :material-alert-outline:{ .medium } Medium | Timing accuracy request flood |
+| obex_connect_flood | -- | OBEX | :material-information:{ .low } Low | OBEX CONNECT request flood |
+| rfcomm_mux_flood | -- | RFCOMM | :material-alert-outline:{ .medium } Medium | RFCOMM multiplexer flood |
+| rfcomm_sabm_flood | -- | RFCOMM | :material-alert-outline:{ .medium } Medium | RFCOMM SABM (Set Asynchronous Balanced Mode) flood |
+| sdp_continuation | -- | SDP | :material-alert-outline:{ .medium } Medium | SDP continuation state exhaustion (also CVE-2021-41229 attribution) |
+| sdp_des_bomb | -- | SDP | :material-alert-outline:{ .medium } Medium | Nested Data Element Sequence bomb (deeply recursive DES structure) |
 
 !!! info "LMP-level checks"
     LMP-level checks require a DarkFirmware-capable adapter (typically `hci1`) for below-HCI injection. See [Hardware Compatibility](../reference/hardware-compatibility.md).
@@ -122,11 +122,11 @@ Default recovery timeout: **180 seconds**. If the target does not recover within
 
 | Requirement | Checks Affected |
 |-------------|-----------------|
-| DarkFirmware adapter | dos_cve_2020_0022_bluefrag, dos_lmp_* (6 checks) |
-| Existing bond / pairing | dos_cve_2025_48593_hfp_reconnect |
-| Target supports HFP | dos_hfp_at_flood, dos_hfp_slc_confuse |
-| Target supports A2DP/AVDTP | dos_cve_2022_39177_avdtp_setconf |
-| Target supports AVRCP | dos_cve_2023_27349_avrcp_event |
+| DarkFirmware adapter | cve_2020_0022_bluefrag, lmp_* (6 checks) |
+| Existing bond / pairing | cve_2025_48593_hfp_reconnect |
+| Target supports HFP | hfp_at_flood, hfp_slc_confuse |
+| Target supports A2DP/AVDTP | cve_2022_39177_avdtp_setconf |
+| Target supports AVRCP | cve_2023_27349_avrcp_event |
 
 ---
 
@@ -137,7 +137,7 @@ Default recovery timeout: **180 seconds**. If the target does not recover within
 sudo blue-tap dos TARGET --yes
 
 # Run specific checks
-sudo blue-tap dos TARGET --checks dos_cve_2020_0022_bluefrag,dos_cve_2022_39177_avdtp_setconf --yes
+sudo blue-tap dos TARGET --checks cve_2020_0022_bluefrag,cve_2022_39177_avdtp_setconf --yes
 
 # Custom recovery timeout
 sudo blue-tap dos TARGET --recovery-timeout 60 --yes
@@ -156,25 +156,25 @@ $ sudo blue-tap dos AA:BB:CC:DD:EE:FF --yes
  DoS Assessment  Target: AA:BB:CC:DD:EE:FF  Adapter: hci0
  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
- [1/30] dos_cve_2017_0781_bnep_heap (CVE-2017-0781)
+ [1/30] cve_2017_0781_bnep_heap (CVE-2017-0781)
         Sending BNEP control frame with uuid_size=0x10...
         Target unresponsive after trigger
         Waiting for recovery... 12s elapsed
         Target recovered (L2CAP ping success)
         Result: recovered (12.4s downtime)
 
- [2/30] dos_cve_2017_0782_bnep_underflow (CVE-2017-0782)
+ [2/30] cve_2017_0782_bnep_underflow (CVE-2017-0782)
         Sending BNEP Filter Net Type Set with list_len=0xFFFF...
         Target responsive after trigger
         Result: success (target survived)
 
- [3/30] dos_cve_2022_39177_avdtp_setconf (CVE-2022-39177)
+ [3/30] cve_2022_39177_avdtp_setconf (CVE-2022-39177)
         Skipped: target does not advertise A2DP service
         Result: not_applicable
 
  ...
 
- [7/30] dos_lmp_detach_flood
+ [7/30] lmp_detach_flood
         Skipped: DarkFirmware adapter not available
         Result: not_applicable
 
@@ -190,5 +190,5 @@ $ sudo blue-tap dos AA:BB:CC:DD:EE:FF --yes
   error:           1
 
   Total runtime: 847.2s
-  Worst recovery: 142.8s (dos_l2cap_cid_exhaust)
+  Worst recovery: 142.8s (l2cap_cid_exhaust)
 ```

@@ -27,15 +27,15 @@ sudo blue-tap -s mysession run-playbook --playbook ivi-triage.yaml
 sudo blue-tap -s mysession run-playbook --playbook quick-recon
 
 # Run an inline sequence (positional args, one per command)
-sudo blue-tap -s mysession run-playbook "discover classic -d 10" "vulnscan TARGET"
+sudo blue-tap -s mysession run-playbook "discover classic -d 10" "vulnscan {target}"
 
 # List bundled playbooks
 sudo blue-tap run-playbook --list
 ```
 
-The `TARGET` placeholder (uppercase, no braces) is replaced with the device MAC at runtime. If a step contains `TARGET` and no target is set in the session, you'll be prompted to pick one from the discovery results.
+Placeholders inside commands are substituted at runtime: `{target}` (or the legacy bare `TARGET`) is replaced with the device MAC, and `{hci}` is replaced with the adapter selected via the root `--hci` flag. If a step references the target and none is set in the session, you'll be prompted to pick one from the most recent discovery.
 
-There is no `--target`, `--inline`, `--dry-run`, `--yes`, `--stop-on-error`, or `--hci` flag on `run-playbook`. The session (`-s`) and adapter (`--hci`) flags belong to the root `blue-tap` command and apply to every step.
+To preview a playbook without touching hardware, prefix the root command with `--dry-run` (or set `BLUE_TAP_DRY_RUN=1`). Every step is dispatched with the dry-run flag inherited from the parent context, so the runner prints the resolved plan for each step and exits cleanly — destructive steps are previewed without their `--yes` / CONFIRM gate. There is no `--target`, `--inline`, `--yes`, or `--stop-on-error` flag on `run-playbook` itself; the session (`-s`), adapter (`--hci`), and `--dry-run` flags belong to the root `blue-tap` command and apply to every step.
 
 ---
 
@@ -68,19 +68,19 @@ steps:
   - command: discover classic -d 15
     description: Find nearby Classic Bluetooth devices (IVIs are typically Classic)
 
-  - command: recon TARGET sdp
+  - command: recon {target} sdp
     description: Enumerate all SDP services and check for unauthenticated access
 
-  - command: recon TARGET l2cap
+  - command: recon {target} l2cap
     description: Scan L2CAP PSMs including hidden vendor-specific channels
 
-  - command: recon TARGET rfcomm
+  - command: recon {target} rfcomm
     description: Scan RFCOMM channels for open serial ports
 
-  - command: recon TARGET fingerprint
+  - command: recon {target} fingerprint
     description: Identify chipset vendor, firmware version, and BT capabilities
 
-  - command: vulnscan TARGET
+  - command: vulnscan {target}
     description: Run all registered CVE and vulnerability checks
 ```
 
@@ -113,14 +113,14 @@ steps:
   - command: discover classic -d 10
     description: Find nearby Classic Bluetooth devices
 
-  - command: recon TARGET sdp
+  - command: recon {target} sdp
     description: Enumerate SDP services
 
-  - command: vulnscan TARGET
+  - command: vulnscan {target}
     description: Run vulnerability checks
 
   - module: reconnaissance.campaign
-    args: TARGET
+    args: "{target}"
     description: Full reconnaissance campaign
 ```
 
@@ -157,10 +157,10 @@ One command per line, no metadata:
 
 ```
 discover classic -d 10
-recon TARGET sdp
-recon TARGET l2cap
-recon TARGET rfcomm
-vulnscan TARGET
+recon {target} sdp
+recon {target} l2cap
+recon {target} rfcomm
+vulnscan {target}
 ```
 
 Lines starting with `#` are comments. Empty lines are ignored.
@@ -174,13 +174,18 @@ Lines starting with `#` are comments. Empty lines are ignored.
 
 | Placeholder | Resolves to |
 |-------------|-------------|
-| `TARGET` | Selected target device MAC address (prompted if not set) |
+| `{target}` | Selected target device MAC address (prompted if not set) |
+| `{hci}` | Adapter selected via the root `--hci` flag (e.g. `hci0`) |
+| `TARGET` | Legacy synonym for `{target}` -- bare token, matched on word boundary |
 
-`TARGET` is a literal token matched on word boundary -- use it bare, not as `{TARGET}` or `${TARGET}`.
+The bundled playbooks use `{target}` and `{hci}` -- prefer this form for new playbooks. `TARGET` (uppercase, no braces) remains supported for compatibility with older files.
 
 ```yaml
-- command: recon TARGET sdp
+- command: recon {target} sdp
   # Becomes: recon AA:BB:CC:DD:EE:FF sdp
+
+- command: vulnscan {target} -a {hci}
+  # Becomes: vulnscan AA:BB:CC:DD:EE:FF -a hci0
 ```
 
 ---
@@ -200,6 +205,9 @@ Current bundle:
 | `quick-recon` | Fast non-destructive reconnaissance pass |
 | `passive-recon` | Listen-only discovery and BLE advertising capture |
 | `full-assessment` | Discovery + recon + vulnerability scan |
+| `ble-assessment` | BLE-only sweep -- advertisement scan, GATT enumeration, BLE CVE checks |
+| `dos-campaign` | Discovery + vulnscan + full DoS check series (intrusive -- requires `--yes`) |
+| `post-exploit-data` | Post-pairing extraction: PBAP, MAP, OBEX file system, AT channel |
 | `ivi-attack` | Automotive IVI exploitation chain (intrusive -- requires authorization) |
 | `lmp-fuzzing` | LMP-layer fuzzing campaign (requires DarkFirmware) |
 
@@ -220,8 +228,8 @@ For one-off sequences you don't want to commit to a file:
 ```bash
 sudo blue-tap -s adhoc run-playbook \
     "discover classic -d 10" \
-    "recon TARGET sdp" \
-    "vulnscan TARGET"
+    "recon {target} sdp" \
+    "vulnscan {target}"
 ```
 
 Each positional argument is parsed with `shlex.split` and dispatched as a separate `blue-tap` invocation. The session captures every step's envelope, so you can still run `blue-tap report` afterwards.
@@ -241,14 +249,14 @@ duration: ~45 minutes
 risk: high
 steps:
   - command: discover classic -d 15
-  - command: recon TARGET sdp
-  - command: recon TARGET l2cap
-  - command: recon TARGET rfcomm
-  - command: recon TARGET fingerprint
-  - command: vulnscan TARGET --active
-  - command: exploit TARGET ssp-downgrade --method probe
-  - command: fuzz campaign TARGET -p sdp -p rfcomm --duration 30m
-  - command: dos TARGET --recovery-timeout 30
+  - command: recon {target} sdp
+  - command: recon {target} l2cap
+  - command: recon {target} rfcomm
+  - command: recon {target} fingerprint
+  - command: vulnscan {target} --active
+  - command: exploit {target} ssp-downgrade --method probe
+  - command: fuzz campaign {target} -p sdp -p rfcomm --duration 30m
+  - command: dos {target} --recovery-timeout 30
 ```
 
 ```bash
@@ -269,10 +277,10 @@ description: >
 duration: ~10 minutes
 risk: high
 steps:
-  - command: extract TARGET contacts --all
-  - command: extract TARGET messages
-  - command: extract TARGET audio --action record -d 120
-  - command: extract TARGET data
+  - command: extract {target} contacts --all
+  - command: extract {target} messages
+  - command: extract {target} audio --action record -d 120
+  - command: extract {target} snarf
 ```
 
 ```bash

@@ -23,11 +23,8 @@ Entry point: `blue-tap = blue_tap.interfaces.cli.main:main`
     - `search`, `info`, `show-options`, `plugins`
 
     Anything not on this list needs `sudo` and a plugged-in RTL8761B
-    dongle. (Prior to v2.6.3 the two gates had drifted: the hardware
-    gate was loosened for `report` / `fuzz crashes` / `run-playbook
-    --list`, but the root gate wasn't, so those paths still demanded
-    `sudo` despite never touching hardware. v2.6.3 collapses the two
-    skip-sets so the gates always agree.)
+    dongle. The root and hardware gates share a single skip-set, so the
+    no-root list and the no-hardware list are always identical.
 
 ---
 
@@ -63,6 +60,8 @@ blue-tap report --format html             # 6. Generate assessment report
 |------|------|---------|-------------|
 | `-v, --verbose` | count | `0` | `-v` = verbose, `-vv` = debug |
 | `-s, --session` | string | auto | Session name (auto: `blue-tap_YYYYMMDD_HHMMSS`) |
+| `--config` | path | --- | Path to a TOML config file (overrides `~/.config/blue-tap/config.toml` and `$BLUE_TAP_CONFIG`) |
+| `--dry-run` | flag | --- | Print the resolved plan and exit without touching hardware or sending packets. Honored by every subcommand; bypasses destructive `CONFIRM=yes` gates and skips session writes. Equivalent to `BLUE_TAP_DRY_RUN=1`. |
 | `--version` | flag | --- | Show version and exit |
 
 !!! tip "Sessions"
@@ -272,15 +271,15 @@ blue-tap dos [TARGET]
 
 | Check ID | CVE | Protocol |
 |----------|-----|----------|
-| `dos_cve_2020_0022` | CVE-2020-0022 | Raw ACL (DarkFirmware) |
-| `dos_cve_2017_0781` | CVE-2017-0781 | BNEP heap overflow |
-| `dos_cve_2017_0782` | CVE-2017-0782 | BNEP underflow |
-| `dos_cve_2019_19192` | CVE-2019-19192 | BLE ATT deadlock |
-| `dos_cve_2019_19196` | CVE-2019-19196 | BLE SMP key overflow |
-| `dos_cve_2022_39177` | CVE-2022-39177 | AVDTP SETCONF crash |
-| `dos_cve_2023_27349` | CVE-2023-27349 | AVRCP event OOB |
-| `dos_cve_2025_0084` | CVE-2025-0084 | SDP race condition |
-| `dos_cve_2025_48593` | CVE-2025-48593 | HFP reconnect race |
+| `cve_2020_0022_bluefrag` | CVE-2020-0022 | Raw ACL (DarkFirmware) |
+| `cve_2017_0781_bnep_heap` | CVE-2017-0781 | BNEP heap overflow |
+| `cve_2017_0782_bnep_underflow` | CVE-2017-0782 | BNEP underflow |
+| `cve_2019_19192_att_deadlock` | CVE-2019-19192 | BLE ATT deadlock |
+| `cve_2019_19196_key_size` | CVE-2019-19196 | BLE SMP key overflow |
+| `cve_2022_39177_avdtp_setconf` | CVE-2022-39177 | AVDTP SETCONF crash |
+| `cve_2023_27349_avrcp_event` | CVE-2023-27349 | AVRCP event OOB |
+| `cve_2025_0084_sdp_race` | CVE-2025-0084 | SDP race condition |
+| `cve_2025_48593_hfp_reconnect` | CVE-2025-48593 | HFP reconnect race |
 
 **Protocol stress tests (21):** L2CAP (storm, CID exhaust, data flood, l2ping), SDP (continuation, DES bomb), RFCOMM (SABM, mux), OBEX (session flood), HFP (AT flood, SLC confusion), LMP (detach, switch, features, opcode, encryption, timing), Pairing (pair flood, name flood, rate test).
 
@@ -587,9 +586,10 @@ blue-tap run-playbook [COMMANDS...]
     sudo blue-tap run-playbook --playbook ivi-attack 4C:4F:EE:17:3A:89
     ```
 
-    Bundled playbook names (resolved without a path): `full-assessment`,
-    `ivi-attack`, `lmp-fuzzing`, `passive-recon`, `quick-recon`. `--list`
-    walks the on-disk playbook directory only and skips both the root and
+    Bundled playbook names (resolved without a path): `ble-assessment`,
+    `dos-campaign`, `full-assessment`, `ivi-attack`, `lmp-fuzzing`,
+    `passive-recon`, `post-exploit-data`, `quick-recon`. `--list` walks
+    the on-disk playbook directory only and skips both the root and
     RTL8761B gates; running an actual playbook still needs `sudo` and a
     dongle for the live steps inside it.
 

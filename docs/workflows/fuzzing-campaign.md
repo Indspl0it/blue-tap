@@ -308,19 +308,7 @@ $ sudo blue-tap fuzz crashes export --format json -o crashes.json
 [+] Written to crashes.json (4.2 KB)
 ```
 
-```bash
-$ sudo blue-tap fuzz crashes export --format pcap -o crashes.pcap
-[*] Exporting 3 crash packets to PCAP...
-[+] Written to crashes.pcap (1.1 KB)
-```
-
-**What happened:** Crash data exported in two formats. JSON includes full metadata (timestamps, severity, analysis, reproduction status). PCAP includes just the triggering packets, openable in Wireshark for protocol-level inspection.
-
-| Format | Use case |
-|--------|----------|
-| `json` | Programmatic analysis, integration with other tools, report appendix |
-| `csv` | Spreadsheet review, sorting/filtering |
-| `pcap` | Wireshark analysis, sharing with the vendor for debugging |
+**What happened:** All discovered crashes are serialised to a single JSON document — full metadata (timestamps, severity, analysis, reproduction status, the triggering payload as hex), suitable for programmatic analysis, integration with other tools, and report appendices. The triggering bytes are embedded in the JSON; if you need a Wireshark-readable view of the live exchange, capture with `recon TARGET capture` during the campaign.
 
 ---
 

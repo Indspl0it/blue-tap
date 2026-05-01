@@ -230,13 +230,13 @@ When `--method auto` (the default), Blue-Tap tries methods in this order and sto
 Before any spoofing attempt, Blue-Tap saves the adapter's original MAC to `~/.blue_tap_original_mac.json`. This allows restoring the original address later:
 
 ```bash
-# Restore original MAC
-$ sudo blue-tap spoof --restore --hci hci0
-[*] Restoring original MAC for hci0: 11:22:33:44:55:66
-[+] MAC restored to 11:22:33:44:55:66
+# Restore the original MAC of an RTL8761B adapter (DarkFirmware path)
+$ sudo blue-tap adapter firmware-spoof --restore --hci hci0
+[*] Restoring original BDADDR for hci0: 11:22:33:44:55:66
+[+] BDADDR restored to 11:22:33:44:55:66
 ```
 
-The backup file is per-adapter (keyed by HCI name), so multiple adapters can be spoofed independently.
+For host-side spoofing on non-RTL8761B adapters, run `sudo blue-tap spoof <ORIGINAL_MAC> --hci hci0` to write the original address back. The backup file is per-adapter (keyed by HCI name), so multiple adapters can be spoofed independently.
 
 ---
 

