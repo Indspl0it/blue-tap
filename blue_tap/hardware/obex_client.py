@@ -9,10 +9,13 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 import os
 import tempfile
 import time
 from typing import Any, Callable
+
+logger = logging.getLogger(__name__)
 
 
 OBEX_SERVICE = "org.bluez.obex"
@@ -27,16 +30,31 @@ DBUS_PROPERTIES = "org.freedesktop.DBus.Properties"
 
 
 def run_async(coro):
-    """Run an async coroutine from sync code."""
+    """Run an async coroutine from sync code.
+
+    Guarantees ``coro`` is either awaited or explicitly closed. The threaded
+    fallback (used when called from inside a running event loop) can race
+    against pytest gc — if the worker raises before scheduling
+    ``asyncio.run(coro)``, the coroutine leaks and Python eventually emits a
+    ``RuntimeWarning: coroutine '...' was never awaited`` against whichever
+    unrelated test was running at gc time. ``finally: coro.close()`` is a
+    no-op on already-consumed coroutines and safe to call unconditionally.
+    """
     try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(coro)
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(coro)
 
-    import concurrent.futures
+        import concurrent.futures
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(asyncio.run, coro).result()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, coro).result()
+    finally:
+        try:
+            coro.close()
+        except (RuntimeError, AttributeError):
+            pass
 
 
 def variant_to_python(value):
@@ -84,12 +102,27 @@ class ObexSession:
         self.session_path: str | None = None
         self.session_props: dict[str, Any] = {}
 
-    def connect(self) -> bool:
+    def connect(self, *, timeout: float = 30.0) -> bool:
+        """Establish the OBEX session.
+
+        Args:
+            timeout: Maximum seconds to wait for ``call_create_session`` and
+                property reads. The BlueZ daemon can stall indefinitely on a
+                broken phone — without a timeout the entire CLI hangs.
+
+        Raises:
+            ObexError: on connection failure or timeout.
+        """
         try:
-            run_async(self._async_connect())
+            run_async(self._async_connect_with_timeout(timeout))
             return True
+        except asyncio.TimeoutError as exc:
+            raise ObexError(f"OBEX session connect timed out after {timeout}s") from exc
         except Exception as exc:
             raise ObexError(f"OBEX session connect failed: {exc}") from exc
+
+    async def _async_connect_with_timeout(self, timeout: float) -> None:
+        await asyncio.wait_for(self._async_connect(), timeout=timeout)
 
     async def _async_connect(self):
         self._bus = await self._create_bus()
@@ -109,10 +142,20 @@ class ObexSession:
     def disconnect(self):
         if not self._bus or not self.session_path:
             return
+        # Capture the coroutine in a local so we can close it explicitly if
+        # ``run_async`` raises before awaiting (e.g. dbus-fast is gone, or the
+        # threaded fallback fails to schedule). Without this, Python tags the
+        # never-awaited coroutine to whichever test happens to be running at
+        # gc time — see the equivalent guard inside ``run_async``.
+        coro = self._async_disconnect()
         try:
-            run_async(self._async_disconnect())
-        except Exception:
-            pass
+            run_async(coro)
+        except Exception as exc:
+            logger.debug("OBEX disconnect error (session already gone?): %s", exc)
+            try:
+                coro.close()
+            except (RuntimeError, AttributeError):
+                pass
         finally:
             self.session_path = None
             self.session_props = {}

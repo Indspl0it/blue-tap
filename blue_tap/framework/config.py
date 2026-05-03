@@ -17,16 +17,28 @@ Resolution order (first hit wins):
 If no file is found, ``load_config()`` returns ``None`` and the rest of the
 CLI behaves exactly as before this loader was introduced.
 
-Schema (v2.6.5 — minimal):
+Schema:
 
     [default]
     hci = "hci0"
     session = "main"
 
-Only ``[default]`` keys ``hci`` and ``session`` are recognised. Any other key
-is rejected with a clear validation error so typos don't silently land. The
-schema will grow in v2.7.x to cover per-subcommand sections (``[fuzz]``,
-``[report]``, etc.) as the rest of the CLI surface stabilises.
+    [fuzz]
+    seed = "12345"
+
+    [fuzz.run]
+    verbose = "true"
+
+``[default]`` accepts only ``hci`` and ``session`` (root-level options Click
+parses before the subcommand). Per-subcommand sections (``[fuzz]``,
+``[fuzz.run]``, ``[report]``, ``[recon.sdp]``, …) accept any option name
+declared on the matching Click command. Section names use TOML's nested-
+table syntax: ``[fuzz.run]`` overrides options on ``blue-tap fuzz run``.
+
+Unknown sections (no matching subcommand) and unknown keys (option not on
+the matched command) raise :class:`ConfigError` so a typo never silently
+disables an override. CLI flags still beat config values via Click's normal
+flag/default precedence.
 """
 
 from __future__ import annotations
@@ -60,10 +72,16 @@ class ConfigError(Exception):
 
 @dataclass
 class BlueTapConfig:
-    """Parsed and validated TOML config."""
+    """Parsed and validated TOML config.
+
+    ``default`` holds root-level options (``[default]``). ``sections`` holds
+    per-subcommand option overrides keyed by dotted Click path — e.g. the
+    TOML section ``[fuzz.run]`` becomes ``sections["fuzz.run"]``.
+    """
 
     source_path: str = ""
     default: dict[str, str] = field(default_factory=dict)
+    sections: dict[str, dict[str, str]] = field(default_factory=dict)
 
 
 # ── Path resolution ──────────────────────────────────────────────────────
@@ -99,11 +117,18 @@ def resolve_config_path(explicit: str | None = None) -> str | None:
 # ── Loader ───────────────────────────────────────────────────────────────
 
 
-def load_config(explicit: str | None = None) -> BlueTapConfig | None:
-    """Resolve and load the user's TOML config, or return ``None`` if absent.
+def load_config(explicit: str | None = None, *, cli_root=None) -> BlueTapConfig | None:
+    """Resolve, parse, and fully validate the user's TOML config.
 
     Args:
         explicit: Path passed via ``--config`` (highest precedence).
+        cli_root: Click root command. When provided, every per-subcommand
+            section and key is cross-checked against the actual CLI tree so
+            typos fail loudly here rather than silently doing nothing later.
+            When omitted, only ``[default]`` is strictly validated; non-default
+            sections are rejected loudly because we cannot tell whether they
+            are typos without the tree. Library callers without a CLI tree
+            should restrict their configs to ``[default]`` keys.
 
     Returns:
         ``BlueTapConfig`` on success, ``None`` when no file is found.
@@ -130,41 +155,157 @@ def load_config(explicit: str | None = None) -> BlueTapConfig | None:
         raise ConfigError(f"Cannot read config {path!r}: {exc}") from exc
 
     cfg = BlueTapConfig(source_path=path)
-    _validate_and_assign(raw, cfg)
+    _validate_and_assign(raw, cfg, cli_root=cli_root)
     logger.info(
         "Loaded blue-tap config",
-        extra={"path": path, "default": cfg.default},
+        extra={"path": path, "default": cfg.default, "sections": list(cfg.sections)},
     )
     return cfg
 
 
-def _validate_and_assign(raw: dict, cfg: BlueTapConfig) -> None:
-    """Validate ``raw`` against the schema and copy values into ``cfg``."""
-    for section_name, section_value in raw.items():
-        if section_name not in _ALLOWED_KEYS:
-            raise ConfigError(
-                f"Unknown config section [{section_name}] in {cfg.source_path!r}. "
-                f"Recognised sections: {sorted(_ALLOWED_KEYS)}"
-            )
-        if not isinstance(section_value, dict):
-            raise ConfigError(
-                f"Section [{section_name}] in {cfg.source_path!r} must be a "
-                f"table; got {type(section_value).__name__}"
-            )
-        allowed = _ALLOWED_KEYS[section_name]
+def _flatten_sections(raw: dict, prefix: str = "") -> dict[str, dict]:
+    """Flatten nested TOML tables into ``{"dotted.path": {key: scalar}}``.
+
+    A TOML file like::
+
+        [default]
+        hci = "hci0"
+
+        [fuzz]
+        seed = "12345"
+
+        [fuzz.run]
+        verbose = "true"
+
+    becomes::
+
+        {
+            "default": {"hci": "hci0"},
+            "fuzz": {"seed": "12345"},
+            "fuzz.run": {"verbose": "true"},
+        }
+
+    Scalars and nested tables can co-exist in the same TOML table; scalars are
+    collected at the current section path, nested tables are recursed into.
+    """
+    result: dict[str, dict] = {}
+    scalars: dict[str, Any] = {}
+    for key, value in raw.items():
+        if isinstance(value, dict):
+            child_path = f"{prefix}.{key}" if prefix else key
+            result.update(_flatten_sections(value, prefix=child_path))
+        else:
+            scalars[key] = value
+    if scalars:
+        result[prefix] = scalars
+    return result
+
+
+def _build_cmd_index(cli_root) -> dict[str, tuple[Any, dict[str, str]]]:
+    """Walk a Click tree once; return ``{dotted_path: (cmd, alias_map)}``.
+
+    The alias map for each command accepts the param's dest name (e.g. ``fmt``)
+    *and* the user-friendly flag-derived form (``--format`` → ``format``,
+    ``--my-flag`` → ``my_flag``); both keys map to the canonical dest.
+    """
+    import click as _click
+
+    def _aliases(cmd) -> dict[str, str]:
+        out: dict[str, str] = {}
+        for p in getattr(cmd, "params", []):
+            if not isinstance(p, _click.Option):
+                continue
+            out[p.name] = p.name
+            for flag in list(p.opts) + list(p.secondary_opts or []):
+                if flag.startswith("--"):
+                    out[flag[2:].replace("-", "_")] = p.name
+        return out
+
+    index: dict[str, tuple[Any, dict[str, str]]] = {}
+
+    def _walk(cmd, path: str = "") -> None:
+        index[path] = (cmd, _aliases(cmd))
+        if isinstance(cmd, _click.Group):
+            for sub_name, sub_cmd in cmd.commands.items():
+                child = f"{path}.{sub_name}" if path else sub_name
+                _walk(sub_cmd, child)
+
+    _walk(cli_root)
+    return index
+
+
+def _validate_and_assign(raw: dict, cfg: BlueTapConfig, *, cli_root=None) -> None:
+    """Validate ``raw`` and copy values into ``cfg``. Single source of truth.
+
+    ``[default]`` is validated against the static ``_ALLOWED_KEYS["default"]``
+    allow-list. Per-subcommand sections are validated against the Click tree
+    if ``cli_root`` is provided; otherwise they are rejected (we cannot tell
+    a typo from a real subcommand without the tree).
+    """
+    # Error messages quote section/key names rather than wrap them in
+    # ``[brackets]``. rich-click renders ConfigError text through Rich's
+    # markup parser, which interprets ``[fuzz]`` as a style tag and silently
+    # strips it — leaving operators staring at ``Unknown key .seed`` with no
+    # idea which section the loader meant.
+    flattened = _flatten_sections(raw)
+
+    if "" in flattened:
+        bad_keys = ", ".join(repr(k) for k in sorted(flattened[""].keys()))
+        raise ConfigError(
+            f"Top-level keys without a section in {cfg.source_path!r}: "
+            f"{bad_keys}. Put them under a section like 'default'."
+        )
+
+    cmd_index = _build_cmd_index(cli_root) if cli_root is not None else None
+
+    for section_name, section_value in flattened.items():
         for key, value in section_value.items():
-            if key not in allowed:
-                raise ConfigError(
-                    f"Unknown key [{section_name}].{key} in {cfg.source_path!r}. "
-                    f"Allowed keys for [{section_name}]: {sorted(allowed)}"
-                )
             if not isinstance(value, str):
                 raise ConfigError(
-                    f"[{section_name}].{key} in {cfg.source_path!r} must be a "
-                    f"string; got {type(value).__name__}"
+                    f"Key {key!r} in section {section_name!r} "
+                    f"(config {cfg.source_path!r}) must be a string; "
+                    f"got {type(value).__name__}"
                 )
+
         if section_name == "default":
+            allowed = _ALLOWED_KEYS["default"]
+            for key in section_value:
+                if key not in allowed:
+                    allowed_str = ", ".join(repr(k) for k in sorted(allowed))
+                    raise ConfigError(
+                        f"Unknown key {key!r} in section 'default' "
+                        f"(config {cfg.source_path!r}). "
+                        f"Allowed keys for 'default': {allowed_str}"
+                    )
             cfg.default.update(section_value)
+            continue
+
+        if cmd_index is None:
+            raise ConfigError(
+                f"Section {section_name!r} in {cfg.source_path!r} requires a "
+                "CLI tree to validate. Pass ``cli_root`` to ``load_config`` or "
+                "restrict the config to ``'default'``."
+            )
+
+        if section_name not in cmd_index:
+            available = ", ".join(repr(p) for p in sorted(p for p in cmd_index if p))
+            raise ConfigError(
+                f"Unknown config section {section_name!r} in {cfg.source_path!r}. "
+                f"No matching subcommand. Known subcommands: {available}"
+            )
+        _, aliases = cmd_index[section_name]
+        normalised: dict[str, str] = {}
+        for key, value in section_value.items():
+            if key not in aliases:
+                user_visible = sorted({k for k, v in aliases.items() if k != v} | set(aliases.values()))
+                user_visible_str = ", ".join(repr(k) for k in user_visible)
+                raise ConfigError(
+                    f"Unknown key {key!r} in section {section_name!r} "
+                    f"(config {cfg.source_path!r}). "
+                    f"Valid options for {section_name!r}: {user_visible_str}"
+                )
+            normalised[aliases[key]] = value  # canonical to dest at validation time
+        cfg.sections[section_name] = normalised
 
 
 # ── Click integration ────────────────────────────────────────────────────
@@ -173,10 +314,9 @@ def _validate_and_assign(raw: dict, cfg: BlueTapConfig) -> None:
 def build_default_map(cli_root, cfg: BlueTapConfig) -> dict:
     """Walk a Click command tree and produce a ``ctx.default_map`` payload.
 
-    For every option whose dest matches a config key (after the
-    ``_OPTION_NAME_TO_CONFIG_KEY`` aliasing pass), inject the config value at
-    the appropriate path in the returned nested dict. The structure mirrors
-    the Click subcommand tree so values flow naturally to nested groups.
+    Pure builder: ``cfg`` is assumed pre-validated by :func:`load_config`.
+    Section keys in ``cfg.sections`` are already normalised to Click dest
+    names there, so no alias resolution is needed at this layer.
 
     The resulting dict is suitable for assignment to ``ctx.default_map`` on
     the root click context.
@@ -185,27 +325,27 @@ def build_default_map(cli_root, cfg: BlueTapConfig) -> dict:
 
     default_map: dict = {}
 
-    def _options_for(cmd) -> dict[str, str]:
-        """Return ``{config_key: value}`` for every applicable option on ``cmd``."""
+    def _options_for(cmd, path: str) -> dict[str, str]:
         out: dict[str, str] = {}
         for param in getattr(cmd, "params", []):
             if not isinstance(param, _click.Option):
                 continue
             canonical = _OPTION_NAME_TO_CONFIG_KEY.get(param.name, param.name)
             if canonical in cfg.default:
-                # Click default_map keys are the param's *dest* (param.name),
-                # not the canonical config key — e.g. for the root ``-s``
-                # option the key is ``session_name``.
                 out[param.name] = cfg.default[canonical]
+        section_kv = cfg.sections.get(path)
+        if section_kv:
+            # Already normalised to dest names by _validate_and_assign.
+            out.update(section_kv)
         return out
 
-    def _walk(cmd, target: dict) -> None:
-        # Inject this command's option defaults at the current level.
-        target.update(_options_for(cmd))
+    def _walk(cmd, target: dict, path: str = "") -> None:
+        target.update(_options_for(cmd, path))
         if isinstance(cmd, _click.Group):
             for sub_name, sub_cmd in cmd.commands.items():
                 target.setdefault(sub_name, {})
-                _walk(sub_cmd, target[sub_name])
+                child = f"{path}.{sub_name}" if path else sub_name
+                _walk(sub_cmd, target[sub_name], child)
 
     _walk(cli_root, default_map)
     return default_map

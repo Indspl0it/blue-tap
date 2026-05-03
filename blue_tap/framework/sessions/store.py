@@ -80,10 +80,11 @@ def _atomic_write_bytes_or_text(filepath: str, content: str | bytes) -> None:
     if _USE_O_TMPFILE:
         try:
             fd = os.open(directory, os.O_TMPFILE | os.O_RDWR, 0o644)
-        except OSError:
+        except OSError as exc:
             # Filesystems without O_TMPFILE support (9p WSL mounts, some FUSE
             # backends, certain NFS configs) raise EOPNOTSUPP/EISDIR/ENOTSUP
             # at open. Fall through to the named-tmp path.
+            _logger.debug("O_TMPFILE unavailable on %s, using named tempfile: %s", directory, exc)
             fd = -1
         if fd >= 0:
             try:
@@ -93,10 +94,10 @@ def _atomic_write_bytes_or_text(filepath: str, content: str | bytes) -> None:
                 os.fsync(fd)
                 try:
                     os.link(f"/proc/self/fd/{fd}", tmp_path)
-                except OSError:
+                except OSError as exc:
                     # Some filesystems refuse the /proc-symlink linkat even
                     # when O_TMPFILE itself worked. Fall through.
-                    pass
+                    _logger.debug("O_TMPFILE link() refused on %s, using named tempfile: %s", directory, exc)
                 else:
                     try:
                         os.replace(tmp_path, filepath)

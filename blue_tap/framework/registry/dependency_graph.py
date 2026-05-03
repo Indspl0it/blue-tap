@@ -69,7 +69,12 @@ def get_dependencies(module_id: str) -> DependencyEdges:
 
 
 def reset_cache() -> None:
-    """Forget the cached graph. Used by tests; not part of the public surface."""
+    """Forget the cached graph; the next ``get_dependencies`` call rebuilds it.
+
+    Called by :class:`ModuleRegistry.register` / ``unregister`` so plugins
+    registered after the first graph build are not silently absent from the
+    dependency view. Also used directly by tests that mutate the registry.
+    """
     _cache.by_module.clear()
     _cache.built = False
 

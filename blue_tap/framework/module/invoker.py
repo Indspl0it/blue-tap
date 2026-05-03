@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import importlib
 import logging
+import signal
+import threading
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -13,6 +15,28 @@ if TYPE_CHECKING:
 from blue_tap.framework.registry import get_registry
 
 logger = logging.getLogger(__name__)
+
+
+class ModuleTimeout(Exception):
+    """Raised when ``Module.run()`` exceeds its descriptor's ``default_timeout``.
+
+    On the production path (Linux + main thread) this is delivered via
+    ``SIGALRM`` from inside the module's own call stack — ``finally`` blocks,
+    context managers, and ``Module.cleanup(ctx)`` all run normally as the
+    exception unwinds, so sockets/D-Bus connections are released.
+
+    The threaded-watchdog fallback (non-Linux, or invocation from a non-main
+    thread) cannot truly interrupt the worker — Python forbids forcibly
+    killing threads. In that mode the worker is abandoned (it remains a
+    daemon thread that will die with the process) and any resources it holds
+    leak until then. ``Invoker._run_with_timeout`` logs a warning when this
+    fallback is engaged so operators are not surprised.
+    """
+
+    def __init__(self, module_id: str, timeout: float) -> None:
+        self.module_id = module_id
+        self.timeout = timeout
+        super().__init__(f"Module {module_id!r} exceeded {timeout}s timeout")
 
 
 class ModuleNotFound(Exception):
@@ -189,8 +213,12 @@ class Invoker:
             return envelope
 
         ctx.emit_run_started()
+        timeout = float(desc.default_timeout or 0)
         try:
-            envelope = instance.run(ctx)
+            if timeout > 0:
+                envelope = _run_with_timeout(instance, ctx, module_id, timeout)
+            else:
+                envelope = instance.run(ctx)
             ctx.emit_run_completed()
             return envelope
         except Exception as e:
@@ -237,6 +265,86 @@ class Invoker:
                 logger.warning("Failed to log command: %s", e)
 
         return envelope
+
+
+def _can_use_sigalrm() -> bool:
+    """Return True iff SIGALRM-based timeout is available in the current context.
+
+    Requires: a Unix-like platform with SIGALRM, an importable ``setitimer``,
+    and the caller running on the main thread (signal handlers are
+    main-thread-only in CPython).
+    """
+    return (
+        hasattr(signal, "SIGALRM")
+        and hasattr(signal, "setitimer")
+        and threading.current_thread() is threading.main_thread()
+    )
+
+
+def _run_with_sigalrm(instance: Any, ctx: Any, module_id: str, timeout: float) -> dict:
+    """Run ``instance.run(ctx)`` under a SIGALRM-based timer.
+
+    On overrun the alarm handler raises :class:`ModuleTimeout` from inside
+    ``run``'s own call stack, so ``finally`` blocks, context managers, and
+    ``Module.cleanup(ctx)`` (invoked by the caller) all execute against the
+    correct frames and release resources.
+    """
+    def _on_alarm(signum, frame):
+        raise ModuleTimeout(module_id, timeout)
+
+    old_handler = signal.signal(signal.SIGALRM, _on_alarm)
+    # ``setitimer`` accepts sub-second precision; ``alarm`` does not.
+    signal.setitimer(signal.ITIMER_REAL, timeout)
+    try:
+        return instance.run(ctx)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old_handler)
+
+
+def _run_with_thread_watchdog(instance: Any, ctx: Any, module_id: str, timeout: float) -> dict:
+    """Fallback timeout for non-Linux or non-main-thread invocation.
+
+    Python cannot forcibly kill a thread, so on timeout the worker is left
+    as a daemon thread that will die with the process. Any sockets or
+    D-Bus connections it holds leak until then. A warning is logged so this
+    is visible.
+    """
+    logger.warning(
+        "Module %s: SIGALRM-based timeout unavailable in current context; "
+        "using thread watchdog (hung worker will leak resources until process exit)",
+        module_id,
+    )
+
+    holder: dict[str, Any] = {}
+
+    def _worker() -> None:
+        try:
+            holder["envelope"] = instance.run(ctx)
+        except BaseException as exc:  # noqa: BLE001 — propagate any failure mode
+            holder["exc"] = exc
+
+    worker = threading.Thread(
+        target=_worker,
+        name=f"blue-tap-module-{module_id}",
+        daemon=True,
+    )
+    worker.start()
+    worker.join(timeout)
+
+    if worker.is_alive():
+        raise ModuleTimeout(module_id, timeout)
+
+    if "exc" in holder:
+        raise holder["exc"]
+    return holder["envelope"]
+
+
+def _run_with_timeout(instance: Any, ctx: Any, module_id: str, timeout: float) -> dict:
+    """Dispatch to the strongest timeout mechanism available."""
+    if _can_use_sigalrm():
+        return _run_with_sigalrm(instance, ctx, module_id, timeout)
+    return _run_with_thread_watchdog(instance, ctx, module_id, timeout)
 
 
 def _build_planned_envelope(desc: Any, ctx: Any, raw_options: dict[str, Any]) -> dict:

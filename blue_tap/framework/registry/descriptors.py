@@ -42,6 +42,15 @@ class ModuleDescriptor:
     references: tuple[str, ...] = ()
     """External references (CVEs, RFCs, specifications) associated with the module."""
 
+    default_timeout: float = 0.0
+    """Maximum seconds for ``Module.run()``. ``0`` means no timeout (default).
+
+    Modules that talk to BlueZ, OBEX, or other inherently-stallable targets
+    should set this to a sensible bound (e.g. 300s). The :class:`Invoker`
+    enforces it via a watchdog thread; on timeout, ``run()`` is abandoned and
+    a ``ModuleTimeout`` is raised.
+    """
+
     def __post_init__(self) -> None:
         if not re.match(r"^[a-z0-9_]+\.[a-z0-9_]+$", self.module_id):
             raise ValueError(
@@ -59,3 +68,7 @@ class ModuleDescriptor:
             raise ValueError(f"protocols must be a tuple, got {type(self.protocols)}")
         if not isinstance(self.requires, tuple):
             raise ValueError(f"requires must be a tuple, got {type(self.requires)}")
+        if self.default_timeout < 0:
+            raise ValueError(
+                f"default_timeout must be >= 0 (0 disables), got {self.default_timeout}"
+            )

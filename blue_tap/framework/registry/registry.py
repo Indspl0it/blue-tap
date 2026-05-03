@@ -24,12 +24,17 @@ class ModuleRegistry:
             raise ValueError(f"Duplicate module_id: {descriptor.module_id!r}")
         self._modules[descriptor.module_id] = descriptor
         logger.debug("Registered module %s", descriptor.module_id)
+        # Invalidate the dependency graph; it will rebuild lazily on next read.
+        from blue_tap.framework.registry.dependency_graph import reset_cache
+        reset_cache()
 
     def unregister(self, module_id: str) -> bool:
         """Remove a module descriptor. Returns True if the id was present."""
         if module_id in self._modules:
             del self._modules[module_id]
             logger.debug("Unregistered module %s", module_id)
+            from blue_tap.framework.registry.dependency_graph import reset_cache
+            reset_cache()
             return True
         return False
 

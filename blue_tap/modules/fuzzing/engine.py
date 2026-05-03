@@ -418,9 +418,20 @@ class FuzzCampaign:
 
         self.dry_run = bool(dry_run)
         if self.dry_run:
-            if self.duration is None or self.duration > DRY_RUN_MAX_DURATION_SECONDS:
+            # Cap whichever limits the user actually chose. Forcing the safety
+            # default onto an unset limit makes seeded campaigns terminate on
+            # wall-clock instead of iteration count, which destroys
+            # reproducibility (same seed → different iteration count run-to-run).
+            user_set_duration = self.duration is not None
+            user_set_iterations = self.max_iterations is not None
+            if user_set_duration and self.duration > DRY_RUN_MAX_DURATION_SECONDS:
                 self.duration = DRY_RUN_MAX_DURATION_SECONDS
-            if self.max_iterations is None or self.max_iterations > DRY_RUN_MAX_ITERATIONS:
+            if user_set_iterations and self.max_iterations > DRY_RUN_MAX_ITERATIONS:
+                self.max_iterations = DRY_RUN_MAX_ITERATIONS
+            if not user_set_duration and not user_set_iterations:
+                # No upper bound at all — apply both safety defaults so dry-run
+                # cannot loop forever in CI.
+                self.duration = DRY_RUN_MAX_DURATION_SECONDS
                 self.max_iterations = DRY_RUN_MAX_ITERATIONS
         # Trajectory: when interval > 0, snapshot stats at most once per
         # interval inside the main loop. ``None`` / non-positive disables

@@ -56,7 +56,14 @@ def test_campaign_dry_run_with_seed_completes(tmp_path):
 
 
 def test_campaign_dry_run_seed_is_reproducible(tmp_path):
-    """Two CLI campaigns with the same --seed produce the same packet count."""
+    """Two CLI campaigns with the same --seed produce the same packet count.
+
+    With ``-n 30`` set, the campaign must run exactly 30 iterations. The
+    earlier failure mode was that dry-run unconditionally clamped duration
+    to 5s, so the loop exited on wall-clock instead of iteration count and
+    the count drifted run-to-run (9, 10, 12, …). Pinning the assertion to
+    exactly 30 guards against that regression resurfacing.
+    """
     runner = _runner(tmp_path)
 
     def _run(label: str) -> str:
@@ -70,6 +77,7 @@ def test_campaign_dry_run_seed_is_reproducible(tmp_path):
                 "-p", "sdp",
                 "-n", "30",
                 "--cooldown", "0",
+                "--delay", "0",
                 "--seed", "777",
             ],
             catch_exceptions=False,
@@ -77,15 +85,15 @@ def test_campaign_dry_run_seed_is_reproducible(tmp_path):
 
     a = _run("a")
     b = _run("b")
-    # The "Total Iterations" line in the dashboard is identical when the
-    # seed locks the strategy. The output may have minor wall-clock
-    # divergence, so we extract just the iteration count.
     def _iter_count(text: str) -> str:
         for line in text.splitlines():
             if "Total Iterations" in line:
                 return line.split()[-1]
         raise AssertionError(f"Total Iterations not found in:\n{text}")
-    assert _iter_count(a) == _iter_count(b)
+    count_a, count_b = _iter_count(a), _iter_count(b)
+    assert count_a == count_b == "30", (
+        f"Expected exactly 30 iterations under -n 30, got {count_a!r} and {count_b!r}"
+    )
 
 
 def test_campaign_resume_rejects_dry_run(tmp_path):

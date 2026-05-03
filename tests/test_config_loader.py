@@ -92,9 +92,20 @@ def test_load_config_parses_default_section(tmp_path: Path):
 
 
 def test_load_config_rejects_unknown_section(tmp_path: Path):
+    """Sections that don't match any subcommand fail at load time when the
+    CLI tree is available. Validation is single-source — no late surprises."""
     f = tmp_path / "bad.toml"
     f.write_text("[invalid_section]\nfoo = 'bar'\n")
     with pytest.raises(ConfigError, match="Unknown config section"):
+        load_config(str(f), cli_root=cli)
+
+
+def test_load_config_rejects_non_default_section_without_cli_root(tmp_path: Path):
+    """Without a CLI tree, non-default sections cannot be validated; reject loudly
+    rather than accept silently."""
+    f = tmp_path / "bad.toml"
+    f.write_text("[fuzz]\nseed = 'x'\n")
+    with pytest.raises(ConfigError, match="requires a CLI tree"):
         load_config(str(f))
 
 

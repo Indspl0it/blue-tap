@@ -16,6 +16,7 @@ The BDADDR offset (0xAD85) was found by diffing the DarkFirmware 1337 and
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shutil
@@ -24,6 +25,8 @@ import time
 
 from blue_tap.utils.bt_helpers import run_cmd
 from blue_tap.utils.output import error, info, success, warning
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -470,8 +473,8 @@ class DarkFirmwareManager:
                             status["hooks"][name] = bool(
                                 data and any(b != 0 for b in data)
                             )
-                except Exception:
-                    pass  # Non-fatal — hooks info is optional
+                except Exception as exc:
+                    logger.debug("hooks status read failed (non-fatal): %s", exc)
 
         return status
 
@@ -1874,8 +1877,8 @@ class DarkFirmwareWatchdog:
             if self.on_reinit:
                 try:
                     self.on_reinit(self.hci, event)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning("on_reinit callback raised (reinit still completed): %s", exc, exc_info=True)
         else:
             active = [k for k in ("hook1", "hook2", "hook3", "hook4") if result.get(k)]
             failed = [k for k in ("hook1", "hook2", "hook3", "hook4") if not result.get(k)]
@@ -1903,8 +1906,8 @@ class DarkFirmwareWatchdog:
             except OSError:
                 # HCI device may be temporarily unavailable during USB event
                 pass
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("health check cycle error: %s", exc)
 
     def _udev_monitor_loop(self) -> None:
         """Watch udevadm monitor for USB add/remove events on RTL8761B.
@@ -1949,8 +1952,8 @@ class DarkFirmwareWatchdog:
                             self._reinit_hooks("USB reconnect (udev add)")
                         elif "remove" in line_lower or "unbind" in line_lower:
                             warning(f"DarkFirmware watchdog: USB disconnect detected on {self.hci}")
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("udev monitor inner loop error: %s", exc)
             finally:
                 try:
                     proc.terminate()

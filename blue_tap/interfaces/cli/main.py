@@ -166,7 +166,7 @@ def cli(ctx, verbose, session_name, config_path, dry_run):
         load_config,
     )
     try:
-        user_cfg = load_config(config_path)
+        user_cfg = load_config(config_path, cli_root=cli)
     except ConfigError as cfg_exc:
         error(str(cfg_exc))
         sys.exit(2)
